@@ -37,6 +37,9 @@ pip install \
     matplotlib \
     scipy \
     psutil \
-    pillow
+    pillow \
+    torch \
+    pyproj 
+
 
 echo "Entorno configurado correctamente."
