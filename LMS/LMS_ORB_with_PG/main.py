@@ -67,7 +67,7 @@ class PoseGraphSLAM:
 
                 if essential_matrix is not None:
                     _, rotation, translation, _ = cv2.recoverPose(essential_matrix, points_prev, points_curr, self.camera_matrix)
-
+                    print(f"  ORB_PG translation: {translation.ravel()} | Magnitude: {np.linalg.norm(translation):.6f}")
                     relative_pose = np.eye(4)
                     relative_pose[:3, :3] = rotation
                     relative_pose[:3, 3] = translation.ravel()
