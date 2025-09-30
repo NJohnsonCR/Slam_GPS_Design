@@ -13,21 +13,80 @@ def obtener_tipos_lms():
         if os.path.isdir(os.path.join(CARPETA_LMS, nombre)) and nombre.startswith("LMS_")
     ] if os.path.exists(CARPETA_LMS) else []
 
-def seleccionar_video():
-    return filedialog.askopenfilename(
-        title="Seleccionar video .mp4",
-        filetypes=[("Archivos de video", "*.mp4")]
-    )
+def seleccionar_entrada(nombre_lms):
+    # Determinar si este LMS específico necesita directorio KITTI en lugar de video
+    necesita_kitti = "RL_ORB_GPS" in nombre_lms
+    print(necesita_kitti)
+    
+    if necesita_kitti:
+        # Seleccionar directorio KITTI
+        directorio = filedialog.askdirectory(
+            title="Seleccionar directorio con datos KITTI (ej: 2011_09_26_drive_0002_extract)"
+        )
+        if not directorio:
+            return None
+        
+        # Verificar estructura de directorio KITTI
+        # Buscar subdirectorios image_02/data y oxts/data
+        image_dirs = []
+        oxts_dirs = []
+        
+        # Buscar en el directorio seleccionado y un nivel arriba
+        possible_paths = [
+            directorio,
+            os.path.dirname(directorio)  # Un nivel arriba
+        ]
+        
+        for path in possible_paths:
+            for root, dirs, files in os.walk(path):
+                if "image_02" in dirs and "data" in os.listdir(os.path.join(root, "image_02")):
+                    image_dirs.append(os.path.join(root, "image_02", "data"))
+                if "oxts" in dirs and "data" in os.listdir(os.path.join(root, "oxts")):
+                    oxts_dirs.append(os.path.join(root, "oxts", "data"))
+        
+        if not image_dirs or not oxts_dirs:
+            messagebox.showerror("Error", 
+                "El directorio seleccionado no tiene la estructura KITTI esperada.\n"
+                "Se requieren las carpetas: image_02/data y oxts/data\n\n"
+                "Seleccione el directorio que contiene estas carpetas (ej: 2011_09_26_drive_0002_extract)")
+            return None
+        
+        # Verificar que hay archivos en las carpetas
+        image_files = [f for f in os.listdir(image_dirs[0]) if f.endswith(('.png', '.jpg', '.jpeg'))]
+        gps_files = [f for f in os.listdir(oxts_dirs[0]) if f.endswith('.txt')]
+        
+        if not image_files:
+            messagebox.showerror("Error", "No se encontraron imágenes en image_02/data")
+            return None
+            
+        if not gps_files:
+            messagebox.showerror("Error", "No se encontraron datos GPS en oxts/data")
+            return None
+            
+        # Devolver el directorio base que contiene ambas carpetas
+        base_dir = os.path.dirname(os.path.dirname(image_dirs[0]))
+        return base_dir
+    else:
+        # Seleccionar video como antes
+        return filedialog.askopenfilename(
+            title="Seleccionar video .mp4",
+            filetypes=[("Archivos de video", "*.mp4")]
+        )
 
 def ejecutar_lms(nombre_lms):
-    ruta_video = seleccionar_video()
-    if not ruta_video:
-        messagebox.showwarning("Selección cancelada", "No se seleccionó ningún video.")
+    entrada = seleccionar_entrada(nombre_lms)
+    if not entrada:
+        messagebox.showwarning("Selección cancelada", "No se seleccionó ninguna entrada.")
         return
 
-    messagebox.showinfo("LMS seleccionado", f"Ejecutando: {nombre_lms}\nCon video:\n{ruta_video}")
+    messagebox.showinfo("LMS seleccionado", f"Ejecutando: {nombre_lms}\nCon entrada:\n{entrada}")
     script_path = os.path.join(CARPETA_LMS, nombre_lms, "main.py")
-    comando = ["python3", script_path, ruta_video]
+    
+    # Determinar el tipo de entrada (directorio KITTI o archivo video)
+    if os.path.isdir(entrada):
+        comando = ["python3", script_path, entrada, "--kitti"]
+    else:
+        comando = ["python3", script_path, entrada]
 
     resultados = medir_metricas(comando, nombre_lms)
 
