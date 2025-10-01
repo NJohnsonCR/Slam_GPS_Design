@@ -11,8 +11,8 @@ import matplotlib.pyplot as plt
 # Agrega la carpeta LMS_ORB_with_PG al sys.path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'LMS_ORB_with_PG'))
 from LMS.LMS_ORB_with_PG.main import PoseGraphSLAM
-from LMS.LMS_RL_ORB_GPS.rl_agent import SimpleRLAgent
-from LMS.LMS_RL_ORB_GPS.gps_utils import latlon_to_utm
+from LMS.LMS_RL_ORB_GPS.model.rl_agent import *
+from LMS.LMS_RL_ORB_GPS.utils.gps_utils import *
 
 class RL_ORB_SLAM_GPS(PoseGraphSLAM):
     def __init__(self, fx=718.856, fy=718.856, cx=607.1928, cy=185.2157):
