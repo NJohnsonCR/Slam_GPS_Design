@@ -41,7 +41,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             self.previous_keyframe_image = gray
             self.previous_keyframe_keypoints = keypoints
             self.previous_keyframe_descriptors = descriptors
-            
+
             # INICIALIZAR CON GPS
             initial_pose = np.eye(4)
             if gps_utm is not None:
@@ -50,13 +50,13 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             else:
                 initial_pose[:3, 3] = np.zeros(3)
                 print("  ✓ Inicializado en origen (sin GPS)")
-            
+
             self.previous_keyframe_pose = initial_pose
             self.keyframe_poses.append(initial_pose)
-            
+
             if gps_utm is not None:
                 self.previous_gps_utm = gps_utm.copy()
-            
+
             print("  ✓ Primer frame inicializado")
             return None
 
@@ -67,102 +67,75 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             points_prev = np.float32([self.previous_keyframe_keypoints[m.queryIdx].pt for m in matches])
             points_curr = np.float32([keypoints[m.trainIdx].pt for m in matches])
 
-            E, mask = cv2.findEssentialMat(points_prev, points_curr, self.camera_matrix, method=cv2.RANSAC, prob=0.999, threshold=1.0)
-            
-            print(f"  E matrix shape: {E.shape if E is not None else 'None'}")
-            
+            E, mask = cv2.findEssentialMat(points_prev, points_curr, self.camera_matrix,
+                                        method=cv2.RANSAC, prob=0.999, threshold=1.0)
+
             if E is not None:
                 try:
                     points, R, t, mask = cv2.recoverPose(E, points_prev, points_curr, self.camera_matrix)
-                    
-                    print(f"  recoverPose success: t={t.ravel()} | Magnitude: {np.linalg.norm(t):.6f}")
-                    print(f"  R det: {np.linalg.det(R):.6f}")
-                    print(f"  inliers: {np.sum(mask) if mask is not None else 'N/A'}")
-                    
+                    print(f"  Vector t crudo: {t.ravel().round(3)} | Magnitud: {np.linalg.norm(t):.6f}")
+
+                    # === ALINEACIÓN DE DIRECCIÓN SLAM CON GPS ===
+                    if self.previous_gps_utm is not None and gps_utm is not None:
+                        movimiento_gps = gps_utm - self.previous_gps_utm
+                        movimiento_gps_2d = movimiento_gps[:2]
+
+                        if np.linalg.norm(movimiento_gps_2d) > 0.1 and np.linalg.norm(t[:2]) > 0.0001:
+                            direccion_slam = t[:2].ravel() / np.linalg.norm(t[:2])
+                            direccion_gps = movimiento_gps_2d / np.linalg.norm(movimiento_gps_2d)
+
+                            # Ángulo entre direcciones
+                            angle_slam = np.arctan2(direccion_slam[1], direccion_slam[0])
+                            angle_gps = np.arctan2(direccion_gps[1], direccion_gps[0])
+                            delta_angle = angle_gps - angle_slam
+
+                            # Rotación 2D sobre Z
+                            R_align = np.array([
+                                [np.cos(delta_angle), -np.sin(delta_angle), 0],
+                                [np.sin(delta_angle),  np.cos(delta_angle), 0],
+                                [0, 0, 1]
+                            ])
+
+                            t[:3] = R_align @ t[:3]
+                            print(f"Dirección SLAM alineada con GPS (delta_angle={np.degrees(delta_angle):.2f}°)")
+
+                    # === ESCALADO SEGÚN DISTANCIA GPS ===
+                    escala = 1.0
+                    if self.previous_gps_utm is not None and gps_utm is not None:
+                        distancia_real = np.linalg.norm(gps_utm - self.previous_gps_utm)
+                        distancia_slam = np.linalg.norm(t)
+                        if distancia_slam > 0.0001 and distancia_real > 0.01:
+                            escala = distancia_real / distancia_slam
+                            t[:3] *= escala
+                            print(f"  ✓ Escalado aplicado: {distancia_slam:.6f} → {distancia_real:.6f} m (escala={escala:.3f})")
+
                     relative_pose = np.eye(4)
                     relative_pose[:3, :3] = R
                     relative_pose[:3, 3] = t.ravel()
 
-                    # === CORRECCIÓN: ESCALADO DEL MOVIMIENTO RELATIVO ===
-                    escala = 1.0
-                    if self.previous_gps_utm is not None:
-                        # Calcular distancia REAL del movimiento (entre GPS actual y anterior)
-                        distancia_real = np.linalg.norm(gps_utm - self.previous_gps_utm)
-                        
-                        # Calcular distancia SLAM del movimiento relativo (NORM del vector t)
-                        distancia_slam = np.linalg.norm(relative_pose[:3, 3])
-                        
-                        print(f"  Debug RELATIVO: dist_slam={distancia_slam:.6f}, dist_real={distancia_real:.6f}")
-                        print(f"  Debug GPS: dist_real={distancia_real:.6f}, gps_diff={(gps_utm - self.previous_gps_utm)}")
-                        
-                        if distancia_slam > 0.0001 and distancia_real > 0.01:
-                            escala = distancia_real / distancia_slam
-                            # ESCALAR EL MOVIMIENTO RELATIVO, no la pose absoluta
-                            relative_pose[:3, 3] = relative_pose[:3, 3] * escala
-                            print(f"  ✓ ESCALADO RELATIVO: {distancia_slam:.6f} → {distancia_real:.6f} m (escala: {escala:.3f})")
-                        else:
-                            print(f"  ✗ Escalado omitido (condición no cumplida)")
-
-                    # Componer la pose normalmente después del escalado
+                    # COMPOSICIÓN DE POSE
                     current_pose = self.previous_keyframe_pose @ relative_pose
 
-                    # Transformación a coordenadas mundo (solo invertir signos)
-                    current_pose_world = np.eye(4)
-                    current_pose_world[0, 3] = current_pose[0, 3]   # SIN invertir X
-                    current_pose_world[1, 3] = current_pose[1, 3]   # SIN invertir Y  
-                    current_pose_world[2, 3] = current_pose[2, 3]    # Z igual
-                    current_pose_world[:3, :3] = current_pose[:3, :3]
-
-                    # DEBUG: Verificar la transformación
-                    print(f"   Transformación coordenadas:")
-                    print(f"     SLAM cámara: {current_pose[:3, 3].round(3)}")
-                    print(f"     SLAM mundo:  {current_pose_world[:3, 3].round(3)}")
-                    print(f"     GPS:         {gps_utm.round(3)}")
-
-                    # Usar la pose transformada
-                    current_pose = current_pose_world
-
-                    # Verificar dirección
-                    if self.previous_gps_utm is not None:
-                        gps_move = gps_utm - self.previous_gps_utm
-                        slam_move = current_pose[:3, 3] - self.previous_keyframe_pose[:3, 3]
-                        if np.linalg.norm(gps_move) > 0.1 and np.linalg.norm(slam_move) > 0.1:
-                            gps_dir = gps_move / np.linalg.norm(gps_move)
-                            slam_dir = slam_move / np.linalg.norm(slam_move)
-                            dot_product = np.dot(gps_dir[:2], slam_dir[:2])
-                            print(f"  Dirección - GPS: {gps_dir[:2].round(3)}, SLAM: {slam_dir[:2].round(3)}, Producto: {dot_product:.3f}")
-
-                    # FUSIÓN CON RL (mantener por ahora)
+                    # FUSIÓN CON RL
                     visual_confidence = min(len(matches) / 50.0, 1.0)
-                    error = np.linalg.norm(current_pose[:3, 3] - gps_utm)
-
-                    # ✅ PRINT: VERIFICAR POSE vs GPS
-                    print(f"  SLAM pose: {current_pose[:3,3].round(3)} | GPS: {gps_utm.round(3)} | Error: {error:.3f} m")
-
-                    # RL temporal (pesos aleatorios por ahora)
+                    error = np.linalg.norm(current_pose[:3, 3] - gps_utm) if gps_utm is not None else 0.0
                     state = torch.tensor([visual_confidence, gps_confidence, error], dtype=torch.float32)
                     weights = self.agent(state).detach()
 
-                    print(f"  RL weights: SLAM={weights[0]:.2f}, GPS={weights[1]:.2f}")
-                    
-                    # COMBINAR SLAM Y GPS SEGÚN PESOS DEL RL
-                    fused_position = weights[0] * current_pose[:3, 3] + weights[1] * gps_utm
+                    fused_position = current_pose[:3, 3]
+                    if gps_utm is not None:
+                        fused_position = weights[0] * current_pose[:3, 3] + weights[1] * gps_utm
+
                     fused_pose = np.eye(4)
-                    fused_pose[:3, 3] = fused_position.numpy()
+                    fused_pose[:3, 3] = fused_position.numpy() if isinstance(fused_position, torch.Tensor) else fused_position
                     fused_pose[:3, :3] = current_pose[:3, :3]
 
-                    # Guardar historial para análisis
+                    # Actualizar keyframe y historial
                     self.slam_history.append(current_pose[:3, 3].copy())
-                    self.gps_history.append(gps_utm.copy())
+                    if gps_utm is not None:
+                        self.gps_history.append(gps_utm.copy())
 
-                    # ACTUALIZAR KEYFRAME SI HAY MOVIMIENTO SIGNIFICATIVO
                     translation_magnitude = np.linalg.norm(relative_pose[:3, 3])
-
-                    self.total_successful_frames += 1
-                    self.total_tracked_matches += len(matches)
-                    self.total_translation_magnitude += translation_magnitude
-                    self.total_pose_estimations += 1
-
                     if translation_magnitude > 0.1:
                         self.keyframe_poses.append(fused_pose)
                         self.relative_transformations.append(relative_pose)
@@ -170,25 +143,28 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                         self.previous_keyframe_keypoints = keypoints
                         self.previous_keyframe_descriptors = descriptors
                         self.previous_keyframe_pose = fused_pose
-                        print(f"  ✓ Nuevo keyframe (movimiento: {translation_magnitude:.3f} m)")
+                        print(f"Nuevo keyframe (movimiento={translation_magnitude:.3f} m)")
                     else:
-                        print(f"  ✓ Pose estimada, pero no keyframe (movimiento pequeño)")
+                        print(f"Pose estimada, pero no keyframe (movimiento pequeño)")
 
-                    # GUARDAR GPS PARA PRÓXIMO FRAME
-                    self.previous_gps_utm = gps_utm.copy()
-                    self.gps_available = True
-                    
+                    # Guardar GPS para próximo frame
+                    if gps_utm is not None:
+                        self.previous_gps_utm = gps_utm.copy()
+                        self.gps_available = True
+
                     return fused_pose
-                    
+
                 except Exception as e:
-                    print(f"  ✗ Error en recoverPose: {e}")
+                    print(f"Error en recoverPose: {e}")
                     return None
             else:
-                print("  ✗ No se pudo calcular matriz esencial")
+                print("No se pudo calcular matriz esencial")
                 return None
 
-        print(f"  ✗ No suficientes matches o no se pudo calcular pose")
+        print(f"No suficientes matches o no se pudo calcular pose")
         return None
+
+
         
     def process_video_input(self, video_path):
         video_capture = cv2.VideoCapture(video_path)
@@ -253,7 +229,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             # Usar los keyframes originales en lugar de la trayectoria optimizada
             if hasattr(self, 'keyframe_poses') and len(self.keyframe_poses) > 0:
                 keyframe_positions = np.array([pose[:3, 3] for pose in self.keyframe_poses])
-                print(f"✓ Keyframes sin optimizar: {len(keyframe_positions)} poses")
+                print(f"Keyframes sin optimizar: {len(keyframe_positions)} poses")
                 
                 # Calcular estadísticas con keyframes REALES
                 x_key, y_key = keyframe_positions[:, 0], keyframe_positions[:, 1]
@@ -267,11 +243,11 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                     pos2 = keyframe_positions[i][:2]    # X, Y
                     real_total_distance += np.linalg.norm(pos2 - pos1)
             else:
-                print("✗ No hay keyframes disponibles")
+                print("No hay keyframes disponibles")
                 return
                 
         except Exception as e:
-            print(f"✗ Error al extraer keyframes: {e}")
+            print(f"Error al extraer keyframes: {e}")
             return
 
         # Calcular estadísticas REALES (sin optimización)
@@ -328,7 +304,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                 plt.plot(x_opt, y_opt, 'm--', label='Trayectoria "Optimizada"', 
                         linewidth=1, zorder=1, alpha=0.5)
         except:
-            print("⚠ No se pudo graficar trayectoria optimizada (probablemente colapsada)")
+            print("No se pudo graficar trayectoria optimizada (probablemente colapsada)")
 
         # Puntos de referencia y anotaciones
         plt.scatter(x_key[0], y_key[0], color='green', s=250, label='Inicio', zorder=6)
@@ -390,9 +366,9 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         plt.savefig(output_base + "_keyframes_only.png", dpi=300, bbox_inches='tight')
         plt.close()
 
-        print(f"✓ Gráficos REALES guardados en: {output_dir}")
-        print(f"✓ La trayectoria REAL tiene {len(x_key)} puntos")
-        print(f"✓ Distancia total REAL: {real_total_distance:.2f} m")
+        print(f"Gráficos REALES guardados en: {output_dir}")
+        print(f"La trayectoria REAL tiene {len(x_key)} puntos")
+        print(f"Distancia total REAL: {real_total_distance:.2f} m")
 
     # Añade este método para diagnosticar el problema de optimización
     def optimize_pose_graph(self):
@@ -400,7 +376,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         print("\n=== INICIANDO OPTIMIZACIÓN ===")
         
         if not hasattr(self, 'keyframe_poses') or len(self.keyframe_poses) < 2:
-            print("⚠ No hay suficientes keyframes para optimizar")
+            print("No hay suficientes keyframes para optimizar")
             return self.keyframe_poses if hasattr(self, 'keyframe_poses') else []
         
         # Mostrar estadísticas antes de optimizar
@@ -412,7 +388,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         # Llamar a la optimización original del padre
         try:
             optimized_trajectory = super().optimize_pose_graph()
-            print("✓ Optimización completada")
+            print("Optimización completada")
             
             # Mostrar estadísticas después de optimizar
             if optimized_trajectory and len(optimized_trajectory) > 0:
@@ -423,15 +399,15 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                 
                 # Verificar si la optimización colapsó
                 if np.max(opt_variance) < 0.001:  # Varianza muy pequeña
-                    print("⚠ ¡ADVERTENCIA! La optimización puede haber colapsado las poses")
-                    print("⚠ Usando keyframes originales en lugar de optimizados")
+                    print("¡ADVERTENCIA! La optimización puede haber colapsado las poses")
+                    print("Usando keyframes originales en lugar de optimizados")
                     return self.keyframe_poses
                 
                 return optimized_trajectory
                 
         except Exception as e:
-            print(f"✗ Error en optimización: {e}")
-            print("⚠ Usando keyframes originales")
+            print(f"Error en optimización: {e}")
+            print("Usando keyframes originales")
             return self.keyframe_poses
         
         return self.keyframe_poses
@@ -511,12 +487,12 @@ def load_kitti_sequence(sequence_path, max_frames=None):
             gps_dir = os.path.join(root, "oxts", "data")
     
     if not image_dir or not gps_dir:
-        print(f"✗ Estructura de directorio KITTI no encontrada en: {sequence_path}")
-        print("  Buscando carpetas: image_02/data y oxts/data")
+        print(f"Estructura de directorio KITTI no encontrada en: {sequence_path}")
+        print("Buscando carpetas: image_02/data y oxts/data")
         return frames, gps_data
     
-    print(f"✓ Directorio de imágenes: {image_dir}")
-    print(f"✓ Directorio de GPS: {gps_dir}")
+    print(f"Directorio de imágenes: {image_dir}")
+    print(f"Directorio de GPS: {gps_dir}")
     
     image_files = sorted([f for f in os.listdir(image_dir) if f.endswith(('.png', '.jpg', '.jpeg'))])
     gps_files = sorted([f for f in os.listdir(gps_dir) if f.endswith('.txt')])
@@ -528,7 +504,7 @@ def load_kitti_sequence(sequence_path, max_frames=None):
     
     min_files = min(len(image_files), len(gps_files))
     if min_files == 0:
-        print("✗ No se encontraron archivos coincidentes")
+        print("No se encontraron archivos coincidentes")
         return frames, gps_data
     
     print(f"✓ Encontrados {min_files} pares de archivos (imágenes + GPS)")
@@ -542,7 +518,7 @@ def load_kitti_sequence(sequence_path, max_frames=None):
         
         frame = cv2.imread(frame_path)
         if frame is None:
-            print(f"✗ Error cargando frame: {frame_path}")
+            print(f"Error cargando frame: {frame_path}")
             continue
         
         frames.append(frame)
@@ -551,11 +527,11 @@ def load_kitti_sequence(sequence_path, max_frames=None):
             gps_point = np.loadtxt(gps_path)
             gps_data.append(gps_point)
         except Exception as e:
-            print(f"✗ Error cargando GPS {gps_path}: {e}")
+            print(f"Error cargando GPS {gps_path}: {e}")
             gps_data.append(None)
     
-    print(f"✓ Frames cargados: {len(frames)}")
-    print(f"✓ Datos GPS cargados: {len([g for g in gps_data if g is not None])}")
+    print(f"Frames cargados: {len(frames)}")
+    print(f"Datos GPS cargados: {len([g for g in gps_data if g is not None])}")
     return frames, gps_data
 
 if __name__ == "__main__":
