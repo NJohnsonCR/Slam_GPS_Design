@@ -46,10 +46,10 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             initial_pose = np.eye(4)
             if gps_utm is not None:
                 initial_pose[:3, 3] = gps_utm
-                print(f"  ✓ Inicializado con GPS: {gps_utm.round(3)}")
+                print(f"Inicializado con GPS: {gps_utm.round(3)}")
             else:
                 initial_pose[:3, 3] = np.zeros(3)
-                print("  ✓ Inicializado en origen (sin GPS)")
+                print("Inicializado en origen (sin GPS)")
 
             self.previous_keyframe_pose = initial_pose
             self.keyframe_poses.append(initial_pose)
@@ -57,7 +57,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             if gps_utm is not None:
                 self.previous_gps_utm = gps_utm.copy()
 
-            print("  ✓ Primer frame inicializado")
+            print("Primer frame inicializado")
             return None
 
         matches = self.filter_matches_lowe_ratio(self.previous_keyframe_descriptors, descriptors)
@@ -98,6 +98,8 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
 
                             t[:3] = R_align @ t[:3]
                             print(f"Dirección SLAM alineada con GPS (delta_angle={np.degrees(delta_angle):.2f}°)")
+                            print(f"  Vector t corregido: {t.ravel().round(3)} | Magnitud: {np.linalg.norm(t):.6f}")
+
 
                     # === ESCALADO SEGÚN DISTANCIA GPS ===
                     escala = 1.0
