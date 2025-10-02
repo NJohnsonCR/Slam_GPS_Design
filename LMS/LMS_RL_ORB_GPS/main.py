@@ -31,14 +31,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             self.utm_reference = utm_coord
         return utm_coord - self.utm_reference
     
-    def process_frame(self, frame, gps_data=None):
-        if gps_data is None:
-            return super().process_frame(frame)
-        
-        gps_utm = self.process_kitti_gps(gps_data)
-        return self.process_frame_with_gps(frame, gps_utm)
-    
-    def process_frame_with_gps(self, frame, gps_utm, gps_confidence=0.9):
+    def process_frame_with_gps(self, frame, gps_utm, gps_confidence=0.2):
         minimumMatches = 15
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         keypoints, descriptors = self.orb_detector.detectAndCompute(gray, None)
@@ -48,19 +41,23 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             self.previous_keyframe_image = gray
             self.previous_keyframe_keypoints = keypoints
             self.previous_keyframe_descriptors = descriptors
-            self.previous_keyframe_pose = np.eye(4)
-            self.keyframe_poses.append(np.eye(4))
-            print("  ✓ Primer frame inicializado")
             
-            # Inicializar con GPS si está disponible
+            # INICIALIZAR CON GPS
+            initial_pose = np.eye(4)
             if gps_utm is not None:
-                initial_pose = np.eye(4)
                 initial_pose[:3, 3] = gps_utm
-                self.previous_keyframe_pose = initial_pose
-                self.keyframe_poses[-1] = initial_pose
+                print(f"  ✓ Inicializado con GPS: {gps_utm.round(3)}")
+            else:
+                initial_pose[:3, 3] = np.zeros(3)
+                print("  ✓ Inicializado en origen (sin GPS)")
+            
+            self.previous_keyframe_pose = initial_pose
+            self.keyframe_poses.append(initial_pose)
+            
+            if gps_utm is not None:
                 self.previous_gps_utm = gps_utm.copy()
-                print("  ✓ Inicializado con posición GPS")
-                
+            
+            print("  ✓ Primer frame inicializado")
             return None
 
         matches = self.filter_matches_lowe_ratio(self.previous_keyframe_descriptors, descriptors)
@@ -86,36 +83,66 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                     relative_pose[:3, :3] = R
                     relative_pose[:3, 3] = t.ravel()
 
-                    # ESCALADO CON GPS
+                    # === CORRECCIÓN: ESCALADO DEL MOVIMIENTO RELATIVO ===
                     escala = 1.0
                     if self.previous_gps_utm is not None:
+                        # Calcular distancia REAL del movimiento (entre GPS actual y anterior)
                         distancia_real = np.linalg.norm(gps_utm - self.previous_gps_utm)
+                        
+                        # Calcular distancia SLAM del movimiento relativo (NORM del vector t)
                         distancia_slam = np.linalg.norm(relative_pose[:3, 3])
-                
-                        print(f"  Debug: dist_slam={distancia_slam:.6f}, dist_real={distancia_real:.6f}")
+                        
+                        print(f"  Debug RELATIVO: dist_slam={distancia_slam:.6f}, dist_real={distancia_real:.6f}")
                         print(f"  Debug GPS: dist_real={distancia_real:.6f}, gps_diff={(gps_utm - self.previous_gps_utm)}")
                         
                         if distancia_slam > 0.0001 and distancia_real > 0.01:
                             escala = distancia_real / distancia_slam
+                            # ESCALAR EL MOVIMIENTO RELATIVO, no la pose absoluta
                             relative_pose[:3, 3] = relative_pose[:3, 3] * escala
-                            print(f"  ✓ ESCALADO APLICADO: {distancia_slam:.6f} → {distancia_real:.6f} m")
+                            print(f"  ✓ ESCALADO RELATIVO: {distancia_slam:.6f} → {distancia_real:.6f} m (escala: {escala:.3f})")
                         else:
                             print(f"  ✗ Escalado omitido (condición no cumplida)")
-                    
+
+                    # Componer la pose normalmente después del escalado
                     current_pose = self.previous_keyframe_pose @ relative_pose
 
-                    # FUSIÓN CON RL
+                    # Transformación a coordenadas mundo (solo invertir signos)
+                    current_pose_world = np.eye(4)
+                    current_pose_world[0, 3] = current_pose[0, 3]   # SIN invertir X
+                    current_pose_world[1, 3] = current_pose[1, 3]   # SIN invertir Y  
+                    current_pose_world[2, 3] = current_pose[2, 3]    # Z igual
+                    current_pose_world[:3, :3] = current_pose[:3, :3]
+
+                    # DEBUG: Verificar la transformación
+                    print(f"   Transformación coordenadas:")
+                    print(f"     SLAM cámara: {current_pose[:3, 3].round(3)}")
+                    print(f"     SLAM mundo:  {current_pose_world[:3, 3].round(3)}")
+                    print(f"     GPS:         {gps_utm.round(3)}")
+
+                    # Usar la pose transformada
+                    current_pose = current_pose_world
+
+                    # Verificar dirección
+                    if self.previous_gps_utm is not None:
+                        gps_move = gps_utm - self.previous_gps_utm
+                        slam_move = current_pose[:3, 3] - self.previous_keyframe_pose[:3, 3]
+                        if np.linalg.norm(gps_move) > 0.1 and np.linalg.norm(slam_move) > 0.1:
+                            gps_dir = gps_move / np.linalg.norm(gps_move)
+                            slam_dir = slam_move / np.linalg.norm(slam_move)
+                            dot_product = np.dot(gps_dir[:2], slam_dir[:2])
+                            print(f"  Dirección - GPS: {gps_dir[:2].round(3)}, SLAM: {slam_dir[:2].round(3)}, Producto: {dot_product:.3f}")
+
+                    # FUSIÓN CON RL (mantener por ahora)
                     visual_confidence = min(len(matches) / 50.0, 1.0)
                     error = np.linalg.norm(current_pose[:3, 3] - gps_utm)
 
-                    # ✅ PRINT 2: VERIFICAR POSE vs GPS (antes de RL)
+                    # ✅ PRINT: VERIFICAR POSE vs GPS
                     print(f"  SLAM pose: {current_pose[:3,3].round(3)} | GPS: {gps_utm.round(3)} | Error: {error:.3f} m")
 
-                    # vector estado para funcion RL: [confianza_visual, confianza_gps, error_entre_poses]
+                    # RL temporal (pesos aleatorios por ahora)
                     state = torch.tensor([visual_confidence, gps_confidence, error], dtype=torch.float32)
                     weights = self.agent(state).detach()
 
-                    # ✅ PRINT 3: VERIFICAR PESOS RL (después de decisión)
                     print(f"  RL weights: SLAM={weights[0]:.2f}, GPS={weights[1]:.2f}")
                     
                     # COMBINAR SLAM Y GPS SEGÚN PESOS DEL RL
@@ -162,7 +189,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
 
         print(f"  ✗ No suficientes matches o no se pudo calcular pose")
         return None
-    
+        
     def process_video_input(self, video_path):
         video_capture = cv2.VideoCapture(video_path)
         
@@ -189,7 +216,14 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                 continue
                 
             try:
-                self.process_frame(frames[i], gps_data[i])
+                # Procesar datos GPS a UTM
+                gps_utm = None
+                if gps_data[i] is not None:
+                    gps_utm = self.process_kitti_gps(gps_data[i])
+                    print(f"  GPS UTM: {gps_utm.round(3)}")
+                
+                # Usar el método correcto que acepta GPS
+                self.process_frame_with_gps(frames[i], gps_utm, gps_confidence=0.9)
                     
             except Exception as e:
                 print(f"  ✗ Error en frame {i}: {e}")
@@ -460,7 +494,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         plt.tight_layout()
         
         plt.savefig(output_base + "_comparative.png", dpi=300, bbox_inches='tight')
-    plt.close()
+        plt.close()
 
 
 def load_kitti_sequence(sequence_path, max_frames=None):
@@ -486,6 +520,7 @@ def load_kitti_sequence(sequence_path, max_frames=None):
     
     image_files = sorted([f for f in os.listdir(image_dir) if f.endswith(('.png', '.jpg', '.jpeg'))])
     gps_files = sorted([f for f in os.listdir(gps_dir) if f.endswith('.txt')])
+
     
     if max_frames:
         image_files = image_files[:max_frames]
