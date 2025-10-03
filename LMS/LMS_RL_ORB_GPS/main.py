@@ -95,8 +95,11 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                                 [np.sin(delta_angle),  np.cos(delta_angle), 0],
                                 [0, 0, 1]
                             ])
-
+                            #print("Antes rotación:", t.ravel(), "\nR:\n", R)
                             t[:3] = R_align @ t[:3]
+                            R = R_align @ R
+                            #print("Después rotación:", t.ravel(), "\nR:\n", R)
+
                             print(f"Dirección SLAM alineada con GPS (delta_angle={np.degrees(delta_angle):.2f}°)")
                             print(f"  Vector t corregido: {t.ravel().round(3)} | Magnitud: {np.linalg.norm(t):.6f}")
 
