@@ -13,6 +13,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'LMS_ORB_with_PG')
 from LMS.LMS_ORB_with_PG.main import PoseGraphSLAM
 from LMS.LMS_RL_ORB_GPS.model.rl_agent import *
 from LMS.LMS_RL_ORB_GPS.utils.gps_utils import *
+from LMS.LMS_RL_ORB_GPS.utils.gps_filter import *
 
 class RL_ORB_SLAM_GPS(PoseGraphSLAM):
     def __init__(self, fx=718.856, fy=718.856, cx=607.1928, cy=185.2157):
@@ -24,14 +25,17 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         self.gps_history = []  # Para almacenar historial de posiciones GPS
         self.slam_history = []  # Para almacenar historial de posiciones SLAM
 
-    def process_kitti_gps(self, oxts_data):
-        lat, lon, alt = oxts_data[0], oxts_data[1], oxts_data[2]
+        self.gps_filter = GPSFilter(window_size=5, movement_variance_threshold=0.1)
+
+
+    def gps_frame_reference(self, gps_frame_value):
+        lat, lon, alt = gps_frame_value[0], gps_frame_value[1], gps_frame_value[2]
         utm_coord = latlon_to_utm(lat, lon, alt)
         if self.utm_reference is None:
             self.utm_reference = utm_coord
         return utm_coord - self.utm_reference
     
-    def process_frame_with_gps(self, frame, gps_utm, gps_confidence=0.2):
+    def process_frame_with_gps(self, frame, gps_utm, gps_confidence):
         minimumMatches = 15
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         keypoints, descriptors = self.orb_detector.detectAndCompute(gray, None)
@@ -199,12 +203,19 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             try:
                 # Procesar datos GPS a UTM
                 gps_utm = None
+                gps_confidence = 0.1
+
                 if gps_data[i] is not None:
-                    gps_utm = self.process_kitti_gps(gps_data[i])
+                    gps_utm = self.gps_frame_reference(gps_data[i])
                     print(f"  GPS UTM: {gps_utm.round(3)}")
+
+                    self.gps_filter.add_measurement(gps_utm)
+                    gps_confidence = self.gps_filter.calculate_confidence()
+
+                    self.gps_filter.print_debug_info()
                 
                 # Usar el método correcto que acepta GPS
-                self.process_frame_with_gps(frames[i], gps_utm, gps_confidence=0.9)
+                self.process_frame_with_gps(frames[i], gps_utm, gps_confidence)
                     
             except Exception as e:
                 print(f"  ✗ Error en frame {i}: {e}")
