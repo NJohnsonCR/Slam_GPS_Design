@@ -19,13 +19,12 @@ class GPSFilter:
         self.raw_positions = []
     
     def add_measurement(self, utm_position):
-        """Añade una nueva medición GPS al buffer"""
         self.raw_positions.append(utm_position.copy())
         self.position_buffer.append(utm_position.copy())
         
     
     def calculate_confidence(self):
-        """Calcula confianza basada en CONSISTENCIA DE MOVIMIENTOS"""
+
         if len(self.position_buffer) < 2:
             return 0.5  # Confianza base con pocos datos
             
