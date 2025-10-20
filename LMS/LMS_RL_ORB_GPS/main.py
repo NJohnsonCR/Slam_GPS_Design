@@ -11,22 +11,57 @@ import matplotlib.pyplot as plt
 # Agrega la carpeta LMS_ORB_with_PG al sys.path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'LMS_ORB_with_PG'))
 from LMS.LMS_ORB_with_PG.main import PoseGraphSLAM
-from LMS.LMS_RL_ORB_GPS.model.rl_agent import *
+from LMS.LMS_RL_ORB_GPS.model.rl_agent import SimpleRLAgent, RLTrainer
 from LMS.LMS_RL_ORB_GPS.utils.gps_utils import *
 from LMS.LMS_RL_ORB_GPS.utils.gps_filter import *
 
 class RL_ORB_SLAM_GPS(PoseGraphSLAM):
-    def __init__(self, fx=718.856, fy=718.856, cx=607.1928, cy=185.2157):
+    def __init__(self, fx=718.856, fy=718.856, cx=607.1928, cy=185.2157, 
+                 training_mode=False, model_path=None, simulate_mobile_gps=False, gps_noise_std=5.0):
+        """
+        Args:
+            simulate_mobile_gps: Si True, agrega ruido al GPS para simular GPS móvil
+            gps_noise_std: Desviación estándar del ruido GPS en metros (default: 5.0m)
+        """
         super().__init__(fx, fy, cx, cy)
         self.agent = SimpleRLAgent()
+        self.trainer = RLTrainer(self.agent)
+        self.training_mode = training_mode
+        self.simulate_mobile_gps = simulate_mobile_gps
+        
+        # Intentar cargar modelo pre-entrenado
+        if model_path and os.path.exists(model_path):
+            self.trainer.load_model(model_path)
+        elif not training_mode:
+            # Buscar modelo por defecto
+            default_model = "LMS/LMS_RL_ORB_GPS/model/trained_rl_agent.pth"
+            if os.path.exists(default_model):
+                print(f"Cargando modelo pre-entrenado: {default_model}")
+                self.trainer.load_model(default_model)
+            else:
+                print("ADVERTENCIA: No se encontró modelo pre-entrenado. Usando pesos aleatorios.")
+        
         self.utm_reference = None
         self.previous_gps_utm = None
         self.gps_available = False
         self.gps_history = []  # Para almacenar historial de posiciones GPS
         self.slam_history = []  # Para almacenar historial de posiciones SLAM
+        
+        # Para entrenamiento
+        self.current_state = None
+        self.frame_count = 0
+        self.training_step_interval = 10  # Entrenar cada N frames
 
-        self.gps_filter = GPSFilter(window_size=5, movement_variance_threshold=0.1)
-
+        # GPS Filter con soporte para ruido simulado
+        self.gps_filter = GPSFilter(
+            window_size=5, 
+            movement_variance_threshold=0.1,
+            add_noise=simulate_mobile_gps,
+            noise_std=gps_noise_std
+        )
+        
+        if simulate_mobile_gps:
+            print(f"ADVERTENCIA: MODO GPS MÓVIL SIMULADO: Agregando ruido gaussiano (sigma={gps_noise_std}m)")
 
     def gps_frame_reference(self, gps_frame_value):
         lat, lon, alt = gps_frame_value[0], gps_frame_value[1], gps_frame_value[2]
@@ -34,6 +69,59 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         if self.utm_reference is None:
             self.utm_reference = utm_coord
         return utm_coord - self.utm_reference
+    
+    def calculate_base_weights(self, gps_conf, visual_conf, error):
+        """
+        Calcula pesos base usando reglas heurísticas SUAVES (no categóricas).
+        Genera valores continuos en vez de saltos discretos, permitiendo al RL mayor libertad.
+        
+        Args:
+            gps_conf: Confianza del GPS [0, 1]
+            visual_conf: Confianza del SLAM visual [0, 1]
+            error: Error entre SLAM y GPS en metros
+        
+        Returns:
+            (w_slam_base, w_gps_base): Tupla con pesos base continuos
+        """
+        # === SISTEMA DE PESOS SUAVES (no categóricos) ===
+        
+        # Factor 1: Confianza GPS base (0-1)
+        gps_weight_from_conf = gps_conf
+        
+        # Factor 2: Confianza SLAM base (0-1)
+        slam_weight_from_conf = visual_conf
+        
+        # Factor 3: Penalización GRADUAL por error alto
+        error_penalty_gps = 0.0
+        if error > 5.0:
+            error_penalty_gps = 0.3  # Reduce GPS significativamente si error es muy alto
+        elif error > 2.0:
+            # Penalización gradual entre 2m y 5m
+            error_penalty_gps = 0.1 * ((error - 2.0) / 3.0)
+        
+        # Factor 4: Bonificación GRADUAL por error bajo (GPS alineado con SLAM)
+        error_bonus_gps = 0.0
+        if error < 1.0 and gps_conf > 0.6:
+            error_bonus_gps = 0.2  # Bonifica GPS si está muy alineado
+        elif error < 2.0 and gps_conf > 0.6:
+            # Bonificación gradual entre 1m y 2m
+            error_bonus_gps = 0.1 * (2.0 - error)
+        
+        # === COMBINACIÓN DE FACTORES ===
+        w_gps_base = gps_weight_from_conf - error_penalty_gps + error_bonus_gps
+        w_slam_base = slam_weight_from_conf
+        
+        # Normalizar para que estén en rango [0.2, 0.8] (dejar margen para RL)
+        total = w_slam_base + w_gps_base + 1e-6
+        w_slam_base = np.clip(w_slam_base / total, 0.2, 0.8)
+        w_gps_base = np.clip(w_gps_base / total, 0.2, 0.8)
+        
+        # Re-normalizar para que sumen exactamente 1.0
+        total = w_slam_base + w_gps_base
+        w_slam_base /= total
+        w_gps_base /= total
+        
+        return w_slam_base, w_gps_base
     
     def process_frame_with_gps(self, frame, gps_utm, gps_confidence):
         minimumMatches = 15
@@ -99,10 +187,8 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                                 [np.sin(delta_angle),  np.cos(delta_angle), 0],
                                 [0, 0, 1]
                             ])
-                            #print("Antes rotación:", t.ravel(), "\nR:\n", R)
                             t[:3] = R_align @ t[:3]
                             R = R_align @ R
-                            #print("Después rotación:", t.ravel(), "\nR:\n", R)
 
                             print(f"Dirección SLAM alineada con GPS (delta_angle={np.degrees(delta_angle):.2f}°)")
                             print(f"  Vector t corregido: {t.ravel().round(3)} | Magnitud: {np.linalg.norm(t):.6f}")
@@ -116,7 +202,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                         if distancia_slam > 0.0001 and distancia_real > 0.01:
                             escala = distancia_real / distancia_slam
                             t[:3] *= escala
-                            print(f"  ✓ Escalado aplicado: {distancia_slam:.6f} → {distancia_real:.6f} m (escala={escala:.3f})")
+                            print(f"  OK - Escalado aplicado: {distancia_slam:.6f} → {distancia_real:.6f} m (escala={escala:.3f})")
 
                     relative_pose = np.eye(4)
                     relative_pose[:3, :3] = R
@@ -125,18 +211,73 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                     # COMPOSICIÓN DE POSE
                     current_pose = self.previous_keyframe_pose @ relative_pose
 
-                    # FUSIÓN CON RL
+                    # === FUSIÓN HÍBRIDA: REGLAS + RL ===
                     visual_confidence = min(len(matches) / 50.0, 1.0)
                     error = np.linalg.norm(current_pose[:3, 3] - gps_utm) if gps_utm is not None else 0.0
-                    state = torch.tensor([visual_confidence, gps_confidence, error], dtype=torch.float32)
-                    weights = self.agent(state).detach()
-
+                    
+                    # Calcular posición fusionada
                     fused_position = current_pose[:3, 3]
                     if gps_utm is not None:
-                        fused_position = weights[0] * current_pose[:3, 3] + weights[1] * gps_utm
+                        # 1. CALCULAR PESOS BASE CON REGLAS HEURÍSTICAS
+                        w_slam_base, w_gps_base = self.calculate_base_weights(gps_confidence, visual_confidence, error)
+                        
+                        # 2. USAR RL PARA AJUSTE FINO (±25% alrededor de pesos base - AUMENTADO)
+                        state = torch.tensor([visual_confidence, gps_confidence, error], dtype=torch.float32)
+                        
+                        with torch.no_grad():
+                            rl_weights = self.agent(state)
+                            
+                            # Convertir salida RL a ajuste fino [-0.25, +0.25] (AUMENTADO de ±0.15)
+                            rl_adjustment_slam = (rl_weights[0].item() - 0.5) * 0.5  # De [0,1] a [-0.25, +0.25]
+                            rl_adjustment_gps = (rl_weights[1].item() - 0.5) * 0.5
+                        
+                        # 3. APLICAR AJUSTE RL A PESOS BASE
+                        w_slam_final = np.clip(w_slam_base + rl_adjustment_slam, 0.05, 0.95)
+                        w_gps_final = np.clip(w_gps_base + rl_adjustment_gps, 0.05, 0.95)
+                        
+                        # 4. NORMALIZAR (para que sumen 1.0)
+                        total = w_slam_final + w_gps_final
+                        w_slam_final /= total
+                        w_gps_final /= total
+                        
+                        # 5. CALCULAR POSICIÓN FUSIONADA
+                        fused_position = w_slam_final * current_pose[:3, 3] + w_gps_final * gps_utm
+                        
+                        # === IMPRIMIR INFORMACIÓN DETALLADA ===
+                        print(f"  [HYBRID] Base: SLAM={w_slam_base:.3f}, GPS={w_gps_base:.3f}")
+                        print(f"  [RL ADJ] Δ_SLAM={rl_adjustment_slam:+.3f}, Δ_GPS={rl_adjustment_gps:+.3f}")
+                        print(f"  [FINAL]  SLAM={w_slam_final:.3f}, GPS={w_gps_final:.3f}, "
+                              f"GPS_Conf={gps_confidence:.3f}, Error={error:.3f}m")
+                        
+                        # === ENTRENAMIENTO RL (si está activo) ===
+                        if self.training_mode:
+                            # El RL aprende a ajustar finamente alrededor de las reglas
+                            weights_trainable = self.agent(state)
+                            
+                            # Reward modificado: premiar ajustes correctos alrededor de pesos base
+                            reward = self.trainer.calculate_reward(
+                                state=state,
+                                action_weights=weights_trainable,
+                                slam_position=current_pose[:3, 3],
+                                gps_position=gps_utm,
+                                ground_truth=None
+                            )
+                            
+                            # Almacenar experiencia
+                            self.trainer.store_experience(state, weights_trainable.detach(), reward, None, done=False)
+                            
+                            # Entrenar periódicamente
+                            self.frame_count += 1
+                            if self.frame_count % self.training_step_interval == 0:
+                                train_result = self.trainer.train_step(batch_size=32)
+                                if train_result:
+                                    print(f"  [TRAINING] Loss: {train_result['loss']:.4f}, "
+                                          f"Avg Reward: {train_result['avg_reward']:.4f}")
+                            
+                            print(f"  [RL TRAINING] Reward={reward:.3f}")
 
                     fused_pose = np.eye(4)
-                    fused_pose[:3, 3] = fused_position.numpy() if isinstance(fused_position, torch.Tensor) else fused_position
+                    fused_pose[:3, 3] = fused_position
                     fused_pose[:3, :3] = current_pose[:3, :3]
 
                     # Actualizar keyframe y historial
@@ -173,8 +314,6 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         print(f"No suficientes matches o no se pudo calcular pose")
         return None
 
-
-        
     def process_video_input(self, video_path):
         video_capture = cv2.VideoCapture(video_path)
         
@@ -193,11 +332,16 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
     def process_kitti_sequence(self, sequence_path, max_frames=None):
         frames, gps_data = load_kitti_sequence(sequence_path, max_frames)
         
+        print(f"\n{'='*60}")
+        print(f"MODO: {'ENTRENAMIENTO' if self.training_mode else 'INFERENCIA'}")
+        print(f"Total de frames: {len(frames)}")
+        print(f"{'='*60}\n")
+        
         for i in range(len(frames)):
             print(f"Procesando frame {i}...")
             
             if frames[i] is None:
-                print(f"  ✗ Frame {i} es None")
+                print(f"  ERROR - Frame {i} es None")
                 continue
                 
             try:
@@ -218,7 +362,19 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                 self.process_frame_with_gps(frames[i], gps_utm, gps_confidence)
                     
             except Exception as e:
-                print(f"  ✗ Error en frame {i}: {e}")
+                print(f"  ERROR - Error en frame {i}: {e}")
+        
+        # Si estamos en modo entrenamiento, guardar el modelo
+        if self.training_mode:
+            model_save_path = "LMS/LMS_RL_ORB_GPS/model/trained_rl_agent.pth"
+            metadata = {
+                'sequence': sequence_path,
+                'total_frames': len(frames),
+                'total_experiences': len(self.trainer.replay_buffer),
+                'training_steps': len(self.trainer.training_metrics['losses'])
+            }
+            self.trainer.save_model(model_save_path, metadata)
+            self.trainer.print_training_summary()
         
         optimized_trajectory = self.optimize_pose_graph()
         self.save_trajectory_outputs(optimized_trajectory, sequence_path)
@@ -386,7 +542,6 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         print(f"La trayectoria REAL tiene {len(x_key)} puntos")
         print(f"Distancia total REAL: {real_total_distance:.2f} m")
 
-    # Añade este método para diagnosticar el problema de optimización
     def optimize_pose_graph(self):
         """Método de optimización con diagnóstico"""
         print("\n=== INICIANDO OPTIMIZACIÓN ===")
@@ -523,7 +678,7 @@ def load_kitti_sequence(sequence_path, max_frames=None):
         print("No se encontraron archivos coincidentes")
         return frames, gps_data
     
-    print(f"✓ Encontrados {min_files} pares de archivos (imágenes + GPS)")
+    print(f"OK - Encontrados {min_files} pares de archivos (imágenes + GPS)")
     
     for i in range(min_files):
         img_file = image_files[i]
@@ -555,10 +710,18 @@ if __name__ == "__main__":
     parser.add_argument('input_path', help='Ruta al video MP4 o directorio de secuencia KITTI')
     parser.add_argument('--kitti', action='store_true', help='Forzar modo KITTI')
     parser.add_argument('--max_frames', type=int, help='Número máximo de frames a procesar')
-    
+    parser.add_argument('--train', action='store_true', help='Activar modo entrenamiento')
+    parser.add_argument('--model_path', type=str, help='Ruta al modelo pre-entrenado')
+    parser.add_argument('--simulate_mobile_gps', action='store_true', help='Simular GPS móvil con ruido')
+    parser.add_argument('--gps_noise_std', type=float, default=5.0, help='Desviación estándar del ruido GPS simulado (en metros)')
+
     args = parser.parse_args()
     
     input_path = args.input_path
+    training_mode = args.train
+    model_path = args.model_path
+    simulate_mobile_gps = args.simulate_mobile_gps
+    gps_noise_std = args.gps_noise_std
     
     is_kitti = False
     if args.kitti:
@@ -571,12 +734,14 @@ if __name__ == "__main__":
     
     if is_kitti:
         print("Modo: Directorio KITTI")
-        slam = RL_ORB_SLAM_GPS()
+        slam = RL_ORB_SLAM_GPS(training_mode=training_mode, model_path=model_path, 
+                               simulate_mobile_gps=simulate_mobile_gps, gps_noise_std=gps_noise_std)
         slam.process_kitti_sequence(input_path, args.max_frames)
         
     elif input_path.endswith('.mp4'):
         print("Modo: Video MP4")
-        slam = RL_ORB_SLAM_GPS()
+        slam = RL_ORB_SLAM_GPS(training_mode=training_mode, model_path=model_path, 
+                               simulate_mobile_gps=simulate_mobile_gps, gps_noise_std=gps_noise_std)
         slam.process_video_input(input_path)
         
     else:
