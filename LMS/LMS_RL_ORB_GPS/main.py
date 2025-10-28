@@ -14,6 +14,7 @@ from LMS.LMS_ORB_with_PG.main import PoseGraphSLAM
 from LMS.LMS_RL_ORB_GPS.model.rl_agent import SimpleRLAgent, RLTrainer
 from LMS.LMS_RL_ORB_GPS.utils.gps_utils import *
 from LMS.LMS_RL_ORB_GPS.utils.gps_filter import *
+from LMS.LMS_RL_ORB_GPS.utils.training_augmentation import TrainingAugmentation
 
 class RL_ORB_SLAM_GPS(PoseGraphSLAM):
     def __init__(self, fx=718.856, fy=718.856, cx=607.1928, cy=185.2157, 
@@ -72,8 +73,8 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
     
     def calculate_base_weights(self, gps_conf, visual_conf, error):
         """
-        Calcula pesos base usando reglas heurísticas SUAVES (no categóricas).
-        Genera valores continuos en vez de saltos discretos, permitiendo al RL mayor libertad.
+        Calcula pesos base usando reglas heurísticas MEJORADAS.
+        Ahora considera el ratio de confianzas para balancear mejor cuando ambos son buenos.
         
         Args:
             gps_conf: Confianza del GPS [0, 1]
@@ -83,38 +84,64 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         Returns:
             (w_slam_base, w_gps_base): Tupla con pesos base continuos
         """
-        # === SISTEMA DE PESOS SUAVES (no categóricos) ===
+        # === NUEVO: ANÁLISIS DE RATIO DE CONFIANZAS ===
+        conf_ratio = visual_conf / (gps_conf + 1e-6)  # Ratio SLAM/GPS
         
-        # Factor 1: Confianza GPS base (0-1)
+        # Factor 1: Pesos base según confianzas
         gps_weight_from_conf = gps_conf
-        
-        # Factor 2: Confianza SLAM base (0-1)
         slam_weight_from_conf = visual_conf
         
-        # Factor 3: Penalización GRADUAL por error alto
+        # === NUEVO: AJUSTE SEGÚN RATIO DE CONFIANZAS ===
+        # Si SLAM es significativamente más confiable que GPS
+        if conf_ratio > 1.15 and visual_conf > 0.75:
+            slam_boost = 0.15
+            gps_reduction = 0.10
+            print(f"  [BALANCE] SLAM más confiable (ratio={conf_ratio:.2f}) → Boost SLAM")
+        # Si GPS es significativamente más confiable que SLAM
+        elif conf_ratio < 0.85 and gps_conf > 0.75:
+            slam_boost = -0.10
+            gps_reduction = -0.15
+            print(f"  [BALANCE] GPS más confiable (ratio={conf_ratio:.2f}) → Boost GPS")
+        # CORRECCIÓN: Ambos similares y confiables → Balance equitativo (sin boost adicional)
+        elif visual_conf > 0.75 and gps_conf > 0.75 and 0.85 <= conf_ratio <= 1.15:
+            slam_boost = 0.0
+            gps_reduction = 0.0
+            print(f"  [BALANCE] Ambos muy confiables (ratio={conf_ratio:.2f}) → Balance natural 50-50")
+        else:
+            slam_boost = 0.0
+            gps_reduction = 0.0
+        
+        slam_weight_from_conf += slam_boost
+        gps_weight_from_conf += gps_reduction
+        
+        # Factor 2: Penalización GRADUAL por error alto
         error_penalty_gps = 0.0
         if error > 5.0:
             error_penalty_gps = 0.3  # Reduce GPS significativamente si error es muy alto
+            print(f"  [ERROR] Alto error ({error:.2f}m) → Penaliza GPS -0.30")
         elif error > 2.0:
             # Penalización gradual entre 2m y 5m
             error_penalty_gps = 0.1 * ((error - 2.0) / 3.0)
+            print(f"  [ERROR] Error moderado ({error:.2f}m) → Penaliza GPS -{error_penalty_gps:.2f}")
         
-        # Factor 4: Bonificación GRADUAL por error bajo (GPS alineado con SLAM)
+        # Factor 3: Bonificación GRADUAL por error bajo (GPS alineado con SLAM)
         error_bonus_gps = 0.0
         if error < 1.0 and gps_conf > 0.6:
-            error_bonus_gps = 0.2  # Bonifica GPS si está muy alineado
+            error_bonus_gps = 0.15  # Reducido de 0.2 para ser menos agresivo
+            print(f"  [ALIGN] Excelente alineación ({error:.2f}m) → Bonus GPS +0.15")
         elif error < 2.0 and gps_conf > 0.6:
             # Bonificación gradual entre 1m y 2m
             error_bonus_gps = 0.1 * (2.0 - error)
+            print(f"  [ALIGN] Buena alineación ({error:.2f}m) → Bonus GPS +{error_bonus_gps:.2f}")
         
         # === COMBINACIÓN DE FACTORES ===
         w_gps_base = gps_weight_from_conf - error_penalty_gps + error_bonus_gps
         w_slam_base = slam_weight_from_conf
         
-        # Normalizar para que estén en rango [0.2, 0.8] (dejar margen para RL)
+        # Normalizar para que estén en rango [0.05, 0.95] (permitir casos extremos)
         total = w_slam_base + w_gps_base + 1e-6
-        w_slam_base = np.clip(w_slam_base / total, 0.2, 0.8)
-        w_gps_base = np.clip(w_gps_base / total, 0.2, 0.8)
+        w_slam_base = np.clip(w_slam_base / total, 0.05, 0.95)
+        w_gps_base = np.clip(w_gps_base / total, 0.05, 0.95)
         
         # Re-normalizar para que sumen exactamente 1.0
         total = w_slam_base + w_gps_base
@@ -122,6 +149,69 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         w_gps_base /= total
         
         return w_slam_base, w_gps_base
+    
+    def calculate_rl_adjustment_margin(self, visual_conf, gps_conf, error):
+        """
+        Calcula el margen dinámico para los ajustes del RL basado en la certeza del sistema.
+        
+        FILOSOFÍA:
+        - Alta certeza (ambos sensores confiables) → RL tiene POCO margen (reglas deciden)
+        - Incertidumbre (sensores discrepan o uno es malo) → RL tiene MÁS margen (RL decide)
+        - Casos extremos (uno pésimo, otro excelente) → RL tiene MÁXIMO margen (±50%)
+        - Emergencia (ambos malos) → RL tiene MÁXIMO margen (RL toma control total)
+        
+        Args:
+            visual_conf: Confianza del SLAM visual [0, 1]
+            gps_conf: Confianza del GPS [0, 1]
+            error: Error entre SLAM y GPS en metros
+        
+        Returns:
+            (rl_margin, scenario): Margen para ajuste RL y nombre del escenario
+        """
+        conf_diff = abs(visual_conf - gps_conf)
+        avg_conf = (visual_conf + gps_conf) / 2.0
+        min_conf = min(visual_conf, gps_conf)
+        max_conf = max(visual_conf, gps_conf)
+        
+        # === NUEVO: ESCENARIO 0 - SENSOR EXTREMO (PRIORIDAD MÁXIMA) ===
+        # Caso EXTREMO: Uno pésimo (<0.3), otro excelente (>0.7), diferencia enorme (>0.6)
+        # Ejemplo: GPS=0.10, SLAM=1.00 o GPS=1.00, SLAM=0.20
+        if min_conf < 0.3 and max_conf > 0.7 and conf_diff > 0.6:
+            rl_margin = 0.50  # ±50% → RL puede ajustar MUCHO
+            scenario = "SENSOR_EXTREMO"
+            print(f"  [MARGEN] Caso EXTREMO detectado (min={min_conf:.2f}, max={max_conf:.2f}, diff={conf_diff:.2f}) → Margen amplio (±50%)")
+            return rl_margin, scenario
+        
+        # ESCENARIO 1: Ambos muy confiables y similares (>0.75 y diff<0.15)
+        # Ejemplo: GPS=0.95, SLAM=1.00, Error=1.5m
+        if avg_conf > 0.75 and conf_diff < 0.15 and error < 3.0:
+            rl_margin = 0.10  # ±10% → Las reglas dominan
+            scenario = "ALTA_CERTEZA"
+        
+        # ESCENARIO 2: Uno claramente mejor que otro (diff>0.30)
+        # Ejemplo: GPS=0.95, SLAM=0.30 (pocos matches)
+        elif conf_diff > 0.30:
+            rl_margin = 0.25  # ±25% → RL puede ajustar moderadamente (aumentado de 0.20)
+            scenario = "SENSOR_DOMINANTE"
+        
+        # ESCENARIO 3: Ambos confiables pero error alto (>3m)
+        # Ejemplo: GPS=0.90, SLAM=0.85, pero Error=4.5m (algo está mal)
+        elif avg_conf > 0.60 and error > 3.0:
+            rl_margin = 0.30  # ±30% → RL puede investigar (aumentado de 0.25)
+            scenario = "ERROR_ALTO"
+        
+        # ESCENARIO 4: Incertidumbre general (confianzas bajas)
+        # Ejemplo: GPS=0.40, SLAM=0.50 (ambos regulares)
+        elif avg_conf < 0.50:
+            rl_margin = 0.40  # ±40% → RL toma más control (aumentado de 0.35)
+            scenario = "INCERTIDUMBRE"
+        
+        # ESCENARIO 5: Caso intermedio
+        else:
+            rl_margin = 0.20  # ±20% → Balance normal (aumentado de 0.15)
+            scenario = "INTERMEDIO"
+        
+        return rl_margin, scenario
     
     def process_frame_with_gps(self, frame, gps_utm, gps_confidence):
         minimumMatches = 15
@@ -215,36 +305,45 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                     visual_confidence = min(len(matches) / 50.0, 1.0)
                     error = np.linalg.norm(current_pose[:3, 3] - gps_utm) if gps_utm is not None else 0.0
                     
+                    # === DEBUG: Imprimir confianzas y error ===
+                    print(f"  [CONFIANZAS] Visual={visual_confidence:.3f} (matches={len(matches)}), GPS={gps_confidence:.3f}, Error={error:.3f}m")
+                    
                     # Calcular posición fusionada
                     fused_position = current_pose[:3, 3]
                     if gps_utm is not None:
                         # 1. CALCULAR PESOS BASE CON REGLAS HEURÍSTICAS
                         w_slam_base, w_gps_base = self.calculate_base_weights(gps_confidence, visual_confidence, error)
                         
-                        # 2. USAR RL PARA AJUSTE FINO (±25% alrededor de pesos base - AUMENTADO)
+                        # 2. CALCULAR MARGEN DINÁMICO PARA RL (NUEVO)
+                        rl_margin, scenario = self.calculate_rl_adjustment_margin(visual_confidence, gps_confidence, error)
+                        
+                        # 3. APLICAR RL CON MARGEN DINÁMICO
                         state = torch.tensor([visual_confidence, gps_confidence, error], dtype=torch.float32)
                         
                         with torch.no_grad():
                             rl_weights = self.agent(state)
                             
-                            # Convertir salida RL a ajuste fino [-0.25, +0.25] (AUMENTADO de ±0.15)
-                            rl_adjustment_slam = (rl_weights[0].item() - 0.5) * 0.5  # De [0,1] a [-0.25, +0.25]
-                            rl_adjustment_gps = (rl_weights[1].item() - 0.5) * 0.5
+                            # Convertir salida RL a ajuste con margen dinámico
+                            # Ejemplo: si rl_margin=0.10 → ajuste de [-0.10, +0.10]
+                            #          si rl_margin=0.35 → ajuste de [-0.35, +0.35]
+                            rl_adjustment_slam = (rl_weights[0].item() - 0.5) * (rl_margin * 2)
+                            rl_adjustment_gps = (rl_weights[1].item() - 0.5) * (rl_margin * 2)
                         
-                        # 3. APLICAR AJUSTE RL A PESOS BASE
+                        # 4. APLICAR AJUSTE RL A PESOS BASE
                         w_slam_final = np.clip(w_slam_base + rl_adjustment_slam, 0.05, 0.95)
                         w_gps_final = np.clip(w_gps_base + rl_adjustment_gps, 0.05, 0.95)
                         
-                        # 4. NORMALIZAR (para que sumen 1.0)
+                        # 5. NORMALIZAR (para que sumen 1.0)
                         total = w_slam_final + w_gps_final
                         w_slam_final /= total
                         w_gps_final /= total
                         
-                        # 5. CALCULAR POSICIÓN FUSIONADA
+                        # 6. CALCULAR POSICIÓN FUSIONADA
                         fused_position = w_slam_final * current_pose[:3, 3] + w_gps_final * gps_utm
                         
                         # === IMPRIMIR INFORMACIÓN DETALLADA ===
                         print(f"  [HYBRID] Base: SLAM={w_slam_base:.3f}, GPS={w_gps_base:.3f}")
+                        print(f"  [RL MARGIN] Escenario={scenario}, Margen=±{rl_margin*100:.0f}%")
                         print(f"  [RL ADJ] Δ_SLAM={rl_adjustment_slam:+.3f}, Δ_GPS={rl_adjustment_gps:+.3f}")
                         print(f"  [FINAL]  SLAM={w_slam_final:.3f}, GPS={w_gps_final:.3f}, "
                               f"GPS_Conf={gps_confidence:.3f}, Error={error:.3f}m")
@@ -329,13 +428,31 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         optimized_trajectory = self.optimize_pose_graph()
         self.save_trajectory_outputs(optimized_trajectory, video_path)
     
-    def process_kitti_sequence(self, sequence_path, max_frames=None):
+    def process_kitti_sequence(self, sequence_path, max_frames=None, augmentation_prob=0.0):
+        """
+        Procesa secuencia KITTI con soporte para aumentación de datos.
+        
+        Args:
+            sequence_path: Ruta a la secuencia KITTI
+            max_frames: Límite de frames (None = todos)
+            augmentation_prob: Probabilidad de aplicar aumentación (0.0-1.0)
+                              0.0 = sin aumentación (inferencia)
+                              0.3-0.6 = aumentación progresiva (entrenamiento)
+        """
         frames, gps_data = load_kitti_sequence(sequence_path, max_frames)
         
         print(f"\n{'='*60}")
         print(f"MODO: {'ENTRENAMIENTO' if self.training_mode else 'INFERENCIA'}")
         print(f"Total de frames: {len(frames)}")
+        if self.training_mode and augmentation_prob > 0:
+            print(f"AUMENTACIÓN ACTIVA: {augmentation_prob*100:.0f}% de probabilidad")
         print(f"{'='*60}\n")
+        
+        # Crear módulo de aumentación si está en modo entrenamiento
+        augmenter = None
+        if self.training_mode and augmentation_prob > 0:
+            augmenter = TrainingAugmentation(corruption_probability=augmentation_prob)
+            print("Módulo de aumentación inicializado")
         
         for i in range(len(frames)):
             print(f"Procesando frame {i}...")
@@ -354,7 +471,33 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                     print(f"  GPS UTM: {gps_utm.round(3)}")
 
                     self.gps_filter.add_measurement(gps_utm)
-                    gps_confidence = self.gps_filter.calculate_confidence()
+                    gps_confidence_raw = self.gps_filter.calculate_confidence()
+                    
+                    # === APLICAR AUMENTACIÓN DE DATOS (solo en entrenamiento) ===
+                    if augmenter is not None and np.random.rand() < augmentation_prob:
+                        # Calcular error aproximado (usando último keyframe si existe)
+                        if hasattr(self, 'keyframe_poses') and len(self.keyframe_poses) > 0:
+                            last_pose = self.keyframe_poses[-1][:3, 3]
+                            error_approx = np.linalg.norm(last_pose - gps_utm) if gps_utm is not None else 0.0
+                        else:
+                            error_approx = 0.0
+                        
+                        # Aumentar datos (corromper sensores artificialmente)
+                        gps_utm_aug, gps_conf_aug, visual_conf_aug, scenario = augmenter.augment_training_sample(
+                            gps_utm=gps_utm,
+                            gps_conf=gps_confidence_raw,
+                            visual_conf=0.5,  # Placeholder, se calculará en process_frame_with_gps
+                            error=error_approx
+                        )
+                        
+                        # Usar datos aumentados
+                        gps_utm = gps_utm_aug
+                        gps_confidence = gps_conf_aug
+                        
+                        print(f"  🎲 [AUGMENT] Escenario aplicado: {scenario}")
+                    else:
+                        # Usar datos originales sin modificar
+                        gps_confidence = gps_confidence_raw
 
                     self.gps_filter.print_debug_info()
                 
@@ -364,6 +507,10 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             except Exception as e:
                 print(f"  ERROR - Error en frame {i}: {e}")
         
+        # Imprimir estadísticas de aumentación si se usó
+        if augmenter is not None:
+            augmenter.print_statistics()
+        
         # Si estamos en modo entrenamiento, guardar el modelo
         if self.training_mode:
             model_save_path = "LMS/LMS_RL_ORB_GPS/model/trained_rl_agent.pth"
@@ -371,7 +518,8 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                 'sequence': sequence_path,
                 'total_frames': len(frames),
                 'total_experiences': len(self.trainer.replay_buffer),
-                'training_steps': len(self.trainer.training_metrics['losses'])
+                'training_steps': len(self.trainer.training_metrics['losses']),
+                'augmentation_prob': augmentation_prob if augmenter else 0.0
             }
             self.trainer.save_model(model_save_path, metadata)
             self.trainer.print_training_summary()
@@ -714,6 +862,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_path', type=str, help='Ruta al modelo pre-entrenado')
     parser.add_argument('--simulate_mobile_gps', action='store_true', help='Simular GPS móvil con ruido')
     parser.add_argument('--gps_noise_std', type=float, default=5.0, help='Desviación estándar del ruido GPS simulado (en metros)')
+    parser.add_argument('--augmentation_prob', type=float, default=0.0, help='Probabilidad de aumentación de datos (0.0-1.0)')
 
     args = parser.parse_args()
     
@@ -722,6 +871,7 @@ if __name__ == "__main__":
     model_path = args.model_path
     simulate_mobile_gps = args.simulate_mobile_gps
     gps_noise_std = args.gps_noise_std
+    augmentation_prob = args.augmentation_prob
     
     is_kitti = False
     if args.kitti:
@@ -736,7 +886,7 @@ if __name__ == "__main__":
         print("Modo: Directorio KITTI")
         slam = RL_ORB_SLAM_GPS(training_mode=training_mode, model_path=model_path, 
                                simulate_mobile_gps=simulate_mobile_gps, gps_noise_std=gps_noise_std)
-        slam.process_kitti_sequence(input_path, args.max_frames)
+        slam.process_kitti_sequence(input_path, args.max_frames, augmentation_prob)
         
     elif input_path.endswith('.mp4'):
         print("Modo: Video MP4")

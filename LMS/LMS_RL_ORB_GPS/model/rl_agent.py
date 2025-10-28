@@ -88,125 +88,175 @@ class RLTrainer:
         
     def calculate_reward(self, state, action_weights, slam_position, gps_position, ground_truth=None):
         """
-        Calcula el reward basado en qué tan buena fue la decisión de fusión.
+        Sistema de recompensas BALANCEADO que premia decisiones inteligentes.
         
-        NUEVA VERSIÓN MEJORADA:
-        - Premia fuertemente confiar en GPS cuando es confiable (>0.7)
-        - Penaliza fuertemente confiar en GPS cuando es malo (<0.3)
-        - Los pesos deben reflejar las confianzas de forma proporcional
+        FILOSOFÍA NUEVA (sin bias GPS):
+        - Premiar cuando RL confía en el sensor correcto según confianzas
+        - Penalizar cuando RL confía en el sensor equivocado
+        - Recompensar balance cuando ambos son buenos
+        - NO asumir que GPS siempre es correcto
+        
+        Args:
+            state: [visual_conf, gps_conf, error]
+            action_weights: Pesos predichos por RL [w_slam, w_gps]
+            slam_position: Posición estimada por SLAM visual
+            gps_position: Posición GPS
+            ground_truth: Verdad absoluta (si existe, generalmente None)
+        
+        Returns:
+            reward: Recompensa escalar
         """
-        gps_confidence = state[1].item()  # state[1] es GPS confidence
-        slam_confidence = state[0].item()  # state[0] es SLAM confidence
-        current_error = state[2].item()    # state[2] es el error actual
+        visual_conf = state[0].item()
+        gps_conf = state[1].item()
+        error = state[2].item()
         
-        weight_slam = action_weights[0].item()
-        weight_gps = action_weights[1].item()
+        w_slam_rl = action_weights[0].item()
+        w_gps_rl = action_weights[1].item()
+        
+        # Convertir a numpy si son tensores
+        if isinstance(slam_position, torch.Tensor):
+            slam_position = slam_position.detach().cpu().numpy()
+        if isinstance(gps_position, torch.Tensor):
+            gps_position = gps_position.detach().cpu().numpy()
         
         # Calcular posición fusionada
-        if isinstance(slam_position, torch.Tensor):
-            slam_position = slam_position.detach().numpy()
-        if isinstance(gps_position, torch.Tensor):
-            gps_position = gps_position.detach().numpy()
-            
-        fused_position = weight_slam * slam_position + weight_gps * gps_position
+        fused_position = w_slam_rl * slam_position + w_gps_rl * gps_position
         
-        reward = 0.0
+        # ========================================
+        # COMPONENTE 1: RECOMPENSA POR DECISIÓN INTELIGENTE (AUMENTADA)
+        # ========================================
+        decision_reward = 0.0
         
-        # === NUEVO REWARD 1: Alineación FUERTE con confianzas ===
-        # Los pesos DEBEN reflejar las confianzas relativas
-        total_confidence = slam_confidence + gps_confidence
-        if total_confidence > 0.01:
-            # Pesos ideales basados en confianzas
-            ideal_weight_slam = slam_confidence / total_confidence
-            ideal_weight_gps = gps_confidence / total_confidence
-            
-            # Error en la asignación de pesos
-            weight_error_slam = abs(weight_slam - ideal_weight_slam)
-            weight_error_gps = abs(weight_gps - ideal_weight_gps)
-            
-            # PENALIZACIÓN FUERTE por no seguir las confianzas
-            alignment_penalty = (weight_error_slam + weight_error_gps) * 10.0
-            reward -= alignment_penalty
+        # Caso 1: GPS mucho mejor que SLAM → Debería preferir GPS
+        if gps_conf > 0.7 and visual_conf < 0.5:
+            if w_gps_rl > w_slam_rl:  # RL confía más en GPS (correcto)
+                decision_reward = 5.0  # Aumentado de 2.5 a 5.0
+                if np.random.rand() < 0.1:
+                    print(f"    [REWARD] RL prefirió GPS correctamente (+5.0)")
+            else:  # RL confía más en SLAM (incorrecto)
+                decision_reward = -4.0  # Aumentado de -2.0 a -4.0
+                if np.random.rand() < 0.1:
+                    print(f"    [REWARD] RL ignoró GPS bueno (-4.0)")
         
-        # === NUEVO REWARD 2: BONIFICACIÓN EXTRA por usar GPS confiable ===
-        if gps_confidence > 0.7:
-            # Cuanto más GPS uses cuando es confiable, mejor
-            gps_usage_bonus = weight_gps * 8.0  # AUMENTADO de 1.5 a 8.0
-            reward += gps_usage_bonus
-            
-            # PENALIZACIÓN si NO usas GPS confiable
-            if weight_gps < 0.5:
-                reward -= 10.0  # Penalización grande
+        # Caso 2: SLAM mucho mejor que GPS → Debería preferir SLAM
+        elif visual_conf > 0.7 and gps_conf < 0.5:
+            if w_slam_rl > w_gps_rl:  # RL confía más en SLAM (correcto)
+                decision_reward = 5.0  # Aumentado de 2.5 a 5.0
+                if np.random.rand() < 0.1:
+                    print(f"    [REWARD] RL prefirió SLAM correctamente (+5.0)")
+            else:  # RL confía más en GPS (incorrecto)
+                decision_reward = -4.0  # Aumentado de -2.0 a -4.0
+                if np.random.rand() < 0.1:
+                    print(f"    [REWARD] RL ignoró SLAM bueno (-4.0)")
         
-        if gps_confidence > 0.8:  # GPS excelente
-            # Bonificación EXTRA si confías mucho en GPS excelente
-            if weight_gps > 0.6:
-                reward += 5.0
+        # Caso 3: Ambos buenos y error bajo → Debería balancear 50-50
+        elif visual_conf > 0.7 and gps_conf > 0.7 and error < 2.5:
+            # Calcular qué tan cerca está de 50-50
+            balance_quality = 1.0 - abs(w_slam_rl - 0.5) * 2  # [0, 1], 1=perfecto
+            decision_reward = 3.0 * balance_quality  # Aumentado de 2.0 a 3.0
+            if np.random.rand() < 0.1:
+                print(f"    [REWARD] Balance con ambos buenos (+{decision_reward:.2f})")
         
-        # === NUEVO REWARD 3: PENALIZACIÓN FUERTE por usar GPS malo ===
-        if gps_confidence < 0.3:
-            # Cuanto más GPS uses cuando es malo, peor
-            gps_bad_penalty = weight_gps * 10.0  # AUMENTADO de 5.0 a 10.0
-            reward -= gps_bad_penalty
-            
-            # BONIFICACIÓN si confías en SLAM cuando GPS es malo
-            if weight_slam > 0.7:
-                reward += 5.0
-        
-        # === REWARD 4: Similarmente para SLAM ===
-        if slam_confidence > 0.7:
-            reward += weight_slam * 5.0  # Bonificar uso de SLAM confiable
-        
-        if slam_confidence < 0.3 and weight_slam > 0.5:
-            reward -= 8.0  # Penalizar confiar en SLAM malo
-        
-        # === REWARD 5: Penalización por distancia entre GPS y SLAM ===
-        distance_gps_slam = np.linalg.norm(gps_position - slam_position)
-        
-        if distance_gps_slam > 5.0:  # Si están muy separados
-            # Confiar más en el que tiene mayor confianza
-            if gps_confidence > slam_confidence + 0.1:
-                # GPS es más confiable
-                if weight_gps > weight_slam:
-                    reward += 3.0  # Bonificar decisión correcta
+        # Caso 4: Ambos buenos pero error alto → Conflicto, preferir más confiable
+        elif visual_conf > 0.7 and gps_conf > 0.7 and error > 2.5:
+            # Hay conflicto, ver quién es ligeramente más confiable
+            if visual_conf > gps_conf + 0.05:
+                # SLAM ligeramente mejor
+                if w_slam_rl > 0.55:
+                    decision_reward = 2.5  # Aumentado de 1.5 a 2.5
                 else:
-                    reward -= 5.0  # Penalizar decisión incorrecta
-            elif slam_confidence > gps_confidence + 0.1:
-                # SLAM es más confiable
-                if weight_slam > weight_gps:
-                    reward += 3.0
+                    decision_reward = -1.0  # Aumentado de -0.5 a -1.0
+            elif gps_conf > visual_conf + 0.05:
+                # GPS ligeramente mejor
+                if w_gps_rl > 0.55:
+                    decision_reward = 2.5  # Aumentado de 1.5 a 2.5
                 else:
-                    reward -= 5.0
+                    decision_reward = -1.0  # Aumentado de -0.5 a -1.0
+            else:
+                # Empate técnico, balance conservador
+                balance_quality = 1.0 - abs(w_slam_rl - 0.5) * 2
+                decision_reward = 1.5 * balance_quality  # Aumentado de 1.0 a 1.5
         
-        # === REWARD 6: Penalización por error absoluto (reducida) ===
-        if current_error > 0:
-            reward -= min(current_error * 0.2, 5.0)  # REDUCIDO de 0.5 a 0.2
+        # Caso 5: Ambos medios (0.5-0.7) → Preferir ligeramente al mejor
+        elif 0.5 <= visual_conf <= 0.7 and 0.5 <= gps_conf <= 0.7:
+            if visual_conf > gps_conf + 0.1:
+                if w_slam_rl > 0.52:
+                    decision_reward = 1.5  # Aumentado de 1.0 a 1.5
+            elif gps_conf > visual_conf + 0.1:
+                if w_gps_rl > 0.52:
+                    decision_reward = 1.5  # Aumentado de 1.0 a 1.5
+            else:
+                # Balance cuando son similares
+                balance_quality = 1.0 - abs(w_slam_rl - 0.5) * 2
+                decision_reward = 1.2 * balance_quality  # Aumentado de 0.8 a 1.2
         
-        # === REWARD 7: Suavidad (OPCIONAL y MUY REDUCIDO) ===
-        # SOLO aplicar si los cambios son extremos
-        if hasattr(self, 'last_weights'):
-            weight_change = abs(weight_slam - self.last_weights[0])
-            if weight_change > 0.4:  # SOLO penalizar cambios EXTREMOS
-                reward -= weight_change * 0.5  # REDUCIDO de 2.0 a 0.5
+        # Caso 6: Ambos malos (<0.4) → Premiar distribución conservadora
+        elif visual_conf < 0.4 and gps_conf < 0.4:
+            # Cuando ambos son malos, mejor ser conservador (cercano a 50-50)
+            caution_bonus = 1.0 - abs(w_slam_rl - 0.5) * 2
+            decision_reward = 1.8 * caution_bonus  # Aumentado de 1.2 a 1.8
+            if np.random.rand() < 0.1:
+                print(f"    [REWARD] Cautela con ambos malos (+{decision_reward:.2f})")
         
-        self.last_weights = action_weights.detach().numpy()
+        # ========================================
+        # COMPONENTE 2: PENALIZACIÓN POR ERROR (si hay ground truth)
+        # ========================================
+        error_penalty = 0.0
         
-        # === REWARD 8: Ground truth (si existe) ===
         if ground_truth is not None:
-            error_fused = np.linalg.norm(fused_position - ground_truth)
-            error_slam = np.linalg.norm(slam_position - ground_truth)
-            error_gps = np.linalg.norm(gps_position - ground_truth)
-            
-            # Bonificar si la fusión es mejor que ambas fuentes
-            if error_fused < min(error_slam, error_gps):
-                reward += 8.0  # AUMENTADO de 5.0 a 8.0
-            elif error_fused < (error_slam + error_gps) / 2:
-                reward += 3.0  # AUMENTADO de 2.0 a 3.0
-            
-            # Penalización directa por el error (reducida)
-            reward -= error_fused * 0.2  # REDUCIDO de 0.3 a 0.2
+            residual_error = np.linalg.norm(fused_position - ground_truth)
+            # Penalización suave, máximo -1.5
+            error_penalty = -0.3 * min(residual_error / 3.0, 5.0)
+        else:
+            # Sin ground truth, usar error SLAM-GPS como proxy
+            if error > 5.0:
+                # Gran discrepancia, penalizar ligeramente no balancear
+                balance_factor = 1.0 - abs(w_slam_rl - 0.5) * 2
+                error_penalty = -0.4 * (1.0 - balance_factor)
         
-        return reward
+        # ========================================
+        # COMPONENTE 3: BONUS POR ALINEACIÓN CON CONFIANZAS (AUMENTADO)
+        # ========================================
+        # Premiar si los pesos están alineados con las confianzas relativas
+        total_conf = visual_conf + gps_conf + 1e-6
+        expected_w_slam = visual_conf / total_conf
+        expected_w_gps = gps_conf / total_conf
+        
+        # Calcular qué tan cerca está de la distribución esperada
+        alignment_error = abs(w_slam_rl - expected_w_slam)
+        alignment_bonus = 1.5 * (1.0 - alignment_error * 2)  # Aumentado de 0.8 a 1.5
+        alignment_bonus = max(alignment_bonus, -0.8)  # Aumentado mínimo de -0.4 a -0.8
+        
+        # ========================================
+        # COMPONENTE 4: SUAVIDAD TEMPORAL (opcional, muy reducido)
+        # ========================================
+        smoothness_penalty = 0.0
+        
+        if hasattr(self, 'last_weights'):
+            weight_change = abs(w_slam_rl - self.last_weights[0])
+            # Solo penalizar cambios EXTREMOS (>40%)
+            if weight_change > 0.4:
+                smoothness_penalty = -0.3 * (weight_change - 0.4)
+        
+        self.last_weights = action_weights.detach().cpu().numpy()
+        
+        # ========================================
+        # RECOMPENSA TOTAL
+        # ========================================
+        total_reward = (
+            decision_reward +      # Componente principal (±5.0, antes ±2.5)
+            error_penalty +        # Penalización por error (≤0)
+            alignment_bonus +      # Bonus por alineación (±1.5, antes ±0.8)
+            smoothness_penalty     # Penalización por brusquedad (≤0)
+        )
+        
+        # Debug ocasional
+        if np.random.rand() < 0.05:  # 5% de las veces
+            print(f"    [REWARD] Total={total_reward:.3f} "
+                  f"(decisión={decision_reward:.2f}, error={error_penalty:.2f}, "
+                  f"alineación={alignment_bonus:.2f}, suavidad={smoothness_penalty:.2f})")
+        
+        return total_reward
     
     def store_experience(self, state, action_weights, reward, next_state, done=False):
         """Almacena una experiencia en el replay buffer"""
@@ -254,7 +304,7 @@ class RLTrainer:
             # También añadimos un término de regularización para evitar distribuciones extremas
             # Queremos que el agente explore, no que siempre ponga peso 1.0 en una opción
             entropy = -(predicted_weights * log_prob).sum()
-            entropy_bonus = -0.01 * entropy  # Penalización pequeña para fomentar exploración
+            entropy_bonus = 0.01 * entropy  # Cambiado a positivo para premiar exploración
             
             total_loss += loss + entropy_bonus
             total_reward += reward

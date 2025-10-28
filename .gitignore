@@ -26,3 +26,16 @@ build/
 
 # Datos KITTI
 kitti_data/*
+
+# Modelos y checkpoints (excepto modelo final entrenado)
+**/checkpoints/
+**/backup_old_model/
+**/*_checkpoint_*.pth
+
+# Logs de entrenamiento y ejecución
+**/logs/
+*.log
+
+# Archivos temporales de métricas
+**/*_metrics_temp.json
+**/*_training_report_*.json
