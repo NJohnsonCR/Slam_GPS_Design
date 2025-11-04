@@ -24,8 +24,9 @@ venv/
 dist/
 build/
 
-# Datos KITTI
+# Datos de entrada
 kitti_data/*
+mobile_data/*
 
 # Modelos y checkpoints (excepto modelo final entrenado)
 **/checkpoints/

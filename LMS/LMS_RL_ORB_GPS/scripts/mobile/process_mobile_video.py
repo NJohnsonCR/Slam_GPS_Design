@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Script para procesar videos móviles con GPS en entrenamiento
-Formato de entrada: video.mp4 + gps_log.txt
+Formato de entrada: video.mp4 + location.csv + frame_timestamps.txt
 """
 
 import argparse
@@ -10,145 +10,259 @@ import os
 import cv2
 import numpy as np
 from datetime import datetime
+import pandas as pd
 
 from LMS.LMS_RL_ORB_GPS.main import RL_ORB_SLAM_GPS
 
-def load_gps_log(gps_log_path):
+def load_mobile_gps_data(location_csv_path):
     """
-    Carga archivo GPS del móvil
-    
-    Formato esperado (CSV):
-    timestamp,latitude,longitude,altitude
-    1634567890.123,10.123456,-84.123456,1500.5
+    Carga archivo location.csv del móvil con formato:
+    Time (ns), Latitude (°), Longitude (°), Altitude (m), Speed (m/s), Unix (ns)
     
     Returns:
-        list: [(timestamp, lat, lon, alt), ...]
+        pd.DataFrame: DataFrame con columnas ['time_ns', 'latitude', 'longitude', 'altitude', 'speed', 'unix_ns']
     """
-    gps_data = []
-    
-    with open(gps_log_path, 'r') as f:
-        # Saltar header si existe
-        header = f.readline()
+    try:
+        # Leer CSV
+        df = pd.read_csv(location_csv_path)
         
-        for line in f:
-            parts = line.strip().split(',')
-            if len(parts) >= 4:
-                try:
-                    timestamp = float(parts[0])
-                    lat = float(parts[1])
-                    lon = float(parts[2])
-                    alt = float(parts[3])
-                    gps_data.append((timestamp, lat, lon, alt))
-                except ValueError:
-                    continue
-    
-    print(f"OK - Cargadas {len(gps_data)} mediciones GPS")
-    return gps_data
+        # Verificar columnas esperadas
+        expected_cols = ['Time (ns)', 'Latitude (°)', 'Longitude (°)', 'Altitude (m)']
+        for col in expected_cols:
+            if col not in df.columns:
+                print(f"ERROR - Columna faltante: {col}")
+                return None
+        
+        # Renombrar columnas para facilitar uso
+        df_clean = pd.DataFrame({
+            'time_ns': df['Time (ns)'],
+            'latitude': df['Latitude (°)'],
+            'longitude': df['Longitude (°)'],
+            'altitude': df['Altitude (m)'],
+            'speed': df['Speed (m/s)'] if 'Speed (m/s)' in df.columns else 0.0,
+            'unix_ns': df['Unix (ns)'] if 'Unix (ns)' in df.columns else df['Time (ns)']
+        })
+        
+        print(f"OK - Cargadas {len(df_clean)} mediciones GPS")
+        print(f"   Rango temporal: {df_clean['time_ns'].min()} - {df_clean['time_ns'].max()} ns")
+        print(f"   Coordenadas: Lat [{df_clean['latitude'].min():.6f}, {df_clean['latitude'].max():.6f}]")
+        print(f"                Lon [{df_clean['longitude'].min():.6f}, {df_clean['longitude'].max():.6f}]")
+        
+        return df_clean
+        
+    except Exception as e:
+        print(f"ERROR - Error al cargar GPS: {e}")
+        return None
 
-def interpolate_gps(gps_data, frame_idx, fps=30.0):
+def load_frame_timestamps(timestamp_file_path):
     """
-    Interpola GPS para un frame específico
+    Carga archivo frame_timestamps.txt con timestamps de cada frame
+    
+    Formato esperado: Un timestamp (ns) por línea
+    
+    Returns:
+        np.array: Array de timestamps en nanosegundos
+    """
+    try:
+        timestamps = []
+        with open(timestamp_file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    timestamps.append(int(line))
+        
+        timestamps = np.array(timestamps)
+        print(f"OK - Cargados {len(timestamps)} timestamps de frames")
+        print(f"   Rango: {timestamps.min()} - {timestamps.max()} ns")
+        
+        return timestamps
+        
+    except Exception as e:
+        print(f"ERROR - Error al cargar timestamps: {e}")
+        return None
+
+def synchronize_gps_to_frames(gps_df, frame_timestamps):
+    """
+    Sincroniza mediciones GPS con timestamps de frames
+    Usa interpolación para estimar GPS en cada frame
     
     Args:
-        gps_data: Lista de (timestamp, lat, lon, alt)
-        frame_idx: Índice del frame
-        fps: FPS del video
+        gps_df: DataFrame con datos GPS
+        frame_timestamps: Array de timestamps de frames (ns)
     
     Returns:
-        np.array: [lat, lon, alt] o None si no hay datos
+        list: Lista de [lat, lon, alt] para cada frame (None si no hay datos)
     """
-    if not gps_data or frame_idx >= len(gps_data):
-        # Si no hay sincronización perfecta, usar índice directo
-        if frame_idx < len(gps_data):
-            _, lat, lon, alt = gps_data[frame_idx]
-            return np.array([lat, lon, alt])
-        return None
+    gps_per_frame = []
     
-    # Opción 1: Mapeo directo (más simple)
-    _, lat, lon, alt = gps_data[min(frame_idx, len(gps_data)-1)]
-    return np.array([lat, lon, alt])
+    # Convertir a arrays para interpolación eficiente
+    gps_times = gps_df['unix_ns'].values
+    gps_lats = gps_df['latitude'].values
+    gps_lons = gps_df['longitude'].values
+    gps_alts = gps_df['altitude'].values
+    
+    for frame_ts in frame_timestamps:
+        # Encontrar mediciones GPS más cercanas
+        time_diffs = np.abs(gps_times - frame_ts)
+        closest_idx = np.argmin(time_diffs)
+        
+        # Si la diferencia es muy grande (>5 segundos), no usar GPS
+        time_diff_seconds = time_diffs[closest_idx] / 1e9
+        if time_diff_seconds > 5.0:
+            gps_per_frame.append(None)
+            continue
+        
+        # Interpolación lineal si hay mediciones cercanas
+        if closest_idx > 0 and closest_idx < len(gps_times) - 1:
+            # Determinar si interpolar hacia adelante o atrás
+            if gps_times[closest_idx] < frame_ts:
+                idx1, idx2 = closest_idx, closest_idx + 1
+            else:
+                idx1, idx2 = closest_idx - 1, closest_idx
+            
+            # Factor de interpolación
+            t1, t2 = gps_times[idx1], gps_times[idx2]
+            if t2 - t1 > 0:
+                alpha = (frame_ts - t1) / (t2 - t1)
+                alpha = np.clip(alpha, 0, 1)
+                
+                # Interpolar lat, lon, alt
+                lat = gps_lats[idx1] * (1 - alpha) + gps_lats[idx2] * alpha
+                lon = gps_lons[idx1] * (1 - alpha) + gps_lons[idx2] * alpha
+                alt = gps_alts[idx1] * (1 - alpha) + gps_alts[idx2] * alpha
+            else:
+                # Usar valor más cercano
+                lat = gps_lats[closest_idx]
+                lon = gps_lons[closest_idx]
+                alt = gps_alts[closest_idx]
+        else:
+            # Usar valor más cercano
+            lat = gps_lats[closest_idx]
+            lon = gps_lons[closest_idx]
+            alt = gps_alts[closest_idx]
+        
+        gps_per_frame.append(np.array([lat, lon, alt]))
+    
+    # Estadísticas
+    valid_gps = sum(1 for g in gps_per_frame if g is not None)
+    print(f"OK - Sincronización: {valid_gps}/{len(frame_timestamps)} frames con GPS válido")
+    
+    return gps_per_frame
 
-def process_mobile_video(video_path, gps_log_path, training_mode=True, model_path=None):
+def process_mobile_video(video_path, mobile_data_dir, training_mode=True, model_path=None):
     """
-    Procesa un video móvil con su log GPS
+    Procesa un video móvil con sus datos GPS sincronizados
+    
+    Args:
+        video_path: Ruta al video MP4
+        mobile_data_dir: Directorio con location.csv y frame_timestamps.txt
+        training_mode: True para entrenamiento, False para inferencia
+        model_path: Ruta a modelo pre-entrenado (opcional)
     """
     print("="*70)
-    print("PROCESANDO VIDEO MÓVIL CON GPS")
+    print("PROCESANDO VIDEO MÓVIL CON GPS SINCRONIZADO")
     print("="*70)
     print(f"Video: {video_path}")
-    print(f"GPS Log: {gps_log_path}")
+    print(f"Datos: {mobile_data_dir}")
     print(f"Modo: {'ENTRENAMIENTO' if training_mode else 'INFERENCIA'}")
     print("="*70)
     print()
     
     # Verificar archivos
     if not os.path.exists(video_path):
-        print(f"ERROR - ERROR: Video no encontrado: {video_path}")
+        print(f"ERROR - Video no encontrado: {video_path}")
         return
     
-    if not os.path.exists(gps_log_path):
-        print(f"ERROR - ERROR: GPS log no encontrado: {gps_log_path}")
+    location_csv = os.path.join(mobile_data_dir, 'location.csv')
+    timestamps_file = os.path.join(mobile_data_dir, 'frame_timestamps.txt')
+    
+    if not os.path.exists(location_csv):
+        print(f"ERROR - location.csv no encontrado: {location_csv}")
         return
     
-    # Cargar GPS
-    gps_data = load_gps_log(gps_log_path)
-    if not gps_data:
-        print("ERROR - ERROR: No se pudieron cargar datos GPS")
+    if not os.path.exists(timestamps_file):
+        print(f"ERROR - frame_timestamps.txt no encontrado: {timestamps_file}")
         return
+    
+    # Cargar datos GPS
+    print("\n📍 CARGANDO DATOS GPS...")
+    gps_df = load_mobile_gps_data(location_csv)
+    if gps_df is None or len(gps_df) == 0:
+        print("ERROR - No se pudieron cargar datos GPS")
+        return
+    
+    # Cargar timestamps de frames
+    print("\n⏱️  CARGANDO TIMESTAMPS DE FRAMES...")
+    frame_timestamps = load_frame_timestamps(timestamps_file)
+    if frame_timestamps is None or len(frame_timestamps) == 0:
+        print("ERROR - No se pudieron cargar timestamps de frames")
+        return
+    
+    # Sincronizar GPS con frames
+    print("\n🔄 SINCRONIZANDO GPS CON FRAMES...")
+    gps_per_frame = synchronize_gps_to_frames(gps_df, frame_timestamps)
     
     # Abrir video
+    print("\n🎥 ABRIENDO VIDEO...")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"ERROR - ERROR: No se pudo abrir el video: {video_path}")
+        print(f"ERROR - No se pudo abrir el video: {video_path}")
         return
     
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    print(f"OK - Video cargado: {total_frames} frames @ {fps} FPS")
-    
-    # Obtener parámetros de calibración de la cámara móvil
-    # IMPORTANTE: Estos valores son aproximados para cámaras móviles
-    # Deberías calibrar tu cámara específica para mejores resultados
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
-    # Valores típicos para cámara móvil
-    fx = fy = width * 1.2  # Factor típico
+    print(f"OK - Video cargado: {total_frames} frames @ {fps:.2f} FPS")
+    print(f"   Resolución: {width}x{height}")
+    
+    # Verificar que coincidan frames
+    if len(gps_per_frame) != total_frames:
+        print(f"ADVERTENCIA - Mismatch: {len(gps_per_frame)} timestamps vs {total_frames} frames")
+        print(f"            Usando min({len(gps_per_frame)}, {total_frames})")
+        num_frames_to_process = min(len(gps_per_frame), total_frames)
+    else:
+        num_frames_to_process = total_frames
+    
+    # Parámetros de cámara móvil (aproximados)
+    # IMPORTANTE: Deberías calibrar tu cámara para mejores resultados
+    fx = fy = width * 1.2  # Factor típico para cámaras móviles
     cx = width / 2.0
     cy = height / 2.0
     
-    print(f"📷 Parámetros de cámara (aprox):")
-    print(f"   Resolución: {width}x{height}")
-    print(f"   fx={fx:.2f}, fy={fy:.2f}, cx={cx:.2f}, cy={cy:.2f}")
-    print(f"   ADVERTENCIA:  IMPORTANTE: Considera calibrar tu cámara para mejor precisión")
-    print()
+    print(f"\n📷 PARÁMETROS DE CÁMARA (APROXIMADOS):")
+    print(f"   fx={fx:.2f}, fy={fy:.2f}")
+    print(f"   cx={cx:.2f}, cy={cy:.2f}")
+    print(f"   ⚠️  IMPORTANTE: Considera calibrar tu cámara para mejor precisión")
     
     # Crear instancia SLAM
-    # NOTA: simulate_mobile_gps=False porque tu GPS YA ES ruidoso
     slam = RL_ORB_SLAM_GPS(
         fx=fx, fy=fy, cx=cx, cy=cy,
         training_mode=training_mode,
         model_path=model_path,
-        simulate_mobile_gps=False,  # Tu GPS real ya tiene ruido
+        simulate_mobile_gps=False,  # GPS real ya tiene ruido
         gps_noise_std=0.0
     )
     
-    print(f"\n{'='*60}")
-    print(f"PROCESANDO {total_frames} FRAMES")
-    print(f"{'='*60}\n")
+    print(f"\n{'='*70}")
+    print(f"PROCESANDO {num_frames_to_process} FRAMES")
+    print(f"{'='*70}\n")
     
     # Procesar frame por frame
     frame_idx = 0
-    while True:
+    frames_with_gps = 0
+    
+    while frame_idx < num_frames_to_process:
         ret, frame = cap.read()
         if not ret:
             break
         
-        print(f"Frame {frame_idx}/{total_frames}...")
+        if frame_idx % 50 == 0:
+            print(f"Frame {frame_idx}/{num_frames_to_process}...")
         
         # Obtener GPS para este frame
-        gps_point = interpolate_gps(gps_data, frame_idx, fps)
+        gps_point = gps_per_frame[frame_idx] if frame_idx < len(gps_per_frame) else None
         
         if gps_point is not None:
             # Convertir a UTM
@@ -160,8 +274,8 @@ def process_mobile_video(video_path, gps_log_path, training_mode=True, model_pat
             
             # Procesar frame con GPS
             slam.process_frame_with_gps(frame, gps_utm, gps_confidence)
+            frames_with_gps += 1
         else:
-            print(f"  ADVERTENCIA:  No hay GPS disponible para frame {frame_idx}")
             # Procesar sin GPS
             slam.process_frame_with_gps(frame, None, 0.0)
         
@@ -172,30 +286,50 @@ def process_mobile_video(video_path, gps_log_path, training_mode=True, model_pat
     print("\n" + "="*70)
     print("PROCESAMIENTO COMPLETADO")
     print("="*70)
+    print(f"Frames procesados: {frame_idx}")
+    print(f"Frames con GPS: {frames_with_gps} ({frames_with_gps/frame_idx*100:.1f}%)")
     
     # Guardar modelo si estamos entrenando
     if training_mode:
         model_save_path = "LMS/LMS_RL_ORB_GPS/model/trained_rl_agent.pth"
         metadata = {
-            'video': video_path,
+            'video': os.path.basename(video_path),
             'total_frames': frame_idx,
+            'frames_with_gps': frames_with_gps,
             'total_experiences': len(slam.trainer.replay_buffer),
             'training_steps': len(slam.trainer.training_metrics['losses']),
-            'mobile_video': True
+            'mobile_video': True,
+            'data_source': 'mobile_recorded'
         }
         slam.trainer.save_model(model_save_path, metadata)
         slam.trainer.print_training_summary()
-        print(f"\nOK - Modelo guardado en: {model_save_path}")
+        print(f"\n✅ Modelo guardado en: {model_save_path}")
     
     # Guardar trayectoria
     optimized_trajectory = slam.optimize_pose_graph()
     slam.save_trajectory_outputs(optimized_trajectory, video_path)
     
-    print(f"\nOK - Trayectoria guardada en: resultados/LMS_RL_ORB_GPS/")
+    print(f"\n✅ Trayectoria guardada en: resultados/LMS_RL_ORB_GPS/")
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Procesar video móvil con GPS para entrenamiento/prueba de RL'
+        description='Procesar video móvil con GPS para entrenamiento/prueba de RL',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Ejemplos de uso:
+
+  # Entrenar con datos móviles:
+  python -m LMS.LMS_RL_ORB_GPS.scripts.mobile.process_mobile_video \\
+      --video mobile_data/2025_03_11/movie.mp4 \\
+      --data_dir mobile_data/2025_03_11 \\
+      --train
+
+  # Inferencia con modelo pre-entrenado:
+  python -m LMS.LMS_RL_ORB_GPS.scripts.mobile.process_mobile_video \\
+      --video mobile_data/2025_03_11/movie.mp4 \\
+      --data_dir mobile_data/2025_03_11 \\
+      --model_path LMS/LMS_RL_ORB_GPS/model/trained_rl_agent.pth
+        """
     )
     parser.add_argument(
         '--video',
@@ -203,9 +337,9 @@ def main():
         help='Ruta al video MP4 del móvil'
     )
     parser.add_argument(
-        '--gps_log',
+        '--data_dir',
         required=True,
-        help='Ruta al archivo GPS (CSV: timestamp,lat,lon,alt)'
+        help='Directorio con location.csv y frame_timestamps.txt'
     )
     parser.add_argument(
         '--train',
@@ -222,7 +356,7 @@ def main():
     
     process_mobile_video(
         video_path=args.video,
-        gps_log_path=args.gps_log,
+        mobile_data_dir=args.data_dir,
         training_mode=args.train,
         model_path=args.model_path
     )
