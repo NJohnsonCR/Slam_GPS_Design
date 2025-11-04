@@ -295,6 +295,9 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                                           f"Avg Reward: {train_result['avg_reward']:.4f}")
                             
                             print(f"  [RL TRAINING] Reward={reward:.3f}")
+                    else:
+                        # NO HAY GPS - Usar 100% SLAM
+                        print(f"  [FINAL]  SLAM=1.000, GPS=0.000 (Sin GPS disponible)")
 
                     fused_pose = np.eye(4)
                     fused_pose[:3, 3] = fused_position
