@@ -479,8 +479,17 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         tipo_lms = "LMS_RL_ORB_GPS"
         timestamp = datetime.now().strftime("%H%M_%d%m_%Y")
         
-        # Mantener subcarpeta por método (estructura consistente con el proyecto)
-        output_dir = os.path.join("resultados", tipo_lms, timestamp)
+        # Obtener la raíz del proyecto (donde está la carpeta resultados/)
+        # Este archivo está en: Slam_GPS_Design/LMS/LMS_RL_ORB_GPS/main.py
+        # Necesitamos llegar a: Slam_GPS_Design/
+        project_root = os.path.abspath(os.path.join(
+            os.path.dirname(__file__),  # LMS/LMS_RL_ORB_GPS/
+            '..',                        # LMS/
+            '..'                         # Slam_GPS_Design/
+        ))
+        
+        # Usar la misma estructura que los otros sistemas LMS
+        output_dir = os.path.join(project_root, "resultados", tipo_lms, timestamp)
         
         os.makedirs(output_dir, exist_ok=True)
         output_base = os.path.join(output_dir, f"trayectoria_{tipo_lms}")
