@@ -5,6 +5,7 @@ import json
 import os
 import numpy as np
 from datetime import datetime
+import matplotlib.pyplot as plt
 
 """
 medir_metricas(comando, nombre_slam=None): mide recursos del proceso.
@@ -128,3 +129,207 @@ def calculate_rpe(gt_poses, estimated_poses, delta=1):
     rpe_rot = np.sqrt(np.mean(np.array(rot_errors) ** 2)) if rot_errors else 0.0
     
     return rpe_trans, rpe_rot
+
+class TrajectoryMetrics:
+    """Clase para calcular métricas de trayectorias SLAM"""
+    
+    def __init__(self):
+        pass
+    
+    def calculate_ate(self, estimated_traj, ground_truth_traj):
+        """
+        Calcula el Absolute Trajectory Error (ATE) con alineación Umeyama
+        
+        Args:
+            estimated_traj: Lista de poses estimadas (matrices 4x4)
+            ground_truth_traj: Lista de poses ground truth (matrices 4x4)
+        
+        Returns:
+            dict: Diccionario con métricas ATE
+        """
+        # Extraer posiciones
+        est_positions = np.array([pose[:3, 3] for pose in estimated_traj])
+        gt_positions = np.array([pose[:3, 3] for pose in ground_truth_traj])
+        
+        if len(est_positions) != len(gt_positions):
+            min_len = min(len(est_positions), len(gt_positions))
+            est_positions = est_positions[:min_len]
+            gt_positions = gt_positions[:min_len]
+        
+        # Alinear trayectorias usando Umeyama
+        est_aligned = self._align_trajectory_umeyama(est_positions, gt_positions)
+        
+        # Calcular errores
+        errors = np.linalg.norm(est_aligned - gt_positions, axis=1)
+        
+        return {
+            'rmse': float(np.sqrt(np.mean(errors ** 2))),
+            'mean': float(np.mean(errors)),
+            'median': float(np.median(errors)),
+            'std': float(np.std(errors)),
+            'min': float(np.min(errors)),
+            'max': float(np.max(errors)),
+            'errors': errors
+        }
+    
+    def calculate_rpe(self, estimated_poses, ground_truth_poses, delta=1):
+        """
+        Calcula el Relative Pose Error (RPE)
+        
+        Args:
+            estimated_poses: Lista de poses estimadas (matrices 4x4)
+            ground_truth_poses: Lista de poses ground truth (matrices 4x4)
+            delta: Delta de frames para calcular poses relativas
+        
+        Returns:
+            dict: Diccionario con métricas RPE de traslación
+        """
+        if len(estimated_poses) != len(ground_truth_poses):
+            min_len = min(len(estimated_poses), len(ground_truth_poses))
+            estimated_poses = estimated_poses[:min_len]
+            ground_truth_poses = ground_truth_poses[:min_len]
+        
+        trans_errors = []
+        
+        for i in range(len(estimated_poses) - delta):
+            # Extraer posiciones
+            gt_pos1 = ground_truth_poses[i][:3, 3]
+            gt_pos2 = ground_truth_poses[i + delta][:3, 3]
+            est_pos1 = estimated_poses[i][:3, 3]
+            est_pos2 = estimated_poses[i + delta][:3, 3]
+            
+            # Movimiento relativo
+            gt_delta = np.linalg.norm(gt_pos2 - gt_pos1)
+            est_delta = np.linalg.norm(est_pos2 - est_pos1)
+            
+            # Error de traslación
+            trans_error = abs(gt_delta - est_delta)
+            trans_errors.append(trans_error)
+        
+        if not trans_errors:
+            return {
+                'rmse': 0.0,
+                'mean': 0.0,
+                'median': 0.0,
+                'std': 0.0,
+                'min': 0.0,
+                'max': 0.0,
+                'errors': []
+            }
+        
+        trans_errors = np.array(trans_errors)
+        
+        return {
+            'rmse': float(np.sqrt(np.mean(trans_errors ** 2))),
+            'mean': float(np.mean(trans_errors)),
+            'median': float(np.median(trans_errors)),
+            'std': float(np.std(trans_errors)),
+            'min': float(np.min(trans_errors)),
+            'max': float(np.max(trans_errors)),
+            'errors': trans_errors
+        }
+    
+    def _align_trajectory_umeyama(self, src, dst):
+        """
+        Alinea la trayectoria src con dst usando el algoritmo de Umeyama
+        (alineación de similitud en 3D: rotación + traslación + escala)
+        """
+        # Centrar las nubes de puntos
+        src_mean = np.mean(src, axis=0)
+        dst_mean = np.mean(dst, axis=0)
+        
+        src_centered = src - src_mean
+        dst_centered = dst - dst_mean
+        
+        # Calcular la matriz de covarianza
+        H = src_centered.T @ dst_centered
+        
+        # SVD para encontrar la rotación
+        U, S, Vt = np.linalg.svd(H)
+        R = Vt.T @ U.T
+        
+        # Asegurar una rotación válida (det(R) = 1)
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = Vt.T @ U.T
+        
+        # Calcular la escala
+        src_var = np.sum(src_centered ** 2)
+        scale = np.sum(S) / src_var if src_var > 0 else 1.0
+        
+        # Aplicar transformación
+        src_aligned = scale * (src_centered @ R.T) + dst_mean
+        
+        return src_aligned
+    
+    def print_metrics_summary(self, ate_result, rpe_result, rpe_rot_result):
+        """Imprime un resumen de las métricas"""
+        print("\n" + "="*60)
+        print("RESUMEN DE MÉTRICAS")
+        print("="*60)
+        
+        if ate_result:
+            print("\nAbsolute Trajectory Error (ATE):")
+            print(f"  RMSE:   {ate_result['rmse']:.4f} m")
+            print(f"  Mean:   {ate_result['mean']:.4f} m")
+            print(f"  Median: {ate_result['median']:.4f} m")
+            print(f"  Std:    {ate_result['std']:.4f} m")
+            print(f"  Min:    {ate_result['min']:.4f} m")
+            print(f"  Max:    {ate_result['max']:.4f} m")
+        
+        if rpe_result:
+            print("\nRelative Pose Error (RPE) - Traslación:")
+            print(f"  RMSE:   {rpe_result['rmse']:.4f} m")
+            print(f"  Mean:   {rpe_result['mean']:.4f} m")
+            print(f"  Median: {rpe_result['median']:.4f} m")
+            print(f"  Std:    {rpe_result['std']:.4f} m")
+        
+        print("="*60 + "\n")
+    
+    def save_metrics_to_json(self, ate_result, rpe_result, rpe_rot_result, output_file):
+        """Guarda las métricas en un archivo JSON"""
+        metrics_dict = {
+            'ate': {k: v.tolist() if isinstance(v, np.ndarray) else v 
+                   for k, v in ate_result.items() if k != 'errors'},
+            'rpe_translation': {k: v.tolist() if isinstance(v, np.ndarray) else v 
+                               for k, v in rpe_result.items() if k != 'errors'} if rpe_result else None
+        }
+        
+        with open(output_file, 'w') as f:
+            json.dump(metrics_dict, f, indent=4)
+        
+        print(f"Métricas guardadas en: {output_file}")
+    
+    def plot_ate_errors(self, errors, output_file):
+        """Genera un gráfico de errores ATE"""
+        plt.figure(figsize=(12, 6))
+        plt.plot(errors, 'b-', linewidth=1.5)
+        plt.axhline(y=np.mean(errors), color='r', linestyle='--', label=f'Media: {np.mean(errors):.3f}m')
+        plt.xlabel('Frame')
+        plt.ylabel('Error (m)')
+        plt.title('Absolute Trajectory Error (ATE) por Frame')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=150)
+        plt.close()
+        print(f"Gráfico ATE guardado en: {output_file}")
+    
+    def plot_rpe_errors(self, errors, output_file, metric_name="RPE"):
+        """Genera un gráfico de errores RPE"""
+        if len(errors) == 0:
+            print(f"No hay errores {metric_name} para graficar")
+            return
+        
+        plt.figure(figsize=(12, 6))
+        plt.plot(errors, 'g-', linewidth=1.5)
+        plt.axhline(y=np.mean(errors), color='r', linestyle='--', label=f'Media: {np.mean(errors):.3f}m')
+        plt.xlabel('Par de Frames')
+        plt.ylabel('Error (m)')
+        plt.title(f'{metric_name} por Par de Frames')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=150)
+        plt.close()
+        print(f"Gráfico {metric_name} guardado en: {output_file}")

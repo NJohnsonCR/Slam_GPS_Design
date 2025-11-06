@@ -34,9 +34,9 @@ def kitti_oxts_to_kml(oxts_folder, output_file="trajectory.kml"):
 
         # Guardar archivo
         kml.save(output_file)
-        print(f"✅ Archivo KML guardado en: {output_file}")
+        print(f"Archivo KML guardado en: {output_file}")
     else:
-        print("⚠️ No se encontraron coordenadas válidas.")
+        print("No se encontraron coordenadas válidas.")
 
 # Ejemplo de uso:
 if __name__ == "__main__":

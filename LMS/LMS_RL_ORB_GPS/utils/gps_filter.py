@@ -22,6 +22,12 @@ class GPSFilter:
         self.last_confidence = 0.5
         self.last_residual_variance = 0.0  # Para debug
         
+        # NUEVO: Para detección automática de calidad
+        self.all_measurements = []  # Historial completo para análisis
+        self.quality_detection_done = False
+        self.is_high_precision = None
+        self.quality_metrics = {}
+    
     def add_measurement(self, gps_position):
         """Agrega medición GPS y opcionalmente añade ruido"""
         if self.add_noise:
@@ -37,8 +43,10 @@ class GPSFilter:
                 print(f"  [GPS Móvil Simulado] Error agregado: {error:.2f}m")
             
             self.measurements.append(noisy_position)
+            self.all_measurements.append(noisy_position.copy())  # NUEVO
         else:
             self.measurements.append(gps_position)
+            self.all_measurements.append(gps_position.copy())  # NUEVO
         
         # Mantener solo las últimas N mediciones
         if len(self.measurements) > self.window_size:
@@ -141,3 +149,189 @@ class GPSFilter:
             print(f"  [Filtro GPS - {mode}] Confianza: {self.last_confidence:.3f} ({quality}), "
                   f"Varianza Residual: {self.last_residual_variance:.4f}, "
                   f"Mediciones: {len(self.measurements)}")
+    
+    def detect_gps_quality(self, min_samples=20):
+        """
+        Detecta automáticamente si el GPS es de alta precisión (KITTI-like)
+        o baja precisión (móvil) basándose en características observables.
+        
+        Args:
+            min_samples: Número mínimo de mediciones necesarias para detección
+            
+        Returns:
+            dict con resultados de detección
+        """
+        if len(self.all_measurements) < min_samples:
+            return {
+                'detected': False,
+                'reason': f'Necesita al menos {min_samples} mediciones (tiene {len(self.all_measurements)})'
+            }
+        
+        gps_array = np.array(self.all_measurements)
+        
+        # ============================================================
+        # METRICA 1: Jitter (variación frame-a-frame)
+        # ============================================================
+        # GPS de alta precisión: jitter < 0.5m
+        # GPS móvil: jitter típicamente 2-10m
+        velocities = np.diff(gps_array, axis=0)
+        velocity_magnitudes = np.linalg.norm(velocities[:, :2], axis=1)  # Solo X, Y
+        
+        # Aceleración (segunda derivada)
+        accelerations = np.diff(velocities, axis=0)
+        acceleration_magnitudes = np.linalg.norm(accelerations[:, :2], axis=1)
+        
+        jitter = np.std(velocity_magnitudes)
+        avg_acceleration = np.mean(acceleration_magnitudes)
+        
+        # ============================================================
+        # METRICA 2: Magnitud de saltos repentinos
+        # ============================================================
+        # GPS móvil tiende a tener "saltos" grandes repentinos
+        median_velocity = np.median(velocity_magnitudes)
+        sudden_jumps = velocity_magnitudes > (median_velocity * 3 + 0.5)  # +0.5 para evitar división por 0
+        jump_frequency = np.sum(sudden_jumps) / len(sudden_jumps)
+        max_jump = np.max(velocity_magnitudes)
+        
+        # ============================================================
+        # METRICA 3: Suavidad de trayectoria (curvatura)
+        # ============================================================
+        # GPS de alta precisión tiene trayectorias más suaves
+        curvatures = []
+        for i in range(1, len(velocities) - 1):
+            v1 = velocities[i-1][:2]  # Solo X, Y
+            v2 = velocities[i][:2]
+            norm1 = np.linalg.norm(v1)
+            norm2 = np.linalg.norm(v2)
+            
+            if norm1 > 0.01 and norm2 > 0.01:  # Evitar división por 0
+                cos_angle = np.clip(np.dot(v1, v2) / (norm1 * norm2), -1, 1)
+                angle = np.arccos(cos_angle)
+                curvatures.append(angle)
+        
+        avg_curvature = np.mean(curvatures) if len(curvatures) > 0 else 0
+        
+        # ============================================================
+        # METRICA 4: Ratio señal/ruido
+        # ============================================================
+        signal = np.mean(velocity_magnitudes)  # Movimiento real
+        noise = np.std(acceleration_magnitudes)  # Ruido (cambios bruscos)
+        snr = signal / (noise + 1e-6)
+        
+        # ============================================================
+        # DECISION: Alta vs Baja precisión
+        # ============================================================
+        
+        # Umbrales calibrados con KITTI y datos móviles
+        is_high_precision = (
+            jitter < 0.5 and                    # Poco jitter
+            jump_frequency < 0.1 and            # Pocos saltos
+            max_jump < 2.0 and                  # Saltos pequeños
+            avg_acceleration < 0.3 and          # Aceleración suave
+            snr > 2.0                           # Buena relación señal/ruido
+        )
+        
+        quality_type = "ALTA PRECISION (tipo KITTI)" if is_high_precision else "BAJA PRECISION (tipo movil)"
+        
+        self.is_high_precision = is_high_precision
+        self.quality_detection_done = True
+        self.quality_metrics = {
+            'detected': bool(True),  # Convertir explícitamente a bool estándar
+            'is_high_precision': bool(is_high_precision),
+            'quality_type': quality_type,
+            'metrics': {
+                'jitter_std': float(jitter),
+                'jump_frequency': float(jump_frequency),
+                'max_jump': float(max_jump),
+                'avg_acceleration': float(avg_acceleration),
+                'avg_curvature_deg': float(np.degrees(avg_curvature)),
+                'signal_noise_ratio': float(snr),
+                'num_samples': int(len(self.all_measurements))
+            },
+            'thresholds_used': {
+                'jitter_threshold': float(0.5),
+                'jump_freq_threshold': float(0.1),
+                'max_jump_threshold': float(2.0),
+                'acceleration_threshold': float(0.3),
+                'snr_threshold': float(2.0)
+            }
+        }
+        
+        return self.quality_metrics
+    
+    def print_quality_detection_report(self):
+        """Imprime reporte detallado de la detección de calidad de GPS."""
+        if not self.quality_detection_done:
+            print("Deteccion de calidad GPS aun no realizada")
+            return
+        
+        print("\n" + "="*80)
+        print("DETECCION AUTOMATICA DE CALIDAD DE GPS")
+        print("="*80)
+        print(f"\nResultado: {self.quality_metrics['quality_type']}")
+        
+        confidence_level = 'ALTA' if self.quality_metrics['metrics']['num_samples'] >= 50 else 'MEDIA'
+        print(f"Confianza en deteccion: {confidence_level}")
+        
+        print("\n" + "-"*80)
+        print("METRICAS OBSERVADAS:")
+        print("-"*80)
+        
+        metrics = self.quality_metrics['metrics']
+        thresholds = self.quality_metrics['thresholds_used']
+        
+        print(f"\n1. Jitter (variacion frame-a-frame):")
+        print(f"   Valor medido: {metrics['jitter_std']:.3f} m")
+        print(f"   Umbral: {thresholds['jitter_threshold']:.3f} m")
+        status = 'BAJO (bueno)' if metrics['jitter_std'] < thresholds['jitter_threshold'] else 'ALTO (malo)'
+        print(f"   Estado: {status}")
+        
+        print(f"\n2. Frecuencia de saltos repentinos:")
+        print(f"   Valor medido: {metrics['jump_frequency']*100:.1f}% de frames")
+        print(f"   Umbral: {thresholds['jump_freq_threshold']*100:.1f}%")
+        status = 'BAJO (bueno)' if metrics['jump_frequency'] < thresholds['jump_freq_threshold'] else 'ALTO (malo)'
+        print(f"   Estado: {status}")
+        
+        print(f"\n3. Magnitud de salto maximo:")
+        print(f"   Valor medido: {metrics['max_jump']:.3f} m")
+        print(f"   Umbral: {thresholds['max_jump_threshold']:.3f} m")
+        status = 'PEQUENO (bueno)' if metrics['max_jump'] < thresholds['max_jump_threshold'] else 'GRANDE (malo)'
+        print(f"   Estado: {status}")
+        
+        print(f"\n4. Aceleracion promedio:")
+        print(f"   Valor medido: {metrics['avg_acceleration']:.3f} m/frame^2")
+        print(f"   Umbral: {thresholds['acceleration_threshold']:.3f} m/frame^2")
+        status = 'SUAVE (bueno)' if metrics['avg_acceleration'] < thresholds['acceleration_threshold'] else 'BRUSCO (malo)'
+        print(f"   Estado: {status}")
+        
+        print(f"\n5. Relacion senal/ruido:")
+        print(f"   Valor medido: {metrics['signal_noise_ratio']:.2f}")
+        print(f"   Umbral: {thresholds['snr_threshold']:.2f}")
+        status = 'ALTA (bueno)' if metrics['signal_noise_ratio'] > thresholds['snr_threshold'] else 'BAJA (malo)'
+        print(f"   Estado: {status}")
+        
+        print("\n" + "="*80)
+        print("INTERPRETACION:")
+        print("="*80)
+        
+        if self.is_high_precision:
+            print("\nGPS de ALTA PRECISION detectado")
+            print("   - Puede usarse como ground truth para metricas ATE/RPE")
+            print("   - Comparable con sistemas RTK-GPS profesionales")
+            print("   - Precision estimada: +-5-20 cm")
+        else:
+            print("\nGPS de BAJA PRECISION detectado")
+            print("   - NO debe usarse como ground truth absoluto")
+            print("   - Solo valido para metricas relativas (suavidad, consistencia)")
+            print("   - Precision estimada: +-2-15 m")
+            print("\n   Recomendacion:")
+            print("   - Usar metricas de CONSISTENCIA en lugar de ATE/RPE absoluto")
+            print("   - Comparar Pipeline vs SLAM (ambos con mismo GPS de referencia)")
+        
+        print("="*80 + "\n")
+    
+    def get_quality_type(self):
+        """Retorna el tipo de calidad detectado ('high' o 'low')"""
+        if not self.quality_detection_done:
+            return None
+        return 'high' if self.is_high_precision else 'low'

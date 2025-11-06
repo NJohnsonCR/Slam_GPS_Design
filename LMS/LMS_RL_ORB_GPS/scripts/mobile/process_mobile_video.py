@@ -185,25 +185,25 @@ def process_mobile_video(video_path, mobile_data_dir, training_mode=True, model_
         return
     
     # Cargar datos GPS
-    print("\n📍 CARGANDO DATOS GPS...")
+    print("\nCARGANDO DATOS GPS...")
     gps_df = load_mobile_gps_data(location_csv)
     if gps_df is None or len(gps_df) == 0:
         print("ERROR - No se pudieron cargar datos GPS")
         return
     
     # Cargar timestamps de frames
-    print("\n⏱️  CARGANDO TIMESTAMPS DE FRAMES...")
+    print("\nCARGANDO TIMESTAMPS DE FRAMES...")
     frame_timestamps = load_frame_timestamps(timestamps_file)
     if frame_timestamps is None or len(frame_timestamps) == 0:
         print("ERROR - No se pudieron cargar timestamps de frames")
         return
     
     # Sincronizar GPS con frames
-    print("\n🔄 SINCRONIZANDO GPS CON FRAMES...")
+    print("\nSINCRONIZANDO GPS CON FRAMES...")
     gps_per_frame = synchronize_gps_to_frames(gps_df, frame_timestamps)
     
     # Abrir video
-    print("\n🎥 ABRIENDO VIDEO...")
+    print("\nABRIENDO VIDEO...")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"ERROR - No se pudo abrir el video: {video_path}")
@@ -231,10 +231,10 @@ def process_mobile_video(video_path, mobile_data_dir, training_mode=True, model_
     cx = width / 2.0
     cy = height / 2.0
     
-    print(f"\n📷 PARÁMETROS DE CÁMARA (APROXIMADOS):")
+    print(f"\nPARAMETROS DE CAMARA (APROXIMADOS):")
     print(f"   fx={fx:.2f}, fy={fy:.2f}")
     print(f"   cx={cx:.2f}, cy={cy:.2f}")
-    print(f"   ⚠️  IMPORTANTE: Considera calibrar tu cámara para mejor precisión")
+    print(f"   IMPORTANTE: Considera calibrar tu cámara para mejor precisión")
     
     # Crear instancia SLAM
     slam = RL_ORB_SLAM_GPS(
@@ -303,13 +303,13 @@ def process_mobile_video(video_path, mobile_data_dir, training_mode=True, model_
         }
         slam.trainer.save_model(model_save_path, metadata)
         slam.trainer.print_training_summary()
-        print(f"\n✅ Modelo guardado en: {model_save_path}")
+        print(f"\nModelo guardado en: {model_save_path}")
     
     # Guardar trayectoria
     optimized_trajectory = slam.optimize_pose_graph()
     slam.save_trajectory_outputs(optimized_trajectory, video_path)
     
-    print(f"\n✅ Trayectoria guardada en: resultados/LMS_RL_ORB_GPS/")
+    print(f"\nTrayectoria guardada en: resultados/LMS_RL_ORB_GPS/")
 
 def main():
     parser = argparse.ArgumentParser(

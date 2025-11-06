@@ -5,18 +5,25 @@ import numpy as np
 import torch
 import argparse
 import csv
+import json
 from datetime import datetime
+from typing import Dict
 import matplotlib.pyplot as plt
 import pandas as pd
 
-# Agrega la carpeta LMS_ORB_with_PG al sys.path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'LMS_ORB_with_PG'))
+# Agrega el directorio raíz al sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.join(current_dir, '..', '..')
+sys.path.insert(0, project_root)
+
+# Imports relativos al proyecto
 from LMS.LMS_ORB_with_PG.main import PoseGraphSLAM
-from LMS.LMS_RL_ORB_GPS.model.rl_agent import SimpleRLAgent, RLTrainer
-from LMS.LMS_RL_ORB_GPS.utils.gps_utils import *
-from LMS.LMS_RL_ORB_GPS.utils.gps_filter import *
-from LMS.LMS_RL_ORB_GPS.utils.training_augmentation import TrainingAugmentation
-from LMS.LMS_RL_ORB_GPS.utils.mobile_video_processor import MobileVideoProcessor
+from model.rl_agent import SimpleRLAgent, RLTrainer
+from utils.gps_utils import *
+from utils.gps_filter import *
+from utils.training_augmentation import TrainingAugmentation
+from utils.mobile_video_processor import MobileVideoProcessor
+from utils.trajectory_metrics import TrajectoryMetrics
 
 class RL_ORB_SLAM_GPS(PoseGraphSLAM):
     def __init__(self, fx=718.856, fy=718.856, cx=607.1928, cy=185.2157, 
@@ -44,6 +51,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         self.gps_available = False
         self.gps_history = []
         self.slam_history = []
+        self.gps_keyframes = []  # GPS correspondiente a cada keyframe
         
         self.current_state = None
         self.frame_count = 0
@@ -180,6 +188,12 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
 
             self.previous_keyframe_pose = initial_pose
             self.keyframe_poses.append(initial_pose)
+            
+            # Guardar GPS del primer keyframe
+            if gps_utm is not None:
+                self.gps_keyframes.append(gps_utm.copy())
+            else:
+                self.gps_keyframes.append(np.zeros(3))
 
             if gps_utm is not None:
                 self.previous_gps_utm = gps_utm.copy()
@@ -311,6 +325,17 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                     if translation_magnitude > 0.1:
                         self.keyframe_poses.append(fused_pose)
                         self.relative_transformations.append(relative_pose)
+                        
+                        # Guardar GPS correspondiente a este keyframe
+                        if gps_utm is not None:
+                            self.gps_keyframes.append(gps_utm.copy())
+                        else:
+                            # Si no hay GPS, usar la última posición GPS conocida o ceros
+                            if self.previous_gps_utm is not None:
+                                self.gps_keyframes.append(self.previous_gps_utm.copy())
+                            else:
+                                self.gps_keyframes.append(np.zeros(3))
+                        
                         self.previous_keyframe_image = gray
                         self.previous_keyframe_keypoints = keypoints
                         self.previous_keyframe_descriptors = descriptors
@@ -400,7 +425,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                         gps_utm = gps_utm_aug
                         gps_confidence = gps_conf_aug
                         
-                        print(f"  🎲 [AUGMENT] Escenario aplicado: {scenario}")
+                        print(f"[AUGMENT] Escenario aplicado: {scenario}")
                     else:
                         gps_confidence = gps_confidence_raw
 
@@ -453,9 +478,36 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
     def save_trajectory_outputs(self, trajectory, input_path):
         tipo_lms = "LMS_RL_ORB_GPS"
         timestamp = datetime.now().strftime("%H%M_%d%m_%Y")
+        
+        # Mantener subcarpeta por método (estructura consistente con el proyecto)
         output_dir = os.path.join("resultados", tipo_lms, timestamp)
+        
         os.makedirs(output_dir, exist_ok=True)
         output_base = os.path.join(output_dir, f"trayectoria_{tipo_lms}")
+
+        # ====================================================================
+        # NUEVO: DETECCION AUTOMATICA DE CALIDAD DE GPS
+        # ====================================================================
+        print("\n" + "="*80)
+        print("ANALIZANDO CALIDAD DEL GPS...")
+        print("="*80)
+        
+        gps_quality_result = self.gps_filter.detect_gps_quality(min_samples=20)
+        
+        if gps_quality_result['detected']:
+            # Imprimir reporte detallado
+            self.gps_filter.print_quality_detection_report()
+            
+            # Guardar reporte en JSON
+            quality_report_file = output_base + "_gps_quality_report.json"
+            with open(quality_report_file, 'w') as f:
+                json.dump(gps_quality_result, f, indent=4)
+            print(f"Reporte de calidad GPS guardado en: {quality_report_file}")
+        else:
+            print(f"No se pudo detectar calidad de GPS: {gps_quality_result.get('reason', 'Razon desconocida')}")
+        
+        print("="*80 + "\n")
+        # ====================================================================
 
         print(f"=== DEBUG: Trayectoria optimizada ===")
         print(f"Tipo: {type(trajectory)}")
@@ -501,49 +553,153 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             print(f"{k}: {v}")
         print("=============================================\n")
 
+        # Guardar CSV de trayectoria fusionada
         with open(output_base + "_reales.csv", "w", newline='') as file:
             writer = csv.writer(file)
             writer.writerow(["X", "Y"])
             for i in range(len(x_key)):
                 writer.writerow([x_key[i], y_key[i]])
 
-        plt.figure(figsize=(14, 10))
+        # ====================================================================
+        # COMPARACIÓN COMPLETA: Pipeline vs SLAM puro vs GPS (ground truth)
+        # ====================================================================
         
-        plt.plot(x_key, y_key, 'b-', label='Trayectoria Real (Keyframes)', linewidth=4, 
-                marker='o', markersize=8, zorder=5)
+        has_slam_pure = hasattr(self, 'slam_history') and len(self.slam_history) > 0
+        has_gps = hasattr(self, 'gps_history') and len(self.gps_history) > 0
+        has_gps_keyframes = hasattr(self, 'gps_keyframes') and len(self.gps_keyframes) > 0
         
-        if hasattr(self, 'slam_history') and len(self.slam_history) > 0:
+        if has_slam_pure and has_gps and has_gps_keyframes:
+            print("\n" + "="*80)
+            print("COMPARACIÓN COMPLETA DE MÉTODOS")
+            print("="*80)
+            print(f"Pipeline Fusionado (SLAM+GPS+RL): {len(self.keyframe_poses)} keyframes")
+            print(f"SLAM puro: {len(self.slam_history)} frames")
+            print(f"GPS puro: {len(self.gps_history)} frames")
+            print(f"GPS Ground Truth: {len(self.gps_keyframes)} keyframes")
+            print("="*80 + "\n")
+            
+            # Método 1: Comparar usando GPS keyframes como ground truth
+            print("MÉTODO 1: Comparación con GPS keyframes como ground truth")
+            print("-" * 80)
+            
+            # Preparar trayectorias para comparación
+            pipeline_traj = np.array([pose[:3, 3] for pose in self.keyframe_poses])
+            slam_pure_traj = np.array(self.slam_history)
+            gps_traj = np.array(self.gps_history)
+            gps_keyframes_traj = np.array(self.gps_keyframes)
+            
+            # Método 1: Comparar usando GPS keyframes como ground truth
+            print("MÉTODO 1: Comparación con GPS keyframes como ground truth")
+            print("-" * 80)
+            
+            # Necesitamos interpolar las trayectorias SLAM puro y GPS puro
+            # para tener la misma cantidad de puntos que los keyframes
+            n_keyframes = len(pipeline_traj)
+            
+            # Interpolar SLAM puro en las posiciones de los keyframes
+            if len(slam_pure_traj) > n_keyframes:
+                # Submuestrear SLAM puro proporcionalmente
+                indices = np.linspace(0, len(slam_pure_traj) - 1, n_keyframes).astype(int)
+                slam_pure_keyframes = slam_pure_traj[indices]
+            else:
+                slam_pure_keyframes = slam_pure_traj
+            
+            # Asegurar longitudes iguales
+            min_len = min(len(pipeline_traj), len(slam_pure_keyframes), len(gps_keyframes_traj))
+            pipeline_traj_cut = pipeline_traj[:min_len]
+            slam_pure_cut = slam_pure_keyframes[:min_len]
+            gps_gt_cut = gps_keyframes_traj[:min_len]
+            
+            # Realizar comparación usando GPS como ground truth
+            comparison_results = TrajectoryMetrics.compare_trajectories(
+                pipeline_traj=pipeline_traj_cut,
+                slam_traj=slam_pure_cut,
+                gps_traj=gps_gt_cut,
+                reference='gps'
+            )
+            
+            # Imprimir tabla comparativa
+            TrajectoryMetrics.print_comparison_table(comparison_results)
+            
+            # Guardar métricas en CSV
+            comparison_csv = output_base + "_comparison_metrics.csv"
+            TrajectoryMetrics.save_metrics_to_csv(comparison_results, comparison_csv)
+            
+            # Guardar en JSON también
+            comparison_json = output_base + "_comparison_metrics.json"
+            with open(comparison_json, 'w') as f:
+                # Convertir arrays numpy a listas para JSON
+                json_data = {}
+                for key, data in comparison_results.items():
+                    json_data[key] = {
+                        'method': data['method'],
+                        'ate': {k: float(v) if isinstance(v, (np.floating, np.integer)) else (v.tolist() if isinstance(v, np.ndarray) else v)
+                               for k, v in data['ate'].items()},
+                        'rpe': {k: float(v) if isinstance(v, (np.floating, np.integer)) else (v.tolist() if isinstance(v, np.ndarray) else v)
+                               for k, v in data['rpe'].items()}
+                    }
+                json.dump(json_data, f, indent=4)
+            print(f"Comparación guardada en JSON: {comparison_json}\n")
+            
+            # Generar gráfico comparativo de errores ATE
+            self._plot_ate_comparison(comparison_results, output_base + "_ate_comparison.png")
+            
+            # Generar gráfico comparativo de errores RPE
+            self._plot_rpe_comparison(comparison_results, output_base + "_rpe_comparison.png")
+            
+            print("="*80 + "\n")
+
+        # Gráfico principal con todas las trayectorias
+        plt.figure(figsize=(16, 12))
+        
+        # Pipeline fusionado (keyframes) - línea principal
+        plt.plot(x_key, y_key, 'b-', label='Pipeline Fusionado (SLAM+GPS+RL)', 
+                linewidth=4, marker='o', markersize=8, zorder=5)
+        
+        # SLAM puro por frame
+        if has_slam_pure:
             slam_traj = np.array(self.slam_history)
             if slam_traj.shape[1] >= 2:
                 x_slam, y_slam = slam_traj[:, 0], slam_traj[:, 1]
                 x_slam -= x_slam[0]; y_slam -= y_slam[0]
-                plt.plot(x_slam, y_slam, 'g:', label='SLAM por frame', linewidth=2, zorder=3, alpha=0.7)
+                plt.plot(x_slam, y_slam, 'g--', label='SLAM Puro', 
+                        linewidth=2.5, zorder=3, alpha=0.8)
         
-        if hasattr(self, 'gps_history') and len(self.gps_history) > 0:
+        # GPS puro
+        if has_gps:
             gps_traj = np.array(self.gps_history)
             if gps_traj.shape[1] >= 2:
                 x_gps, y_gps = gps_traj[:, 0], gps_traj[:, 1]
                 x_gps -= x_gps[0]; y_gps -= y_gps[0]
-                plt.plot(x_gps, y_gps, 'r-.', label='GPS puro', linewidth=2, zorder=2, alpha=0.8)
+                plt.plot(x_gps, y_gps, 'r-.', label='GPS Puro (Ground Truth)', 
+                        linewidth=2.5, zorder=4, alpha=0.9)
 
+        # Trayectoria optimizada (si está disponible y es diferente)
         try:
             if all(hasattr(pose, 'shape') and pose.shape == (4, 4) for pose in trajectory):
                 opt_positions = np.array([pose[:3, 3] for pose in trajectory])
                 x_opt, y_opt = opt_positions[:, 0], opt_positions[:, 1]
                 x_opt -= x_opt[0]; y_opt -= y_opt[0]
-                plt.plot(x_opt, y_opt, 'm--', label='Trayectoria "Optimizada"', 
-                        linewidth=1, zorder=1, alpha=0.5)
+                
+                # Solo graficar si es significativamente diferente
+                if np.max(np.abs(x_opt - x_key)) > 0.1 or np.max(np.abs(y_opt - y_key)) > 0.1:
+                    plt.plot(x_opt, y_opt, 'm:', label='Trayectoria Optimizada', 
+                            linewidth=1.5, zorder=1, alpha=0.5)
         except:
-            print("No se pudo graficar trayectoria optimizada (probablemente colapsada)")
+            pass
 
-        plt.scatter(x_key[0], y_key[0], color='green', s=250, label='Inicio', zorder=6)
-        plt.scatter(x_key[-1], y_key[-1], color='red', s=250, label='Fin', zorder=6)
+        plt.scatter(x_key[0], y_key[0], color='green', s=300, marker='s', 
+                   label='Inicio', zorder=10, edgecolors='black', linewidths=2)
+        plt.scatter(x_key[-1], y_key[-1], color='red', s=300, marker='X', 
+                   label='Fin', zorder=10, edgecolors='black', linewidths=2)
         
+        # Anotaciones de keyframes
         for i in range(len(x_key)):
             plt.annotate(str(i), (x_key[i], y_key[i]), xytext=(8, 8), 
                         textcoords='offset points', fontsize=9, fontweight='bold',
                         bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7))
 
+        # Información de estadísticas
         info_text = (
             f"Keyframes: {stats['keyframes']}\n"
             f"Dist. total: {stats['dist_total']:.1f} m\n"
@@ -551,21 +707,41 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             f"Éxito triang: {stats['exito_triang']*100:.2f}%\n"
             f"Mov. medio: {stats['mov_medio']:.2f} m"
         )
+        
+        # Agregar métricas de comparación si están disponibles
+        if has_slam_pure and has_gps and has_gps_keyframes:
+            try:
+                pipeline_vs_gps = comparison_results['pipeline_vs_ref']
+                slam_vs_gps = comparison_results['slam_vs_ref']
+                
+                info_text += f"\n\n--- Métricas vs GPS GT ---"
+                info_text += f"\nPipeline ATE: {pipeline_vs_gps['ate']['rmse']:.2f}m"
+                info_text += f"\nSLAM ATE: {slam_vs_gps['ate']['rmse']:.2f}m"
+                
+                if slam_vs_gps['ate']['rmse'] > 0:
+                    improvement = ((slam_vs_gps['ate']['rmse'] - pipeline_vs_gps['ate']['rmse']) / 
+                                  slam_vs_gps['ate']['rmse']) * 100
+                    info_text += f"\nMejora: {improvement:.1f}%"
+            except:
+                pass
+        
         plt.text(0.02, 0.98, info_text, transform=plt.gca().transAxes,
-                fontsize=11, bbox=dict(facecolor='white', alpha=0.9),
-                verticalalignment='top')
+                fontsize=11, bbox=dict(facecolor='white', alpha=0.95, edgecolor='black', linewidth=2),
+                verticalalignment='top', family='monospace')
 
-        plt.xlabel("X Position (m)")
-        plt.ylabel("Y Position (m)")
-        plt.title(f"TRAYECTORIA REAL - {os.path.basename(input_path)}", fontweight='bold')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+        plt.xlabel("X Position (m)", fontsize=14, fontweight='bold')
+        plt.ylabel("Y Position (m)", fontsize=14, fontweight='bold')
+        plt.title(f"COMPARACIÓN COMPLETA DE TRAYECTORIAS - {os.path.basename(input_path)}", 
+                 fontsize=16, fontweight='bold', pad=20)
+        plt.legend(fontsize=12, loc='best', framealpha=0.95, edgecolor='black')
+        plt.grid(True, alpha=0.3, linestyle='--')
         plt.axis('equal')
         plt.tight_layout()
         
-        plt.savefig(output_base + "_REAL.png", dpi=300, bbox_inches='tight')
+        plt.savefig(output_base + "_COMPARACION_COMPLETA.png", dpi=300, bbox_inches='tight')
         plt.close()
 
+        # Gráfico solo de keyframes (simplificado)
         plt.figure(figsize=(12, 9))
         plt.plot(x_key, y_key, 'b-', linewidth=3, marker='o', markersize=8)
         plt.scatter(x_key[0], y_key[0], color='green', s=200, label='Inicio')
@@ -592,9 +768,96 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         plt.savefig(output_base + "_keyframes_only.png", dpi=300, bbox_inches='tight')
         plt.close()
 
-        print(f"Gráficos REALES guardados en: {output_dir}")
-        print(f"La trayectoria REAL tiene {len(x_key)} puntos")
-        print(f"Distancia total REAL: {real_total_distance:.2f} m")
+        # Calcular métricas individuales (legacy - para compatibilidad)
+        if has_gps_keyframes and len(self.gps_keyframes) == len(self.keyframe_poses):
+            print("\n" + "="*60)
+            print("MÉTRICAS INDIVIDUALES (Pipeline vs GPS)")
+            print("="*60)
+            
+            estimated_traj = np.array([pose[:3, 3] for pose in self.keyframe_poses])
+            ground_truth_traj = np.array(self.gps_keyframes)
+            
+            ate_result = TrajectoryMetrics.calculate_ate(estimated_traj, ground_truth_traj, align=True)
+            rpe_result = TrajectoryMetrics.calculate_rpe(estimated_traj, ground_truth_traj, delta=1)
+            
+            TrajectoryMetrics.print_metrics_summary(ate_result, rpe_result)
+            
+            metrics_file = output_base + "_metrics.json"
+            TrajectoryMetrics.save_metrics_to_json(ate_result, rpe_result, None, metrics_file)
+            
+            if 'errors' in ate_result and len(ate_result['errors']) > 0:
+                TrajectoryMetrics.plot_ate_errors(ate_result['errors'], output_base + "_ate_errors.png")
+            
+            if 'errors' in rpe_result and len(rpe_result['errors']) > 0:
+                TrajectoryMetrics.plot_rpe_errors(rpe_result['errors'], output_base + "_rpe_translation.png", 
+                                                   metric_name="RPE Translación")
+            
+            print(f"Métricas individuales guardadas en: {metrics_file}")
+            print("="*60 + "\n")
+
+        print(f"\n{'='*80}")
+        print(f"RESULTADOS GUARDADOS EN: {output_dir}")
+        print(f"{'='*80}")
+        print(f"Gráfico comparativo completo: {output_base}_COMPARACION_COMPLETA.png")
+        print(f"Gráfico keyframes: {output_base}_keyframes_only.png")
+        print(f"Comparación CSV: {output_base}_comparison_metrics.csv")
+        print(f"Comparación JSON: {output_base}_comparison_metrics.json")
+        print(f"Trayectoria CSV: {output_base}_reales.csv")
+        print(f"{'='*80}\n")
+        print(f"Keyframes totales: {len(x_key)}")
+        print(f"Distancia total: {real_total_distance:.2f} m\n")
+    
+    def _plot_ate_comparison(self, comparison_results: Dict, output_file: str):
+        """Genera gráfico comparativo de errores ATE entre métodos."""
+        plt.figure(figsize=(14, 8))
+        
+        colors = {'pipeline_vs_ref': 'blue', 'slam_vs_ref': 'green', 
+                 'gps_vs_ref': 'red', 'pipeline_vs_slam': 'purple'}
+        
+        for key, data in comparison_results.items():
+            if 'errors' in data['ate'] and len(data['ate']['errors']) > 0:
+                errors = data['ate']['errors']
+                label = data['method']
+                color = colors.get(key, 'gray')
+                
+                plt.plot(errors, label=f"{label} (RMSE: {data['ate']['rmse']:.3f}m)", 
+                        color=color, linewidth=2, alpha=0.7)
+        
+        plt.xlabel('Keyframe Index', fontsize=12, fontweight='bold')
+        plt.ylabel('Error Absoluto (m)', fontsize=12, fontweight='bold')
+        plt.title('Comparación de ATE entre Métodos', fontsize=14, fontweight='bold')
+        plt.legend(fontsize=10, loc='best')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=200, bbox_inches='tight')
+        plt.close()
+        print(f"Gráfico comparativo ATE guardado en: {output_file}")
+    
+    def _plot_rpe_comparison(self, comparison_results: Dict, output_file: str):
+        """Genera gráfico comparativo de errores RPE entre métodos."""
+        plt.figure(figsize=(14, 8))
+        
+        colors = {'pipeline_vs_ref': 'blue', 'slam_vs_ref': 'green', 
+                 'gps_vs_ref': 'red', 'pipeline_vs_slam': 'purple'}
+        
+        for key, data in comparison_results.items():
+            if 'errors' in data['rpe'] and len(data['rpe']['errors']) > 0:
+                errors = data['rpe']['errors']
+                label = data['method']
+                color = colors.get(key, 'gray')
+                
+                plt.plot(errors, label=f"{label} (RMSE: {data['rpe']['trans_rmse']:.3f}m)", 
+                        color=color, linewidth=2, alpha=0.7)
+        
+        plt.xlabel('Par de Keyframes', fontsize=12, fontweight='bold')
+        plt.ylabel('Error Relativo (m)', fontsize=12, fontweight='bold')
+        plt.title('Comparación de RPE entre Métodos', fontsize=14, fontweight='bold')
+        plt.legend(fontsize=10, loc='best')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=200, bbox_inches='tight')
+        plt.close()
+        print(f"Gráfico comparativo RPE guardado en: {output_file}")
 
     def optimize_pose_graph(self):
         print("\n=== INICIANDO OPTIMIZACIÓN ===")

@@ -42,7 +42,7 @@ class RLPerformanceAnalyzer:
     def parse_log(self):
         """Extrae datos estructurados del log"""
         
-        print("📖 Leyendo log file...")
+        print("Leyendo log file...")
         
         with open(self.log_file, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
@@ -123,7 +123,7 @@ class RLPerformanceAnalyzer:
         if current_frame is not None and frame_data:
             self.frames_data.append(frame_data)
         
-        print(f"✅ Extraídos {len(self.frames_data)} frames con datos completos\n")
+        print(f"Extraidos {len(self.frames_data)} frames con datos completos\n")
         
         # Clasificar por escenario
         for data in self.frames_data:
@@ -134,12 +134,12 @@ class RLPerformanceAnalyzer:
         """Imprime estadísticas generales del análisis"""
         
         print("="*80)
-        print("📊 ESTADÍSTICAS GENERALES DEL ANÁLISIS")
+        print("ESTADISTICAS GENERALES DEL ANALISIS")
         print("="*80)
-        print(f"\n📈 Total de frames analizados: {len(self.frames_data)}\n")
+        print(f"\nTotal de frames analizados: {len(self.frames_data)}\n")
         
         # Distribución de escenarios
-        print("🎭 DISTRIBUCIÓN DE ESCENARIOS:")
+        print("DISTRIBUCION DE ESCENARIOS:")
         total = len(self.frames_data)
         for scenario, frames in sorted(self.scenarios.items(), key=lambda x: len(x[1]), reverse=True):
             count = len(frames)
@@ -154,7 +154,7 @@ class RLPerformanceAnalyzer:
             gps_confs = [f['gps_conf'] for f in self.frames_data if 'gps_conf' in f]
             errors = [f['error'] for f in self.frames_data if 'error' in f]
             
-            print("📊 ESTADÍSTICAS DE ENTRADA:")
+            print("ESTADISTICAS DE ENTRADA:")
             print(f"   Visual Confidence: {np.mean(visual_confs):.3f} ± {np.std(visual_confs):.3f} (rango: [{np.min(visual_confs):.3f}, {np.max(visual_confs):.3f}])")
             print(f"   GPS Confidence:    {np.mean(gps_confs):.3f} ± {np.std(gps_confs):.3f} (rango: [{np.min(gps_confs):.3f}, {np.max(gps_confs):.3f}])")
             print(f"   Error SLAM-GPS:    {np.mean(errors):.3f} ± {np.std(errors):.3f}m (rango: [{np.min(errors):.3f}, {np.max(errors):.3f}]m)")
@@ -167,7 +167,7 @@ class RLPerformanceAnalyzer:
             w_slam_base = [f['w_slam_base'] for f in self.frames_data if 'w_slam_base' in f]
             w_slam_final = [f['w_slam_final'] for f in self.frames_data if 'w_slam_final' in f]
             
-            print("🤖 ANÁLISIS DE AJUSTES RL:")
+            print("ANALISIS DE AJUSTES RL:")
             print(f"   Ajuste promedio RL (SLAM):   {np.mean(deltas_slam):+.3f} ± {np.std(deltas_slam):.3f}")
             print(f"   Rango de ajustes:             [{np.min(deltas_slam):+.3f}, {np.max(deltas_slam):+.3f}]")
             print(f"   Peso SLAM base (heurística):  {np.mean(w_slam_base):.3f} ± {np.std(w_slam_base):.3f}")
@@ -189,7 +189,7 @@ class RLPerformanceAnalyzer:
         """Analiza comportamiento por escenario"""
         
         print("="*80)
-        print("🎯 ANÁLISIS DETALLADO POR ESCENARIO")
+        print("ANALISIS DETALLADO POR ESCENARIO")
         print("="*80 + "\n")
         
         for scenario_name in ['ALTA_CERTEZA', 'SENSOR_DOMINANTE', 'ERROR_ALTO', 'INCERTIDUMBRE', 'INTERMEDIO']:
@@ -198,7 +198,7 @@ class RLPerformanceAnalyzer:
                 continue
             
             print(f"{'─'*80}")
-            print(f"🎬 Escenario: {scenario_name}")
+            print(f"Escenario: {scenario_name}")
             print(f"{'─'*80}")
             print(f"   Cantidad: {len(frames)} frames\n")
             
@@ -208,7 +208,7 @@ class RLPerformanceAnalyzer:
             avg_error = np.mean([f['error'] for f in frames if 'error' in f])
             avg_margin = np.mean([f['rl_margin'] for f in frames if 'rl_margin' in f])
             
-            print(f"   📊 Entrada promedio:")
+            print(f"   Entrada promedio:")
             print(f"      Visual conf: {avg_visual:.3f}")
             print(f"      GPS conf:    {avg_gps:.3f}")
             print(f"      Error:       {avg_error:.2f}m")
@@ -219,23 +219,23 @@ class RLPerformanceAnalyzer:
             avg_slam_final = np.mean([f['w_slam_final'] for f in frames if 'w_slam_final' in f])
             avg_delta = np.mean([f['delta_slam_rl'] for f in frames if 'delta_slam_rl' in f])
             
-            print(f"   ⚖️ Pesos promedio:")
+            print(f"   Pesos promedio:")
             print(f"      SLAM base (heurística): {avg_slam_base:.3f} ({avg_slam_base*100:.1f}%)")
             print(f"      Ajuste RL:              {avg_delta:+.3f} ({avg_delta*100:+.1f}%)")
             print(f"      SLAM final:             {avg_slam_final:.3f} ({avg_slam_final*100:.1f}%)\n")
             
             # Interpretación
             if avg_delta > 0.01:
-                print(f"   💡 RL tiende a AUMENTAR confianza en SLAM")
+                print(f"   RL tiende a AUMENTAR confianza en SLAM")
             elif avg_delta < -0.01:
-                print(f"   💡 RL tiende a AUMENTAR confianza en GPS")
+                print(f"   RL tiende a AUMENTAR confianza en GPS")
             else:
-                print(f"   💡 RL hace ajustes MÍNIMOS (respeta reglas)")
+                print(f"   RL hace ajustes MINIMOS (respeta reglas)")
             
             # Ejemplo representativo
             mid_idx = len(frames) // 2
             example = frames[mid_idx]
-            print(f"\n   📝 Ejemplo representativo (frame {example['frame']}):")
+            print(f"\n   Ejemplo representativo (frame {example['frame']}):")
             print(f"      Visual={example.get('visual_conf', 0):.2f}, GPS={example.get('gps_conf', 0):.2f}, Error={example.get('error', 0):.1f}m")
             print(f"      Base: SLAM={example.get('w_slam_base', 0)*100:.0f}% → RL ajusta {example.get('delta_slam_rl', 0)*100:+.1f}% → Final: SLAM={example.get('w_slam_final', 0)*100:.0f}%")
             print()
@@ -244,7 +244,7 @@ class RLPerformanceAnalyzer:
         """Detecta casos donde el RL puede estar comportándose mal"""
         
         print("="*80)
-        print("🔍 DETECCIÓN DE CASOS PROBLEMÁTICOS")
+        print("DETECCION DE CASOS PROBLEMATICOS")
         print("="*80 + "\n")
         
         problematic = []
@@ -277,21 +277,21 @@ class RLPerformanceAnalyzer:
                 problematic.append(data_copy)
         
         if not problematic:
-            print("✅ NO se detectaron casos problemáticos evidentes")
+            print("NO se detectaron casos problematicos evidentes")
             print("   El RL parece estar tomando decisiones razonables en todos los frames.\n")
         else:
-            print(f"⚠️  Se detectaron {len(problematic)} casos potencialmente problemáticos:\n")
+            print(f"Se detectaron {len(problematic)} casos potencialmente problematicos:\n")
             
             for i, case in enumerate(problematic[:5], 1):  # Mostrar solo primeros 5
                 print(f"   Caso {i} - Frame {case['frame']}:")
                 print(f"      Visual={case.get('visual_conf', 0):.2f}, GPS={case.get('gps_conf', 0):.2f}, Error={case.get('error', 0):.1f}m")
                 print(f"      Pesos: Base SLAM={case.get('w_slam_base', 0)*100:.0f}% → Final SLAM={case.get('w_slam_final', 0)*100:.0f}%")
                 for issue in case['issues']:
-                    print(f"      ⚠️  {issue}")
+                    print(f"      {issue}")
                 print()
             
             if len(problematic) > 5:
-                print(f"   ... y {len(problematic)-5} casos más\n")
+                print(f"   ... y {len(problematic)-5} casos mas\n")
         
         print("="*80 + "\n")
         
@@ -341,7 +341,7 @@ class RLPerformanceAnalyzer:
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"✅ Gráfica 1 guardada: {output_path}")
+        print(f"Grafica 1 guardada: {output_path}")
     
     def plot_rl_adjustments(self, output_dir):
         """Gráfica 2: Análisis de ajustes del RL"""
@@ -385,7 +385,7 @@ class RLPerformanceAnalyzer:
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"✅ Gráfica 2 guardada: {output_path}")
+        print(f"Grafica 2 guardada: {output_path}")
     
     def plot_confidence_vs_weights(self, output_dir):
         """Gráfica 3: Correlación entre confianzas y decisiones"""
@@ -456,7 +456,7 @@ class RLPerformanceAnalyzer:
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"✅ Gráfica 3 guardada: {output_path}")
+        print(f"Grafica 3 guardada: {output_path}")
     
     def plot_scenario_comparison(self, output_dir):
         """Gráfica 4: Comparación por escenario"""
@@ -541,7 +541,7 @@ class RLPerformanceAnalyzer:
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"✅ Gráfica 4 guardada: {output_path}")
+        print(f"Grafica 4 guardada: {output_path}")
     
     def save_detailed_report(self, output_dir, problematic_cases):
         """Guarda reporte completo en texto"""
@@ -584,9 +584,9 @@ class RLPerformanceAnalyzer:
             f.write("CASOS PROBLEMÁTICOS DETECTADOS\n")
             f.write("-"*80 + "\n")
             if not problematic_cases:
-                f.write("✅ NO se detectaron casos problemáticos\n\n")
+                f.write("NO se detectaron casos problemáticos\n\n")
             else:
-                f.write(f"⚠️  {len(problematic_cases)} casos detectados:\n\n")
+                f.write(f"{len(problematic_cases)} casos detectados:\n\n")
                 for i, case in enumerate(problematic_cases, 1):
                     f.write(f"Caso {i} - Frame {case['frame']}:\n")
                     f.write(f"  Visual={case.get('visual_conf', 0):.2f}, GPS={case.get('gps_conf', 0):.2f}, Error={case.get('error', 0):.1f}m\n")
@@ -599,7 +599,7 @@ class RLPerformanceAnalyzer:
             f.write("FIN DEL REPORTE\n")
             f.write("="*80 + "\n")
         
-        print(f"✅ Reporte detallado guardado: {report_path}")
+        print(f"Reporte detallado guardado: {report_path}")
     
     def run_full_analysis(self, output_dir):
         """Ejecuta análisis completo y genera todos los outputs"""
@@ -608,7 +608,7 @@ class RLPerformanceAnalyzer:
         os.makedirs(output_dir, exist_ok=True)
         
         print("\n" + "="*80)
-        print("🔬 INICIANDO ANÁLISIS COMPLETO DEL RENDIMIENTO DEL RL")
+        print("INICIANDO ANALISIS COMPLETO DEL RENDIMIENTO DEL RL")
         print("="*80 + "\n")
         
         # 1. Parsear log
@@ -624,7 +624,7 @@ class RLPerformanceAnalyzer:
         problematic = self.detect_problematic_cases()
         
         # 5. Generar gráficas
-        print("📊 Generando gráficas...\n")
+        print("Generando graficas...\n")
         self.plot_weights_evolution(output_dir)
         self.plot_rl_adjustments(output_dir)
         self.plot_confidence_vs_weights(output_dir)
@@ -634,15 +634,15 @@ class RLPerformanceAnalyzer:
         self.save_detailed_report(output_dir, problematic)
         
         print("\n" + "="*80)
-        print("🎉 ANÁLISIS COMPLETO FINALIZADO")
+        print("ANALISIS COMPLETO FINALIZADO")
         print("="*80)
-        print(f"📂 Resultados guardados en: {output_dir}")
-        print("\n📊 Archivos generados:")
-        print("  ✅ evolution_weights.png          (evolución temporal)")
-        print("  ✅ rl_adjustments.png             (ajustes del RL)")
-        print("  ✅ confidence_correlations.png    (correlaciones)")
-        print("  ✅ scenario_comparison.png        (comparación por escenario)")
-        print("  ✅ rl_performance_report.txt      (reporte textual)")
+        print(f"Resultados guardados en: {output_dir}")
+        print("\nArchivos generados:")
+        print("  - evolution_weights.png          (evolucion temporal)")
+        print("  - rl_adjustments.png             (ajustes del RL)")
+        print("  - confidence_correlations.png    (correlaciones)")
+        print("  - scenario_comparison.png        (comparacion por escenario)")
+        print("  - rl_performance_report.txt      (reporte textual)")
         print("="*80 + "\n")
 
 
@@ -670,7 +670,7 @@ def main():
     
     # Verificar que el log existe
     if not os.path.exists(args.log):
-        print(f"❌ ERROR: Archivo de log no encontrado: {args.log}")
+        print(f"ERROR: Archivo de log no encontrado: {args.log}")
         return 1
     
     # Generar directorio de salida
