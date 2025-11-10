@@ -19,11 +19,11 @@ sys.path.insert(0, project_root)
 # Imports relativos al proyecto
 from LMS.LMS_ORB_with_PG.main import PoseGraphSLAM
 from model.rl_agent import SimpleRLAgent, RLTrainer
-from utils.gps_utils import *
-from utils.gps_filter import *
-from utils.training_augmentation import TrainingAugmentation
-from utils.mobile_video_processor import MobileVideoProcessor
-from utils.trajectory_metrics import TrajectoryMetrics
+from utils.gps.gps_utils import latlon_to_utm
+from utils.gps.gps_filter import GPSFilter
+from utils.processing.training_augmentation import TrainingAugmentation
+from utils.processing.mobile_video_processor import MobileVideoProcessor
+from utils.metrics.trajectory_metrics import TrajectoryMetrics
 
 class RL_ORB_SLAM_GPS(PoseGraphSLAM):
     def __init__(self, fx=718.856, fy=718.856, cx=607.1928, cy=185.2157, 
