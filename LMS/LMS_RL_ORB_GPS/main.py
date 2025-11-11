@@ -64,6 +64,28 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             noise_std=gps_noise_std
         )
         
+        # ====================================================================
+        # FASE 1: UMBRALES ADAPTATIVOS SEGÚN CALIDAD DE GPS
+        # ====================================================================
+        self.error_thresholds = {
+            'moderate': 2.0,  # Por defecto (será ajustado automáticamente)
+            'high': 5.0,      # Por defecto (será ajustado automáticamente)
+            'excellent': 1.0  # Por defecto
+        }
+        
+        self.rl_margins = {
+            'high_certainty': 0.10,
+            'sensor_dominant': 0.25,
+            'error_high': 0.30,
+            'uncertainty': 0.40,
+            'intermediate': 0.20,
+            'sensor_extreme': 0.50
+        }
+        
+        self.gps_quality_detected = False
+        self.gps_quality_type = None  # Será 'KITTI' o 'MOBILE' o None
+        # ====================================================================
+        
         if simulate_mobile_gps:
             print(f"ADVERTENCIA: MODO GPS MÓVIL SIMULADO: Agregando ruido gaussiano (sigma={gps_noise_std}m)")
         
@@ -71,6 +93,54 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             print(f"Optimización del grafo: ACTIVADA (puede ser lento con muchos frames)")
         else:
             print(f"Optimización del grafo: DESACTIVADA (modo rápido, usa keyframes fusionados)")
+
+    def _configure_error_thresholds(self, gps_quality_result: Dict):
+        """
+        Configura umbrales adaptativos según la calidad detectada del GPS.
+        
+        Args:
+            gps_quality_result: Resultado de gps_filter.detect_gps_quality()
+        """
+        if not gps_quality_result.get('detected', False):
+            print("  [THRESHOLDS] GPS quality no detectada - usando umbrales por defecto")
+            return
+        
+        quality = gps_quality_result.get('quality', 'UNKNOWN')
+        confidence = gps_quality_result.get('confidence', 'BAJA')
+        
+        if quality == 'HIGH_PRECISION':
+            # GPS tipo KITTI/RTK - errores pequeños son significativos
+            # AJUSTADO: 3-4m es deriva NORMAL esperada en KITTI
+            self.error_thresholds = {
+                'excellent': 1.0,   # < 1m = excelente alineación (raro pero posible)
+                'moderate': 3.5,    # 1-3.5m = deriva normal esperada
+                'high': 5.0         # > 5m = problema real de desalineación
+            }
+            self.gps_quality_type = 'KITTI'
+            print(f"  [THRESHOLDS] GPS de ALTA PRECISIÓN detectado (confianza: {confidence})")
+            print(f"     Excellent: < {self.error_thresholds['excellent']}m (alineación excepcional)")
+            print(f"     Moderate:  {self.error_thresholds['excellent']}-{self.error_thresholds['moderate']}m (deriva normal)")
+            print(f"     High:      > {self.error_thresholds['high']}m (problema serio)")
+            
+        elif quality == 'CONSUMER_GPS':
+            # GPS móvil - SLAM suele ser muy preciso con features cercanos
+            # AJUSTADO: 0-2m es NORMAL en móvil (SLAM muy bueno)
+            self.error_thresholds = {
+                'excellent': 0.8,   # < 0.8m = típico en móvil (SLAM muy preciso)
+                'moderate': 3.0,    # 0.8-3m = anómalo pero tolerable
+                'high': 5.0         # > 5m = problema real
+            }
+            self.gps_quality_type = 'MOBILE'
+            print(f"  [THRESHOLDS] GPS de CONSUMO detectado (confianza: {confidence})")
+            print(f"     Excellent: < {self.error_thresholds['excellent']}m (típico en móvil)")
+            print(f"     Moderate:  {self.error_thresholds['excellent']}-{self.error_thresholds['moderate']}m (anómalo)")
+            print(f"     High:      > {self.error_thresholds['high']}m (problema serio)")
+        
+        else:
+            print(f"  [THRESHOLDS] Calidad GPS desconocida ({quality}) - usando umbrales por defecto")
+            self.gps_quality_type = 'UNKNOWN'
+        
+        self.gps_quality_detected = True
 
     def gps_frame_reference(self, gps_frame_value):
         lat, lon, alt = gps_frame_value[0], gps_frame_value[1], gps_frame_value[2]
@@ -80,11 +150,18 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         return utm_coord - self.utm_reference
     
     def calculate_base_weights(self, gps_conf, visual_conf, error):
+        """
+        Calcula pesos base usando SOLO confianzas de sensores.
+        NO considera error - eso lo maneja calculate_rl_adjustment_margin().
+        """
         conf_ratio = visual_conf / (gps_conf + 1e-6)
         
         gps_weight_from_conf = gps_conf
         slam_weight_from_conf = visual_conf
         
+        # ====================================================================
+        # BALANCE BASADO EXCLUSIVAMENTE EN CONFIANZAS
+        # ====================================================================
         if conf_ratio > 1.15 and visual_conf > 0.75:
             slam_boost = 0.15
             gps_reduction = 0.10
@@ -104,23 +181,10 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         slam_weight_from_conf += slam_boost
         gps_weight_from_conf += gps_reduction
         
-        error_penalty_gps = 0.0
-        if error > 5.0:
-            error_penalty_gps = 0.3
-            print(f"  [ERROR] Alto error ({error:.2f}m) → Penaliza GPS -0.30")
-        elif error > 2.0:
-            error_penalty_gps = 0.1 * ((error - 2.0) / 3.0)
-            print(f"  [ERROR] Error moderado ({error:.2f}m) → Penaliza GPS -{error_penalty_gps:.2f}")
-        
-        error_bonus_gps = 0.0
-        if error < 1.0 and gps_conf > 0.6:
-            error_bonus_gps = 0.15
-            print(f"  [ALIGN] Excelente alineación ({error:.2f}m) → Bonus GPS +0.15")
-        elif error < 2.0 and gps_conf > 0.6:
-            error_bonus_gps = 0.1 * (2.0 - error)
-            print(f"  [ALIGN] Buena alineación ({error:.2f}m) → Bonus GPS +{error_bonus_gps:.2f}")
-        
-        w_gps_base = gps_weight_from_conf - error_penalty_gps + error_bonus_gps
+        # ====================================================================
+        # NORMALIZACIÓN (sin considerar error)
+        # ====================================================================
+        w_gps_base = gps_weight_from_conf
         w_slam_base = slam_weight_from_conf
         
         total = w_slam_base + w_gps_base + 1e-6
@@ -134,36 +198,57 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         return w_slam_base, w_gps_base
     
     def calculate_rl_adjustment_margin(self, visual_conf, gps_conf, error):
+        """
+        Calcula margen de ajuste RL adaptativo según calidad de GPS detectada.
+        Ahora usa error_thresholds dinámicos en lugar de valores hardcodeados.
+        """
         conf_diff = abs(visual_conf - gps_conf)
         avg_conf = (visual_conf + gps_conf) / 2.0
         min_conf = min(visual_conf, gps_conf)
         max_conf = max(visual_conf, gps_conf)
         
+        # ====================================================================
+        # CASO EXTREMO: Sensor con muy baja confianza vs sensor muy confiable
+        # ====================================================================
         if min_conf < 0.3 and max_conf > 0.7 and conf_diff > 0.6:
-            rl_margin = 0.50
+            rl_margin = self.rl_margins['sensor_extreme']
             scenario = "SENSOR_EXTREMO"
-            print(f"  [MARGEN] Caso EXTREMO detectado (min={min_conf:.2f}, max={max_conf:.2f}, diff={conf_diff:.2f}) → Margen amplio (±50%)")
+            print(f"  [MARGEN] Caso EXTREMO detectado (min={min_conf:.2f}, max={max_conf:.2f}, diff={conf_diff:.2f}) → Margen amplio (±{rl_margin*100:.0f}%)")
             return rl_margin, scenario
         
-        if avg_conf > 0.75 and conf_diff < 0.15 and error < 3.0:
-            rl_margin = 0.10
+        # ====================================================================
+        # FASE 2: USAR UMBRALES ADAPTATIVOS SEGÚN CALIDAD DE GPS
+        # ====================================================================
+        
+        # 1. ALTA CERTEZA: Ambos sensores muy confiables + error bajo
+        if avg_conf > 0.75 and conf_diff < 0.15 and error < self.error_thresholds['excellent']:
+            rl_margin = self.rl_margins['high_certainty']
             scenario = "ALTA_CERTEZA"
+            print(f"  [MARGEN] Alta certeza: avg_conf={avg_conf:.2f}, error={error:.2f}m < {self.error_thresholds['excellent']}m → Margen mínimo (±{rl_margin*100:.0f}%)")
         
+        # 2. SENSOR DOMINANTE: Gran diferencia entre confianzas
         elif conf_diff > 0.30:
-            rl_margin = 0.25
+            rl_margin = self.rl_margins['sensor_dominant']
             scenario = "SENSOR_DOMINANTE"
+            print(f"  [MARGEN] Sensor dominante: conf_diff={conf_diff:.2f} → Margen moderado (±{rl_margin*100:.0f}%)")
         
-        elif avg_conf > 0.60 and error > 3.0:
-            rl_margin = 0.30
+        # 3. ERROR ALTO: Baja confianza + error significativo
+        elif avg_conf > 0.60 and error > self.error_thresholds['high']:
+            rl_margin = self.rl_margins['error_high']
             scenario = "ERROR_ALTO"
+            print(f"  [MARGEN] Error alto: error={error:.2f}m > {self.error_thresholds['high']}m → Margen alto (±{rl_margin*100:.0f}%)")
         
+        # 4. INCERTIDUMBRE: Ambos sensores poco confiables
         elif avg_conf < 0.50:
-            rl_margin = 0.40
+            rl_margin = self.rl_margins['uncertainty']
             scenario = "INCERTIDUMBRE"
+            print(f"  [MARGEN] Incertidumbre: avg_conf={avg_conf:.2f} < 0.50 → Margen muy alto (±{rl_margin*100:.0f}%)")
         
+        # 5. CASO INTERMEDIO
         else:
-            rl_margin = 0.20
+            rl_margin = self.rl_margins['intermediate']
             scenario = "INTERMEDIO"
+            print(f"  [MARGEN] Caso intermedio → Margen estándar (±{rl_margin*100:.0f}%)")
         
         return rl_margin, scenario
     
@@ -502,6 +587,9 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         print("="*80)
         
         gps_quality_result = self.gps_filter.detect_gps_quality(min_samples=20)
+        
+        # CONFIGURAR UMBRALES ADAPTATIVOS BASADOS EN LA CALIDAD DETECTADA
+        self._configure_error_thresholds(gps_quality_result)
         
         if gps_quality_result['detected']:
             # Imprimir reporte detallado
