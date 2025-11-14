@@ -181,7 +181,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         slam_weight_from_conf += slam_boost
         gps_weight_from_conf += gps_reduction
         
-        # ====================================================================
+        # ===============================LMS_RL_ORB_GPS=====================================
         # NORMALIZACIÓN (sin considerar error)
         # ====================================================================
         w_gps_base = gps_weight_from_conf
