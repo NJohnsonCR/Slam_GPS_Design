@@ -79,7 +79,7 @@ class ModelEvaluator:
         seq_name = os.path.basename(self.sequence_path)
         self.output_dir = f"resultados/LMS_RL_ORB_GPS/evaluation_{seq_name}_{timestamp}"
         os.makedirs(self.output_dir, exist_ok=True)
-        print(f"📂 Resultados se guardarán en: {self.output_dir}")
+        print(f"[OUTPUT] Resultados se guardarán en: {self.output_dir}")
     
     def load_ground_truth(self):
         """Carga ground truth de KITTI (poses GPS)"""
@@ -87,7 +87,7 @@ class ModelEvaluator:
         
         oxts_dir = os.path.join(self.sequence_path, 'oxts', 'data')
         if not os.path.exists(oxts_dir):
-            print(f"⚠️ Advertencia: No se encontró ground truth OXTS")
+            print(f"[WARNING] Advertencia: No se encontró ground truth OXTS")
             return None
         
         oxts_files = sorted([f for f in os.listdir(oxts_dir) if f.endswith('.txt')])
@@ -109,7 +109,7 @@ class ModelEvaluator:
             poses = poses - poses[0]
         
         self.gt_trajectory = poses
-        print(f"✅ Ground truth cargado: {len(poses)} poses")
+        print(f"[OK] Ground truth cargado: {len(poses)} poses")
         return poses
     
     def evaluate(self, max_frames=None):
@@ -123,25 +123,25 @@ class ModelEvaluator:
             dict: Resultados completos de la evaluación
         """
         print("\n" + "="*80)
-        print("🔍 EVALUACIÓN COMPLETA DEL MODELO RL-ORB-SLAM-GPS")
+        print("[EVALUATION] EVALUACIÓN COMPLETA DEL MODELO RL-ORB-SLAM-GPS")
         print("="*80)
-        print(f"📦 Modelo: {self.model_path}")
-        print(f"📍 Secuencia: {self.sequence_path}")
-        print(f"📡 Ruido GPS: {self.gps_noise_std}m (σ)")
-        print(f"🎯 Frames: {max_frames or 'Todos'}")
+        print(f"[MODEL] Modelo: {self.model_path}")
+        print(f"[SEQUENCE] Secuencia: {self.sequence_path}")
+        print(f"[GPS] Ruido GPS: {self.gps_noise_std}m (σ)")
+        print(f"[FRAMES] Frames: {max_frames or 'Todos'}")
         print("="*80 + "\n")
         
         # Cargar ground truth
         self.load_ground_truth()
         
         # Cargar secuencia
-        print("📥 Cargando secuencia KITTI...")
+        print("[LOADING] Cargando secuencia KITTI...")
         frames, gps_data = load_kitti_sequence(self.sequence_path, max_frames)
-        print(f"✅ Cargados {len(frames)} frames\n")
+        print(f"[OK] Cargados {len(frames)} frames\n")
         
         # === MÉTODO 1: FUSIÓN RL (modelo entrenado) ===
         print("="*80)
-        print("🤖 EVALUANDO: Fusión RL (Modelo Entrenado)")
+        print("[RL] EVALUANDO: Fusión RL (Modelo Entrenado)")
         print("="*80)
         
         slam_rl = RL_ORB_SLAM_GPS(
@@ -176,11 +176,11 @@ class ModelEvaluator:
                 self.confidence_history.append([gps_conf, 0.5])  # Placeholder visual_conf
         
         self.traj_rl_fusion = slam_rl.optimize_pose_graph()
-        print(f"✅ Fusión RL completada: {len(self.traj_rl_fusion)} poses\n")
+        print(f"[OK] Fusión RL completada: {len(self.traj_rl_fusion)} poses\n")
         
         # === MÉTODO 2: GPS PURO (sin SLAM) ===
         print("="*80)
-        print("📡 EVALUANDO: GPS Puro (sin corrección SLAM)")
+        print("[GPS] EVALUANDO: GPS Puro (sin corrección SLAM)")
         print("="*80)
         
         for i, gps in enumerate(gps_data):
@@ -198,11 +198,11 @@ class ModelEvaluator:
                 pose[:3, 3] = gps_noisy
                 self.traj_gps_only.append(pose)
         
-        print(f"✅ GPS puro completado: {len(self.traj_gps_only)} poses\n")
+        print(f"[OK] GPS puro completado: {len(self.traj_gps_only)} poses\n")
         
         # === MÉTODO 3: SLAM PURO (sin GPS) ===
         print("="*80)
-        print("👁️ EVALUANDO: SLAM Puro (sin GPS)")
+        print("[SLAM] EVALUANDO: SLAM Puro (sin GPS)")
         print("="*80)
         
         slam_only = RL_ORB_SLAM_GPS(
@@ -223,17 +223,17 @@ class ModelEvaluator:
             slam_only.process_frame_with_gps(frame, None, 0.0)
         
         self.traj_slam_only = slam_only.optimize_pose_graph()
-        print(f"✅ SLAM puro completado: {len(self.traj_slam_only)} poses\n")
+        print(f"[OK] SLAM puro completado: {len(self.traj_slam_only)} poses\n")
         
         # === CALCULAR MÉTRICAS ===
         print("="*80)
-        print("📊 CALCULANDO MÉTRICAS")
+        print("[METRICS] CALCULANDO MÉTRICAS")
         print("="*80)
         self.calculate_metrics()
         
         # === GENERAR VISUALIZACIONES ===
         print("\n" + "="*80)
-        print("📈 GENERANDO VISUALIZACIONES")
+        print("[PLOT] GENERANDO VISUALIZACIONES")
         print("="*80)
         self.plot_trajectories()
         self.plot_rl_weights_analysis()
@@ -241,7 +241,7 @@ class ModelEvaluator:
         
         # === GUARDAR RESULTADOS ===
         print("\n" + "="*80)
-        print("💾 GUARDANDO RESULTADOS")
+        print("[SAVE] GUARDANDO RESULTADOS")
         print("="*80)
         self.save_results()
         
@@ -265,7 +265,7 @@ class ModelEvaluator:
         min_len = min(len(pos_gt), len(pos_rl), len(pos_gps), len(pos_slam))
         
         if min_len == 0:
-            print("⚠️ Error: No hay suficientes datos para calcular métricas")
+            print("[WARNING] Error: No hay suficientes datos para calcular métricas")
             return
         
         pos_gt = pos_gt[:min_len]
@@ -312,7 +312,7 @@ class ModelEvaluator:
         self.results['metrics'] = metrics
         
         # Imprimir tabla comparativa
-        print("\n📊 MÉTRICAS COMPARATIVAS:")
+        print("\n[METRICS] MÉTRICAS COMPARATIVAS:")
         print("-" * 80)
         print(f"{'Método':<20} {'ATE (m)':<15} {'RPE Trans (m)':<15} {'RPE Rot (°)':<15}")
         print("-" * 80)
@@ -363,13 +363,13 @@ class ModelEvaluator:
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"✅ Trayectorias guardadas: {output_path}")
+        print(f"[OK] Trayectorias guardadas: {output_path}")
     
     def plot_rl_weights_analysis(self):
         """Analiza cómo el RL ajustó los pesos durante la evaluación"""
         
         if len(self.rl_weights_history) == 0:
-            print("⚠️ No hay historial de pesos RL disponible")
+            print("[WARNING] No hay historial de pesos RL disponible")
             return
         
         weights = np.array(self.rl_weights_history)
@@ -404,9 +404,9 @@ class ModelEvaluator:
         plt.close()
         
         # Estadísticas
-        print(f"✅ Análisis de pesos RL guardado: {output_path}")
-        print(f"   📊 Peso GPS promedio: {weights[:, 0].mean():.3f} ± {weights[:, 0].std():.3f}")
-        print(f"   📊 Peso SLAM promedio: {weights[:, 1].mean():.3f} ± {weights[:, 1].std():.3f}")
+        print(f"[OK] Análisis de pesos RL guardado: {output_path}")
+        print(f"   [STATS] Peso GPS promedio: {weights[:, 0].mean():.3f} ± {weights[:, 0].std():.3f}")
+        print(f"   [STATS] Peso SLAM promedio: {weights[:, 1].mean():.3f} ± {weights[:, 1].std():.3f}")
     
     def plot_error_analysis(self):
         """Analiza error a lo largo de la trayectoria"""
@@ -453,7 +453,7 @@ class ModelEvaluator:
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"✅ Análisis de error guardado: {output_path}")
+        print(f"[OK] Análisis de error guardado: {output_path}")
     
     def save_results(self):
         """Guarda resultados en JSON y genera reporte de texto"""
@@ -462,7 +462,7 @@ class ModelEvaluator:
         json_path = os.path.join(self.output_dir, 'evaluation_results.json')
         with open(json_path, 'w') as f:
             json.dump(self.results, f, indent=2)
-        print(f"✅ Resultados JSON: {json_path}")
+        print(f"[OK] Resultados JSON: {json_path}")
         
         # Generar reporte de texto
         report_path = os.path.join(self.output_dir, 'evaluation_report.txt')
@@ -492,7 +492,7 @@ class ModelEvaluator:
                 f.write(f"  vs GPS Puro:  {m['improvements']['vs_gps']:>6.1f}%\n")
                 f.write(f"  vs SLAM Puro: {m['improvements']['vs_slam']:>6.1f}%\n")
         
-        print(f"✅ Reporte de texto: {report_path}")
+        print(f"[OK] Reporte de texto: {report_path}")
 
 
 def main():
@@ -559,11 +559,11 @@ Ejemplos de uso:
     
     # Verificar que existan
     if not os.path.exists(sequence_path):
-        print(f"❌ ERROR: Secuencia no encontrada: {sequence_path}")
+        print(f"[ERROR] ERROR: Secuencia no encontrada: {sequence_path}")
         sys.exit(1)
     
     if not os.path.exists(args.model_path):
-        print(f"❌ ERROR: Modelo no encontrado: {args.model_path}")
+        print(f"[ERROR] ERROR: Modelo no encontrado: {args.model_path}")
         sys.exit(1)
     
     # Crear evaluador y ejecutar
@@ -577,20 +577,20 @@ Ejemplos de uso:
     
     # Resumen final
     print("\n" + "="*80)
-    print("🎉 EVALUACIÓN COMPLETADA")
+    print("[COMPLETE] EVALUACIÓN COMPLETADA")
     print("="*80)
-    print(f"📂 Resultados guardados en: {evaluator.output_dir}")
-    print("\n📊 Archivos generados:")
-    print("  ✅ evaluation_results.json      (métricas detalladas)")
-    print("  ✅ evaluation_report.txt        (reporte legible)")
-    print("  ✅ comparison_trajectories.png  (trayectorias comparadas)")
-    print("  ✅ rl_weights_analysis.png      (análisis de pesos RL)")
-    print("  ✅ error_analysis.png           (errores a lo largo del tiempo)")
+    print(f"[OUTPUT] Resultados guardados en: {evaluator.output_dir}")
+    print("\n[FILES] Archivos generados:")
+    print("  [OK] evaluation_results.json      (métricas detalladas)")
+    print("  [OK] evaluation_report.txt        (reporte legible)")
+    print("  [OK] comparison_trajectories.png  (trayectorias comparadas)")
+    print("  [OK] rl_weights_analysis.png      (análisis de pesos RL)")
+    print("  [OK] error_analysis.png           (errores a lo largo del tiempo)")
     print("="*80)
     
     if 'metrics' in results:
         m = results['metrics']
-        print(f"\n🏆 RESULTADO FINAL:")
+        print(f"\n[RESULT] RESULTADO FINAL:")
         print(f"  Fusión RL ATE:  {m['rl_fusion']['ate']:.3f} m")
         print(f"  Mejora vs GPS:  {m['improvements']['vs_gps']:>6.1f}%")
         print(f"  Mejora vs SLAM: {m['improvements']['vs_slam']:>6.1f}%")

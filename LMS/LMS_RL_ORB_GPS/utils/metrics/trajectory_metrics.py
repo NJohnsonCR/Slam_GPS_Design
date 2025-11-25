@@ -156,7 +156,7 @@ class TrajectoryMetrics:
             pipeline_traj: Trayectoria del pipeline (SLAM+GPS+RL)
             slam_traj: Trayectoria de SLAM puro
             gps_traj: Trayectoria de GPS puro
-            reference: Qué usar como referencia ('gps' o 'pipeline')
+            reference: Qué usar como referencia ('gps', 'slam', o 'pipeline')
         
         Returns:
             dict con métricas comparativas
@@ -164,11 +164,14 @@ class TrajectoryMetrics:
         if reference == 'gps':
             ref_traj = gps_traj
             ref_name = "GPS puro (pseudo-ground truth)"
+        elif reference == 'slam':
+            ref_traj = slam_traj
+            ref_name = "SLAM puro (referencia más precisa)"
         elif reference == 'pipeline':
             ref_traj = pipeline_traj
             ref_name = "Pipeline fusionado (referencia)"
         else:
-            raise ValueError("reference debe ser 'gps' o 'pipeline'")
+            raise ValueError("reference debe ser 'gps', 'slam' o 'pipeline'")
         
         print(f"\n{'='*60}")
         print(f"COMPARACION DE TRAYECTORIAS")
@@ -188,15 +191,16 @@ class TrajectoryMetrics:
             }
             print(f"   ATE RMSE: {ate_pipeline['rmse']:.3f}m")
         
-        # ATE del SLAM puro vs Referencia
-        print("\nCalculando ATE: SLAM puro vs Referencia...")
-        ate_slam = TrajectoryMetrics.calculate_ate(slam_traj, ref_traj, align=True)
-        results['slam_vs_ref'] = {
-            'method': 'SLAM puro',
-            'ate': ate_slam,
-            'rpe': TrajectoryMetrics.calculate_rpe(slam_traj, ref_traj, delta=1)
-        }
-        print(f"   ATE RMSE: {ate_slam['rmse']:.3f}m")
+        # ATE del SLAM puro vs Referencia (solo si SLAM no es la referencia)
+        if reference != 'slam':
+            print("\nCalculando ATE: SLAM puro vs Referencia...")
+            ate_slam = TrajectoryMetrics.calculate_ate(slam_traj, ref_traj, align=True)
+            results['slam_vs_ref'] = {
+                'method': 'SLAM puro',
+                'ate': ate_slam,
+                'rpe': TrajectoryMetrics.calculate_rpe(slam_traj, ref_traj, delta=1)
+            }
+            print(f"   ATE RMSE: {ate_slam['rmse']:.3f}m")
         
         # ATE del GPS puro vs Referencia (si no es la referencia)
         if reference != 'gps':
@@ -209,15 +213,16 @@ class TrajectoryMetrics:
             }
             print(f"   ATE RMSE: {ate_gps['rmse']:.3f}m")
         
-        # Comparación directa: Pipeline vs SLAM puro
-        print("\nCalculando diferencia: Pipeline vs SLAM puro...")
-        ate_diff = TrajectoryMetrics.calculate_ate(pipeline_traj, slam_traj, align=True)
-        results['pipeline_vs_slam'] = {
-            'method': 'Pipeline vs SLAM (diferencia directa)',
-            'ate': ate_diff,
-            'rpe': TrajectoryMetrics.calculate_rpe(pipeline_traj, slam_traj, delta=1)
-        }
-        print(f"   ATE RMSE: {ate_diff['rmse']:.3f}m")
+        # Comparación directa: Pipeline vs SLAM puro (siempre útil)
+        if reference != 'slam':  # Solo si SLAM no es la referencia
+            print("\nCalculando diferencia: Pipeline vs SLAM puro...")
+            ate_diff = TrajectoryMetrics.calculate_ate(pipeline_traj, slam_traj, align=True)
+            results['pipeline_vs_slam'] = {
+                'method': 'Pipeline vs SLAM (diferencia directa)',
+                'ate': ate_diff,
+                'rpe': TrajectoryMetrics.calculate_rpe(pipeline_traj, slam_traj, delta=1)
+            }
+            print(f"   ATE RMSE: {ate_diff['rmse']:.3f}m")
         
         return results
     
@@ -232,17 +237,21 @@ class TrajectoryMetrics:
         print(f"{'Metodo':<35} {'ATE Mean':<12} {'ATE RMSE':<12} {'RPE Mean':<12} {'Mejora':<10}")
         print(f"{'-'*85}")
         
+        # Filtrar solo los resultados de métricas (ignorar metadatos como reference_method, etc.)
+        metrics_only = {k: v for k, v in results.items() 
+                       if isinstance(v, dict) and 'method' in v and 'ate' in v}
+        
         # Obtener el SLAM puro como baseline
         baseline_ate = None
         baseline_name = None
         
-        for key, data in results.items():
+        for key, data in metrics_only.items():
             if 'slam_vs_ref' in key:
                 baseline_ate = data['ate']['rmse']
                 baseline_name = data['method']
                 break
         
-        for key, data in results.items():
+        for key, data in metrics_only.items():
             method = data['method']
             ate_mean = data['ate']['mean']
             ate_rmse = data['ate']['rmse']
@@ -278,8 +287,12 @@ class TrajectoryMetrics:
             writer.writerow(['Metodo', 'ATE_mean_m', 'ATE_std_m', 'ATE_median_m', 'ATE_max_m', 
                            'ATE_RMSE_m', 'RPE_mean_m', 'RPE_std_m', 'RPE_RMSE_m', 'Scale', 'Num_Points'])
             
+            # Filtrar solo los resultados de métricas (ignorar metadatos)
+            metrics_only = {k: v for k, v in results.items() 
+                           if isinstance(v, dict) and 'method' in v and 'ate' in v}
+            
             # Datos
-            for key, data in results.items():
+            for key, data in metrics_only.items():
                 writer.writerow([
                     data['method'],
                     f"{data['ate']['mean']:.4f}",

@@ -50,8 +50,24 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         self.previous_gps_utm = None
         self.gps_available = False
         self.gps_history = []
-        self.slam_history = []
+        self.slam_history = []  # SLAM escalado (para fusión - ACTUAL)
+        self.slam_history_pure = []  # NUEVO: SLAM puro sin escalar (para comparación)
         self.gps_keyframes = []  # GPS correspondiente a cada keyframe
+        
+        # ====================================================================
+        # FIX: GUARDAR FRAME_ID DE CADA KEYFRAME PARA FILTRADO CORRECTO
+        # ====================================================================
+        self.keyframe_frame_ids = []  # Índices de frames que son keyframes
+        self.current_frame_id = 0  # Contador de frames procesados
+        # ====================================================================
+        
+        # ====================================================================
+        # ESCALADO GPS ADAPTATIVO (KITTI vs MÓVIL)
+        # ====================================================================
+        self.last_scaled_gps_utm = None  # GPS del último escalado exitoso
+        self.gps_movement_history = []  # Historial de movimientos GPS consecutivos
+        self.gps_scaling_threshold = None  # Umbral dinámico (se ajusta automáticamente)
+        # ====================================================================
         
         self.current_state = None
         self.frame_count = 0
@@ -165,15 +181,15 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         if conf_ratio > 1.15 and visual_conf > 0.75:
             slam_boost = 0.15
             gps_reduction = 0.10
-            print(f"  [BALANCE] SLAM más confiable (ratio={conf_ratio:.2f}) → Boost SLAM")
+            print(f"  [BALANCE] SLAM más confiable (ratio={conf_ratio:.2f}) - Boost SLAM")
         elif conf_ratio < 0.85 and gps_conf > 0.75:
             slam_boost = -0.10
             gps_reduction = -0.15
-            print(f"  [BALANCE] GPS más confiable (ratio={conf_ratio:.2f}) → Boost GPS")
+            print(f"  [BALANCE] GPS más confiable (ratio={conf_ratio:.2f}) - Boost GPS")
         elif visual_conf > 0.75 and gps_conf > 0.75 and 0.85 <= conf_ratio <= 1.15:
             slam_boost = 0.0
             gps_reduction = 0.0
-            print(f"  [BALANCE] Ambos muy confiables (ratio={conf_ratio:.2f}) → Balance natural 50-50")
+            print(f"  [BALANCE] Ambos muy confiables (ratio={conf_ratio:.2f}) - Balance natural 50-50")
         else:
             slam_boost = 0.0
             gps_reduction = 0.0
@@ -213,7 +229,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         if min_conf < 0.3 and max_conf > 0.7 and conf_diff > 0.6:
             rl_margin = self.rl_margins['sensor_extreme']
             scenario = "SENSOR_EXTREMO"
-            print(f"  [MARGEN] Caso EXTREMO detectado (min={min_conf:.2f}, max={max_conf:.2f}, diff={conf_diff:.2f}) → Margen amplio (±{rl_margin*100:.0f}%)")
+            print(f"  [MARGEN] Caso EXTREMO detectado (min={min_conf:.2f}, max={max_conf:.2f}, diff={conf_diff:.2f}) - Margen amplio (±{rl_margin*100:.0f}%)")
             return rl_margin, scenario
         
         # ====================================================================
@@ -224,31 +240,31 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         if avg_conf > 0.75 and conf_diff < 0.15 and error < self.error_thresholds['excellent']:
             rl_margin = self.rl_margins['high_certainty']
             scenario = "ALTA_CERTEZA"
-            print(f"  [MARGEN] Alta certeza: avg_conf={avg_conf:.2f}, error={error:.2f}m < {self.error_thresholds['excellent']}m → Margen mínimo (±{rl_margin*100:.0f}%)")
+            print(f"  [MARGEN] Alta certeza: avg_conf={avg_conf:.2f}, error={error:.2f}m < {self.error_thresholds['excellent']}m - Margen mínimo (±{rl_margin*100:.0f}%)")
         
         # 2. SENSOR DOMINANTE: Gran diferencia entre confianzas
         elif conf_diff > 0.30:
             rl_margin = self.rl_margins['sensor_dominant']
             scenario = "SENSOR_DOMINANTE"
-            print(f"  [MARGEN] Sensor dominante: conf_diff={conf_diff:.2f} → Margen moderado (±{rl_margin*100:.0f}%)")
+            print(f"  [MARGEN] Sensor dominante: conf_diff={conf_diff:.2f} - Margen moderado (±{rl_margin*100:.0f}%)")
         
         # 3. ERROR ALTO: Baja confianza + error significativo
         elif avg_conf > 0.60 and error > self.error_thresholds['high']:
             rl_margin = self.rl_margins['error_high']
             scenario = "ERROR_ALTO"
-            print(f"  [MARGEN] Error alto: error={error:.2f}m > {self.error_thresholds['high']}m → Margen alto (±{rl_margin*100:.0f}%)")
+            print(f"  [MARGEN] Error alto: error={error:.2f}m > {self.error_thresholds['high']}m - Margen alto (±{rl_margin*100:.0f}%)")
         
         # 4. INCERTIDUMBRE: Ambos sensores poco confiables
         elif avg_conf < 0.50:
             rl_margin = self.rl_margins['uncertainty']
             scenario = "INCERTIDUMBRE"
-            print(f"  [MARGEN] Incertidumbre: avg_conf={avg_conf:.2f} < 0.50 → Margen muy alto (±{rl_margin*100:.0f}%)")
+            print(f"  [MARGEN] Incertidumbre: avg_conf={avg_conf:.2f} < 0.50 - Margen muy alto (±{rl_margin*100:.0f}%)")
         
         # 5. CASO INTERMEDIO
         else:
             rl_margin = self.rl_margins['intermediate']
             scenario = "INTERMEDIO"
-            print(f"  [MARGEN] Caso intermedio → Margen estándar (±{rl_margin*100:.0f}%)")
+            print(f"  [MARGEN] Caso intermedio - Margen estándar (±{rl_margin*100:.0f}%)")
         
         return rl_margin, scenario
     
@@ -273,6 +289,12 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
 
             self.previous_keyframe_pose = initial_pose
             self.keyframe_poses.append(initial_pose)
+            
+            # ====================================================================
+            # FIX: GUARDAR FRAME_ID DEL PRIMER KEYFRAME
+            # ====================================================================
+            self.keyframe_frame_ids.append(self.current_frame_id)
+            # ====================================================================
             
             # Guardar GPS del primer keyframe
             if gps_utm is not None:
@@ -324,18 +346,122 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                             print(f"Dirección SLAM alineada con GPS (delta_angle={np.degrees(delta_angle):.2f}°)")
                             print(f"  Vector t corregido: {t.ravel().round(3)} | Magnitud: {np.linalg.norm(t):.6f}")
 
+                    # ============================================================
+                    # NUEVO: GUARDAR SLAM PURO (SIN ESCALAR) - ANTES DEL ESCALADO
+                    # ============================================================
+                    relative_pose_pure = np.eye(4)
+                    relative_pose_pure[:3, :3] = R
+                    relative_pose_pure[:3, 3] = t.ravel()  # Vector t SIN escalar
+                    
+                    current_pose_pure = self.previous_keyframe_pose @ relative_pose_pure
+                    self.slam_history_pure.append(current_pose_pure[:3, 3].copy())
+                    
+                    if len(self.slam_history_pure) % 50 == 0:  # Debug cada 50 frames
+                        print(f"  [DEBUG] SLAM puro guardado (frame {len(self.slam_history_pure)}): {current_pose_pure[:3, 3].round(3)}")
+                    # ============================================================
+
+                    # AHORA SÍ APLICAR ESCALADO (solo para fusión RL)
                     escala = 1.0
                     if self.previous_gps_utm is not None and gps_utm is not None:
-                        distancia_real = np.linalg.norm(gps_utm - self.previous_gps_utm)
+                        # ============================================================
+                        # ESCALADO GPS ADAPTATIVO (funciona para KITTI y MÓVIL)
+                        # ============================================================
+                        # Registrar movimiento GPS frame-a-frame
+                        movement_frame_to_frame = np.linalg.norm(gps_utm - self.previous_gps_utm)
+                        self.gps_movement_history.append(movement_frame_to_frame)
+                        
+                        # Limitar historial a últimos 50 frames
+                        if len(self.gps_movement_history) > 50:
+                            self.gps_movement_history.pop(0)
+                        
+                        # DETECCIÓN AUTOMÁTICA: Calcular umbral dinámico después de 20 frames
+                        if self.gps_scaling_threshold is None and len(self.gps_movement_history) >= 20:
+                            movements_array = np.array(self.gps_movement_history)
+                            # Filtrar movimientos > 0 (ignorar frames estáticos)
+                            active_movements = movements_array[movements_array > 0.001]
+                            
+                            if len(active_movements) > 5:
+                                median_movement = np.median(active_movements)
+                                
+                                # KITTI: GPS actualiza rápido → median ~0.5-2m por frame
+                                # MÓVIL: GPS actualiza lento → median ~0.001-0.01m por frame
+                                if median_movement > 0.1:
+                                    # GPS de alta frecuencia (KITTI)
+                                    self.gps_scaling_threshold = 0.01  # Umbral bajo
+                                    gps_type_detected = "KITTI (alta frecuencia)"
+                                else:
+                                    # GPS de baja frecuencia (MÓVIL)
+                                    self.gps_scaling_threshold = 0.005  # Umbral muy bajo para acumular
+                                    gps_type_detected = "MÓVIL (baja frecuencia)"
+                                
+                                print(f"\n{'='*70}")
+                                print(f"[AUTO-DETECCIÓN GPS]")
+                                print(f"  Tipo detectado: {gps_type_detected}")
+                                print(f"  Movimiento mediano: {median_movement:.6f}m/frame")
+                                print(f"  Umbral escalado: {self.gps_scaling_threshold:.6f}m")
+                                print(f"  Frames analizados: {len(active_movements)}")
+                                print(f"{'='*70}\n")
+                        
+                        # Usar umbral por defecto si aún no se ha detectado
+                        threshold = self.gps_scaling_threshold if self.gps_scaling_threshold is not None else 0.01
+                        
+                        # Usar GPS de referencia acumulativa (último escalado exitoso)
+                        reference_gps = self.last_scaled_gps_utm if self.last_scaled_gps_utm is not None else self.previous_gps_utm
+                        
+                        distancia_real = np.linalg.norm(gps_utm - reference_gps)
                         distancia_slam = np.linalg.norm(t)
-                        if distancia_slam > 0.0001 and distancia_real > 0.01:
+                        
+                        # ====================================================================
+                        # DEBUG EXTENSIVO - VERIFICAR POR QUÉ NO SE APLICA ESCALADO
+                        # ====================================================================
+                        if len(self.slam_history_pure) % 10 == 0:  # Debug cada 10 frames
+                            print(f"\n{'='*70}")
+                            print(f"[DEBUG ESCALADO] Frame {len(self.slam_history_pure)}")
+                            print(f"{'='*70}")
+                            print(f"  GPS actual:       {gps_utm.round(3)}")
+                            print(f"  GPS referencia:   {reference_gps.round(3)} {'(último escalado)' if self.last_scaled_gps_utm is not None else '(primer GPS)'}")
+                            print(f"  Delta GPS (x,y,z): {(gps_utm - reference_gps).round(3)}")
+                            print(f"  Distancia GPS:    {distancia_real:.6f}m (acumulada)")
+                            print(f"  Distancia SLAM:   {distancia_slam:.6f}m")
+                            print(f"  Umbral dinámico:  {threshold:.6f}m {'(auto-detectado)' if self.gps_scaling_threshold else '(por defecto)'}")
+                            print(f"  Condición 1: dist_slam > 0.0001? {distancia_slam > 0.0001} (valor: {distancia_slam:.6f})")
+                            print(f"  Condición 2: dist_real > {threshold}? {distancia_real > threshold} (valor: {distancia_real:.6f})")
+                            print(f"  Ambas cumplidas: {distancia_slam > 0.0001 and distancia_real > threshold}")
+                        # ====================================================================
+                        
+                        # APLICAR ESCALADO si se supera el umbral dinámico
+                        if distancia_slam > 0.0001 and distancia_real > threshold:
                             escala = distancia_real / distancia_slam
-                            t[:3] *= escala
-                            print(f"  OK - Escalado aplicado: {distancia_slam:.6f} → {distancia_real:.6f} m (escala={escala:.3f})")
+                            t[:3] *= escala  # ← ESCALAR (solo afecta current_pose, NO slam_history_pure)
+                            
+                            # ACTUALIZAR referencia GPS después de escalar exitosamente
+                            self.last_scaled_gps_utm = gps_utm.copy()
+                            
+                            if len(self.slam_history_pure) % 10 == 0:
+                                print(f"  OK - Escalado aplicado: {distancia_slam:.6f} → {distancia_real:.6f} m (escala={escala:.3f})")
+                        else:
+                            if len(self.slam_history_pure) % 10 == 0:
+                                print(f"  NO SE APLICÓ ESCALADO:")
+                                if distancia_slam <= 0.0001:
+                                    print(f"     Razón: Movimiento SLAM muy pequeño ({distancia_slam:.6f}m <= 0.0001m)")
+                                if distancia_real <= threshold:
+                                    print(f"     Razón: Movimiento GPS acumulado insuficiente ({distancia_real:.6f}m <= {threshold:.6f}m)")
+                                    print(f"     → Esperando más movimiento GPS antes de escalar")
+                                print(f"     → SLAM y GPS escalado serán IDÉNTICOS (escala=1.0)")
+                                print(f"={'='*70}\n")
+                    else:
+                        if len(self.slam_history_pure) % 10 == 0:
+                            print(f"\n{'='*70}")
+                            print(f"[DEBUG ESCALADO] Frame {len(self.slam_history_pure)}")
+                            print(f"  NO HAY GPS PREVIO O ACTUAL PARA ESCALAR")
+                            print(f"  GPS actual: {gps_utm is not None}")
+                            print(f"  GPS previo: {self.previous_gps_utm is not None}")
+                            print(f"={'='*70}\n")
 
+                    # RECALCULAR POSE CON ESCALA (para fusión)
                     relative_pose = np.eye(4)
                     relative_pose[:3, :3] = R
-                    relative_pose[:3, 3] = t.ravel()
+                    relative_pose[:3, 3] = t.ravel()  # Vector t ESCALADO
 
                     current_pose = self.previous_keyframe_pose @ relative_pose
 
@@ -411,6 +537,12 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                         self.keyframe_poses.append(fused_pose)
                         self.relative_transformations.append(relative_pose)
                         
+                        # ====================================================================
+                        # FIX: GUARDAR FRAME_ID DE ESTE KEYFRAME
+                        # ====================================================================
+                        self.keyframe_frame_ids.append(self.current_frame_id)
+                        # ====================================================================
+                        
                         # Guardar GPS correspondiente a este keyframe
                         if gps_utm is not None:
                             self.gps_keyframes.append(gps_utm.copy())
@@ -477,6 +609,12 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         
         for i in range(len(frames)):
             print(f"Procesando frame {i}...")
+            
+            # ====================================================================
+            # FIX: ACTUALIZAR CONTADOR DE FRAME_ID
+            # ====================================================================
+            self.current_frame_id = i
+            # ====================================================================
             
             if frames[i] is None:
                 print(f"  ERROR - Frame {i} es None")
@@ -661,16 +799,20 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         # COMPARACIÓN COMPLETA: Pipeline vs SLAM puro vs GPS (ground truth)
         # ====================================================================
         
-        has_slam_pure = hasattr(self, 'slam_history') and len(self.slam_history) > 0
+        # NUEVO: Verificar si tenemos SLAM puro (sin escalar)
+        has_slam_pure_unscaled = hasattr(self, 'slam_history_pure') and len(self.slam_history_pure) > 0
+        has_slam_scaled = hasattr(self, 'slam_history') and len(self.slam_history) > 0
         has_gps = hasattr(self, 'gps_history') and len(self.gps_history) > 0
         has_gps_keyframes = hasattr(self, 'gps_keyframes') and len(self.gps_keyframes) > 0
         
-        if has_slam_pure and has_gps and has_gps_keyframes:
+        if has_slam_pure_unscaled and has_gps and has_gps_keyframes:
             print("\n" + "="*80)
             print("COMPARACIÓN COMPLETA DE MÉTODOS")
             print("="*80)
             print(f"Pipeline Fusionado (SLAM+GPS+RL): {len(self.keyframe_poses)} keyframes")
-            print(f"SLAM puro: {len(self.slam_history)} frames")
+            print(f"SLAM PURO (SIN ESCALAR): {len(self.slam_history_pure)} frames")  # ← ACTUALIZADO
+            if has_slam_scaled:
+                print(f"SLAM escalado (referencia): {len(self.slam_history)} frames")  # ← INFO ADICIONAL
             print(f"GPS puro: {len(self.gps_history)} frames")
             print(f"GPS Ground Truth: {len(self.gps_keyframes)} keyframes")
             print("="*80 + "\n")
@@ -681,42 +823,252 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             
             # Preparar trayectorias para comparación
             pipeline_traj = np.array([pose[:3, 3] for pose in self.keyframe_poses])
-            slam_pure_traj = np.array(self.slam_history)
+            slam_pure_traj = np.array(self.slam_history_pure)  # ← AHORA USA SLAM PURO (SIN ESCALAR)
             gps_traj = np.array(self.gps_history)
             gps_keyframes_traj = np.array(self.gps_keyframes)
             
-            # Método 1: Comparar usando GPS keyframes como ground truth
-            print("MÉTODO 1: Comparación con GPS keyframes como ground truth")
-            print("-" * 80)
-            
-            # Necesitamos interpolar las trayectorias SLAM puro y GPS puro
-            # para tener la misma cantidad de puntos que los keyframes
-            n_keyframes = len(pipeline_traj)
-            
-            # Interpolar SLAM puro en las posiciones de los keyframes
-            if len(slam_pure_traj) > n_keyframes:
-                # Submuestrear SLAM puro proporcionalmente
-                indices = np.linspace(0, len(slam_pure_traj) - 1, n_keyframes).astype(int)
-                slam_pure_keyframes = slam_pure_traj[indices]
+            # ====================================================================
+            # FIX: FILTRAR SLAM/GPS POR KEYFRAME_FRAME_IDS
+            # ====================================================================
+            # Verificar si tenemos frame_ids de keyframes guardados
+            if hasattr(self, 'keyframe_frame_ids') and len(self.keyframe_frame_ids) > 0:
+                print(f"  [FIX] Usando keyframe_frame_ids para filtrar trayectorias")
+                print(f"  [FIX] Keyframes: {len(self.keyframe_frame_ids)}, SLAM frames: {len(slam_pure_traj)}, GPS frames: {len(gps_traj)}")
+                
+                # ====================================================================
+                # FIX ADICIONAL: Filtrar índices fuera de rango
+                # ====================================================================
+                max_slam_idx = len(slam_pure_traj) - 1  # Índice máximo válido
+                valid_keyframe_ids = []
+                invalid_count = 0
+                
+                for idx in self.keyframe_frame_ids[:len(pipeline_traj)]:
+                    if idx <= max_slam_idx:
+                        valid_keyframe_ids.append(idx)
+                    else:
+                        invalid_count += 1
+                
+                if invalid_count > 0:
+                    print(f"  [FIX] Filtrados {invalid_count} índices fuera de rango (>{max_slam_idx})")
+                
+                valid_keyframe_ids = np.array(valid_keyframe_ids)
+                # ====================================================================
+                
+                # Filtrar SLAM puro usando los frame_ids válidos de keyframes
+                if len(slam_pure_traj) > len(pipeline_traj) and len(valid_keyframe_ids) > 0:
+                    slam_pure_keyframes = slam_pure_traj[valid_keyframe_ids]
+                    print(f"  [FIX] SLAM filtrado: {len(slam_pure_keyframes)} poses (usando frame_ids válidos)")
+                else:
+                    slam_pure_keyframes = slam_pure_traj[:len(pipeline_traj)]
+                    print(f"  [FIX] SLAM sin filtrar (longitud similar a keyframes)")
+                
+                # GPS puro ya tiene GPS por frame, NO necesita filtrado adicional
+                # (gps_keyframes ya está sincronizado con keyframes)
             else:
-                slam_pure_keyframes = slam_pure_traj
+                print(f"  [WARNING] keyframe_frame_ids no disponible - usando interpolación proporcional")
+                # Fallback: interpolación proporcional (método anterior)
+                if len(slam_pure_traj) > len(pipeline_traj):
+                    indices = np.linspace(0, len(slam_pure_traj) - 1, len(pipeline_traj)).astype(int)
+                    slam_pure_keyframes = slam_pure_traj[indices]
+                else:
+                    slam_pure_keyframes = slam_pure_traj
+            # ====================================================================
             
-            # Asegurar longitudes iguales
+            # DEBUG: Verificar diferencia entre SLAM puro y escalado
+            if has_slam_scaled and len(self.slam_history) > 0:
+                slam_scaled_sample = np.array(self.slam_history[:min(10, len(self.slam_history))])
+                slam_pure_sample = slam_pure_traj[:min(10, len(slam_pure_traj))]
+                diff_norm = np.linalg.norm(slam_scaled_sample - slam_pure_sample)
+                print(f"  [DEBUG] Diferencia SLAM puro vs escalado (primeros 10 frames): {diff_norm:.2f}m")
+                if diff_norm < 0.1:
+                    print(f"  [WARNING] Diferencia muy pequeña - verificar que escalado se aplicó correctamente")
+            
+            # Asegurar longitudes iguales usando las trayectorias filtradas
             min_len = min(len(pipeline_traj), len(slam_pure_keyframes), len(gps_keyframes_traj))
             pipeline_traj_cut = pipeline_traj[:min_len]
             slam_pure_cut = slam_pure_keyframes[:min_len]
             gps_gt_cut = gps_keyframes_traj[:min_len]
             
-            # Realizar comparación usando GPS como ground truth
+            print(f"  Comparando {min_len} keyframes alineados")
+            print(f"  SLAM PURO (sin escalar) será comparado contra GPS ground truth")
+            print("-" * 80 + "\n")
+            
+            # ============================================================
+            # DEBUG: VERIFICAR CONTENIDO DE gps_quality_result
+            # ============================================================
+            print("\n" + "="*80)
+            print("DEBUG: Contenido completo de gps_quality_result")
+            print("="*80)
+            for key, value in gps_quality_result.items():
+                print(f"  '{key}': {value}")
+            print("="*80 + "\n")
+            # ============================================================
+            
+            # ============================================================
+            # DECIDIR REFERENCIA SEGÚN CALIDAD GPS DETECTADA
+            # ============================================================
+            # USAR .get() para acceso seguro a las claves del diccionario
+            gps_detected = gps_quality_result.get('detected', False)
+            
+            # CORRECCIÓN: La clave correcta es 'is_high_precision', no 'quality'
+            is_high_precision_gps = gps_quality_result.get('is_high_precision', False)
+            quality_type_str = gps_quality_result.get('quality_type', 'UNKNOWN')
+            
+            print(f"[DEBUG] gps_detected={gps_detected}, is_high_precision={is_high_precision_gps}")
+            print(f"[DEBUG] quality_type='{quality_type_str}'\n")
+            
+            if gps_detected and is_high_precision_gps:
+                # KITTI: GPS es confiable como ground truth
+                reference_method = 'gps'
+                reference_name = "GPS KITTI (alta precisión RTK)"
+                
+                print("\n" + "="*80)
+                print("MODO KITTI: GPS COMO GROUND TRUTH")
+                print("="*80)
+                print("Referencia:  GPS preciso (~1cm error inherente)")
+                print("Baseline:    SLAM puro sin escalar (deriva de escala ~20m)")
+                print("Métrica:     Mejora = (ATE_SLAM - ATE_Pipeline) / ATE_SLAM × 100%")
+                print("="*80 + "\n")
+                
+            else:
+                # MÓVIL: GPS no confiable, usar SLAM puro como referencia
+                reference_method = 'slam'
+                reference_name = "SLAM puro (GPS consumer no confiable)"
+                
+                print("\n" + "="*80)
+                print("MODO MÓVIL: SLAM PURO COMO REFERENCIA")
+                print("="*80)
+                print(f"Razón: is_high_precision={is_high_precision_gps} (esperado: True para KITTI)")
+                print("Referencia:  SLAM puro sin escalar (más preciso disponible ~0.5m)")
+                print("Problema:    GPS móvil ruidoso (~5-10m error inherente)")
+                print("Métrica:     Degradación = ATE_Pipeline vs SLAM_puro")
+                print("             Objetivo: < 1.5m (mantener precisión visual)")
+                print("="*80 + "\n")
+            
+            # Realizar comparación usando referencia dinámica
             comparison_results = TrajectoryMetrics.compare_trajectories(
                 pipeline_traj=pipeline_traj_cut,
-                slam_traj=slam_pure_cut,
+                slam_traj=slam_pure_cut,  # ← SLAM PURO (sin escalar)
                 gps_traj=gps_gt_cut,
-                reference='gps'
+                reference=reference_method  # ← DINÁMICO: 'gps' para KITTI, 'slam' para móvil
             )
+            
+            # Agregar metadata
+            comparison_results['reference_method'] = reference_method
+            comparison_results['reference_name'] = reference_name
+            comparison_results['gps_quality'] = gps_quality_result.get('quality', 'UNKNOWN')
             
             # Imprimir tabla comparativa
             TrajectoryMetrics.print_comparison_table(comparison_results)
+            
+            # ============================================================
+            # ANÁLISIS DIFERENCIADO SEGÚN TIPO DE DATASET
+            # ============================================================
+            pipeline_ate = comparison_results['pipeline_vs_ref']['ate']['rmse']
+            
+            if reference_method == 'gps':  # KITTI
+                slam_ate = comparison_results['slam_vs_ref']['ate']['rmse']
+                mejora = (slam_ate - pipeline_ate) / slam_ate * 100 if slam_ate > 0 else 0
+                
+                # ====================================================================
+                # FIX: CALCULAR DISTANCIA TOTAL DE LA TRAYECTORIA
+                # ====================================================================
+                traj_length = 0.0
+                for i in range(len(self.keyframe_poses) - 1):
+                    pos1 = self.keyframe_poses[i][:3, 3]
+                    pos2 = self.keyframe_poses[i+1][:3, 3]
+                    traj_length += np.linalg.norm(pos2 - pos1)
+                # ====================================================================
+                
+                print("\n" + "="*80)
+                print("ANÁLISIS KITTI - MEJORA vs SLAM PURO")
+                print("="*80)
+                print(f"SLAM puro vs GPS:    {slam_ate:.2f}m (deriva de escala sin corrección)")
+                print(f"Pipeline vs GPS:     {pipeline_ate:.2f}m (con fusión GPS+SLAM+RL)")
+                print(f"Diferencia corregida: {slam_ate - pipeline_ate:.2f}m")
+                print(f"Distancia recorrida: {traj_length:.0f}m")
+                print("-"*80)
+                print(f"MEJORA TOTAL:        {mejora:.1f}%")
+                print("-"*80)
+                
+                # ====================================================================
+                # FIX: CONTEXTUALIZAR MEJORA SEGÚN LONGITUD DE TRAYECTORIA
+                # ====================================================================
+                if traj_length < 500:  # Trayectoria CORTA
+                    print(f"TRAYECTORIA CORTA ({traj_length:.0f}m):")
+                    print(f"   Deriva de escala SLAM es mínima ({slam_ate:.2f}m)")
+                    print(f"   Mejora de {mejora:.1f}% es ESPERADA para trayectorias < 500m")
+                    print(f"   → GPS aporta principalmente suavidad y eliminación de drift rotacional")
+                    print(f"   → Para evaluar corrección de escala, usar secuencias > 1000m")
+                    if mejora > 15:
+                        print(f"ACEPTABLE: Pipeline mejora {mejora:.1f}% en trayectoria corta")
+                    else:
+                        print(f"MARGINAL: Mejora {mejora:.1f}% baja (pero esperado en trayectoria corta)")
+                        
+                elif traj_length < 1000:  # Trayectoria MEDIA
+                    if mejora >= 50:
+                        print(f"BUENO: Pipeline corrige {mejora:.1f}% de deriva")
+                    elif mejora >= 30:
+                        print(f"MODERADO: Pipeline corrige {mejora:.1f}% de deriva")
+                        print(f"   Puede mejorar con ajuste de pesos RL")
+                    else:
+                        print(f"BAJO: Pipeline corrige solo {mejora:.1f}% de deriva")
+                        print(f"   Problema en fusión - GPS no está corrigiendo escala efectivamente")
+                        
+                else:  # Trayectoria LARGA (> 1000m)
+                    if mejora >= 80:
+                        print(f"EXCELENTE: Pipeline corrige {mejora:.1f}% de deriva")
+                        print(f"   GPS corrige efectivamente la escala acumulada")
+                    elif mejora >= 60:
+                        print(f"BUENO: Pipeline corrige {mejora:.1f}% de deriva")
+                    elif mejora >= 40:
+                        print(f"MODERADO: Pipeline corrige {mejora:.1f}% de deriva")
+                        print(f"   Puede mejorar con ajuste de pesos RL")
+                    else:
+                        print(f"BAJO: Pipeline corrige solo {mejora:.1f}% de deriva")
+                        print(f"   Problema crítico en fusión - GPS no está corrigiendo escala")
+                # ====================================================================
+                
+                print("="*80 + "\n")
+                
+            else:  # MÓVIL (reference='slam')
+                gps_ate = comparison_results['gps_vs_ref']['ate']['rmse']  # GPS vs SLAM puro
+                
+                print("\n" + "="*80)
+                print("ANÁLISIS MÓVIL - PRESERVACIÓN DE PRECISIÓN SLAM")
+                print("="*80)
+                print(f"Pipeline vs SLAM puro:  {pipeline_ate:.2f}m")
+                print(f"GPS vs SLAM puro:       {gps_ate:.2f}m (GPS ruidoso - esperado)")
+                print("-"*80)
+                
+                if pipeline_ate < 1.5:
+                    print(f"EXCELENTE: Pipeline MANTIENE precisión SLAM")
+                    print(f"   Degradación {pipeline_ate:.2f}m < 1.5m (objetivo)")
+                    print(f"   → Fusión NO contamina información visual")
+                    print(f"   → GPS móvil correctamente tiene peso bajo")
+                    resultado = "MANTIENE_PRECISION"
+                elif pipeline_ate < 3.0:
+                    print(f"MODERADO: Degradación moderada")
+                    print(f"   Degradación {pipeline_ate:.2f}m (entre 1.5-3m)")
+                    print(f"   → Revisar pesos RL (posible sobre-confianza en GPS)")
+                    print(f"   → GPS ruidoso introduce algo de deriva")
+                    resultado = "DEGRADACION_MODERADA"
+                else:
+                    print(f"CRÍTICO: Pipeline DEGRADA SLAM significativamente")
+                    print(f"   Degradación {pipeline_ate:.2f}m > 3m")
+                    print(f"   → GPS ruidoso ({gps_ate:.2f}m) contamina SLAM preciso")
+                    print(f"   → SOLUCIÓN: Reducir confianza GPS en móvil")
+                
+                print(f"\nNOTA: GPS móvil tiene {gps_ate:.2f}m de error vs SLAM")
+                print(f"      (Esto es ESPERADO en GPS consumer - no es ground truth)")
+                print("="*80 + "\n")
+                
+                # Guardar resultado del análisis
+                comparison_results['mobile_analysis'] = {
+                    'resultado': resultado,
+                    'degradacion_slam': pipeline_ate,
+                    'gps_error': gps_ate
+                }
             
             # Guardar métricas en CSV
             comparison_csv = output_base + "_comparison_metrics.csv"
@@ -727,14 +1079,30 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
             with open(comparison_json, 'w') as f:
                 # Convertir arrays numpy a listas para JSON
                 json_data = {}
+                # Filtrar solo métricas válidas (ignorar metadatos como reference_method, etc.)
                 for key, data in comparison_results.items():
-                    json_data[key] = {
-                        'method': data['method'],
-                        'ate': {k: float(v) if isinstance(v, (np.floating, np.integer)) else (v.tolist() if isinstance(v, np.ndarray) else v)
-                               for k, v in data['ate'].items()},
-                        'rpe': {k: float(v) if isinstance(v, (np.floating, np.integer)) else (v.tolist() if isinstance(v, np.ndarray) else v)
-                               for k, v in data['rpe'].items()}
+                    # Solo procesar si es un diccionario con estructura de métricas
+                    if isinstance(data, dict) and 'method' in data and 'ate' in data:
+                        json_data[key] = {
+                            'method': data['method'],
+                            'ate': {k: float(v) if isinstance(v, (np.floating, np.integer)) else (v.tolist() if isinstance(v, np.ndarray) else v)
+                                   for k, v in data['ate'].items()},
+                            'rpe': {k: float(v) if isinstance(v, (np.floating, np.integer)) else (v.tolist() if isinstance(v, np.ndarray) else v)
+                                   for k, v in data['rpe'].items()}
+                        }
+                
+                # Agregar metadatos al JSON (si existen)
+                if 'reference_method' in comparison_results:
+                    json_data['_metadata'] = {
+                        'reference_method': comparison_results.get('reference_method'),
+                        'reference_name': comparison_results.get('reference_name'),
+                        'gps_quality': comparison_results.get('gps_quality')
                     }
+                
+                # Agregar análisis móvil si existe
+                if 'mobile_analysis' in comparison_results:
+                    json_data['_mobile_analysis'] = comparison_results['mobile_analysis']
+                
                 json.dump(json_data, f, indent=4)
             print(f"Comparación guardada en JSON: {comparison_json}\n")
             
@@ -754,12 +1122,12 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                 linewidth=4, marker='o', markersize=8, zorder=5)
         
         # SLAM puro por frame
-        if has_slam_pure:
-            slam_traj = np.array(self.slam_history)
+        if has_slam_pure_unscaled:
+            slam_traj = np.array(self.slam_history_pure)
             if slam_traj.shape[1] >= 2:
                 x_slam, y_slam = slam_traj[:, 0], slam_traj[:, 1]
                 x_slam -= x_slam[0]; y_slam -= y_slam[0]
-                plt.plot(x_slam, y_slam, 'g--', label='SLAM Puro', 
+                plt.plot(x_slam, y_slam, 'g--', label='SLAM Puro (sin escalar)', 
                         linewidth=2.5, zorder=3, alpha=0.8)
         
         # GPS puro
@@ -806,7 +1174,7 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         )
         
         # Agregar métricas de comparación si están disponibles
-        if has_slam_pure and has_gps and has_gps_keyframes:
+        if has_slam_pure_unscaled and has_gps and has_gps_keyframes:
             try:
                 pipeline_vs_gps = comparison_results['pipeline_vs_ref']
                 slam_vs_gps = comparison_results['slam_vs_ref']
@@ -911,7 +1279,12 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         colors = {'pipeline_vs_ref': 'blue', 'slam_vs_ref': 'green', 
                  'gps_vs_ref': 'red', 'pipeline_vs_slam': 'purple'}
         
+        # Filtrar solo métricas válidas (ignorar metadatos)
         for key, data in comparison_results.items():
+            # Solo procesar si es un diccionario con estructura de métricas
+            if not isinstance(data, dict) or 'method' not in data or 'ate' not in data:
+                continue
+            
             if 'errors' in data['ate'] and len(data['ate']['errors']) > 0:
                 errors = data['ate']['errors']
                 label = data['method']
@@ -937,7 +1310,12 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         colors = {'pipeline_vs_ref': 'blue', 'slam_vs_ref': 'green', 
                  'gps_vs_ref': 'red', 'pipeline_vs_slam': 'purple'}
         
+        # Filtrar solo métricas válidas (ignorar metadatos)
         for key, data in comparison_results.items():
+            # Solo procesar si es un diccionario con estructura de métricas
+            if not isinstance(data, dict) or 'method' not in data or 'rpe' not in data:
+                continue
+            
             if 'errors' in data['rpe'] and len(data['rpe']['errors']) > 0:
                 errors = data['rpe']['errors']
                 label = data['method']
@@ -1186,3 +1564,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+

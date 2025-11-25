@@ -196,6 +196,12 @@ class MobileVideoProcessor:
                 print(f"   Fin del video en frame {frame_idx}")
                 break
             
+            # ====================================================================
+            # FIX: ACTUALIZAR CONTADOR DE FRAME_ID EN EL SISTEMA SLAM
+            # ====================================================================
+            self.slam_system.current_frame_id = frame_idx
+            # ====================================================================
+            
             # Obtener GPS sincronizado para este frame
             gps_data = None
             if self.gps_per_frame is not None and frame_idx < len(self.gps_per_frame):
@@ -298,7 +304,7 @@ class MobileVideoProcessor:
                 
                 # Si no hay Unix time, usar Frame timestamp
                 if unix_col is None:
-                    for col_name in ['Frame timestamp[nanosec]', 'timestamp', 'time']:
+                    for col_name in ['Frame timestamp[nanosecond]', 'timestamp', 'time']:
                         if col_name in df.columns:
                             unix_col = col_name
                             break
