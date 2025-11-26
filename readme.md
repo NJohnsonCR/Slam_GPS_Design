@@ -1,8 +1,8 @@
-# Plataforma LMS múltiple con SLAM visual
+# SLAM Visual con GPS y Reinforcement Learning
 
-Este proyecto implementa una plataforma modular que permite experimentar con distintos algoritmos de SLAM (Simultaneous Localization and Mapping) utilizando videos monoculares como entrada. Está diseñado para ser interactivo, visualmente atractivo y extensible. También incluye funcionalidad para medir métricas de rendimiento como uso de CPU, memoria y tiempo de ejecución. 
+Este proyecto implementa un sistema de SLAM (Simultaneous Localization and Mapping) que integra visión monocular, datos GPS y técnicas de Reinforcement Learning para mejorar la precisión de localización. Está diseñado para ser modular, visualmente atractivo y extensible, con énfasis en la fusión de sensores y optimización mediante aprendizaje por refuerzo.
 
-Proyecto desarrollado por Jimena León Huertas, estudiante del Tecnológico de Costa Rica (TEC) durante el primer semestre de 2025, como parte del curso CE-1114 - Proyecto de Aplicación de la Ingeniería en Computadores. 
+Proyecto desarrollado por Naheem Johnson Solis, estudiante del Tecnológico de Costa Rica (TEC) durante el segundo semestre de 2025, como parte del curso CE-1114 - Proyecto de Aplicación de la Ingeniería en Computadores. 
 
 Se agradece el apoyo del profesor asesor MSc. Luis Alberto Chavarría Zamora.
 
@@ -10,19 +10,22 @@ Se agradece el apoyo del profesor asesor MSc. Luis Alberto Chavarría Zamora.
 
 El proyecto fue creado con fines educativos e investigativos, como parte de un trabajo académico del Tecnológico de Costa Rica (TEC). Su objetivo es permitir a los estudiantes y desarrolladores:
 
-- Probar diferentes variantes de algoritmos SLAM visuales.
-- Visualizar trayectorias estimadas en 2D a partir de videos.
-- Evaluar el consumo de recursos de cada implementación.
-- Facilitar la integración y comparación de nuevas técnicas LMS.
+- Integrar datos GPS con SLAM visual para mejorar la estimación de trayectorias.
+- Aplicar técnicas de Reinforcement Learning para optimizar la fusión de sensores.
+- Visualizar y comparar trayectorias estimadas con datos GPS reales.
+- Evaluar el rendimiento del sistema en diferentes escenarios y condiciones.
+- Facilitar la experimentación con diferentes estrategias de fusión de datos.
 
 ## Características principales
 
 - Interfaz gráfica desarrollada en `Tkinter` con diseño moderno y responsivo.
-- Soporte para múltiples LMS almacenados en subcarpetas como `LMS_ORB_with_BA`, `LMS_visual`, etc.
-- Ejecución de scripts LMS individuales con selección dinámica de video `.mp4`.
-- Cálculo automático de métricas de rendimiento (`psutil`).
-- Visualización automática de resultados y exportación en CSV y PNG.
-- Resultados organizados por fecha y tipo de LMS.
+- Integración de datos GPS con SLAM visual mediante fusión de sensores.
+- Implementación de algoritmos de Reinforcement Learning para optimización.
+- Ejecución con selección dinámica de video `.mp4` y archivos GPS.
+- Cálculo automático de métricas de rendimiento (CPU, memoria, precisión).
+- Visualización comparativa de trayectorias: SLAM puro vs GPS vs fusión.
+- Exportación de resultados en formato CSV y PNG.
+- Resultados organizados por fecha y tipo de experimento.
 
 ## Requisitos del sistema
 
@@ -30,15 +33,17 @@ El proyecto fue creado con fines educativos e investigativos, como parte de un t
 - Python 3.12 (con soporte para venv y tkinter).
 - Acceso a internet para instalación de dependencias.
 - Video de entrada en formato `.mp4`.
+- Archivo de datos GPS (formato compatible con el sistema).
 
 ## Instalación
 
 1. Clone este repositorio o descargue los archivos en una carpeta local:
 
 ```bash
-git clone https://github.com/menaleon/slam-2-diseno.git
-cd slam-2-diseno
+git clone https://github.com/NJohnsonCR/Slam_GPS_Design.git
+cd Slam_GPS_Design
 ```
+
 2. Genere el ambiente virtual e instale las dependencias con este script:
 
 ```bash
@@ -70,12 +75,12 @@ Los resultados se almacenan automáticamente en una jerarquía de carpetas simil
 
 ```
 resultados/
-    └── LMS_ORB_with_BA/
+    └── SLAM_GPS_RL/
         └── 1245_2505_2025/             (hora-minuto_dia-mes_año)
-            ├── trayectoria_LMS_ORB_with_BA.csv
-            └── trayectoria_LMS_ORB_with_BA.png
-    └── LMS_visual
-        └── 1304_2505_2025/             (hora-minuto_dia-mes_año)
-            ├── trayectoria_LMS_visual.csv
-            └── trayectoria_LMS_visual.png
+            ├── trayectoria_slam_visual.csv
+            ├── trayectoria_gps.csv
+            ├── trayectoria_fusionada.csv
+            ├── metricas_rendimiento.csv
+            ├── comparacion_trayectorias.png
+            └── graficas_rl_training.png
 ```
