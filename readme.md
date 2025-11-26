@@ -65,6 +65,27 @@ source venv/bin/activate
 python3 interfaz.py
 ```
 
+3. Una vez abierta la interfaz gráfica, seleccione el tipo de datos a procesar:
+   
+   **Opción A: Usar datos KITTI**
+   - Haga clic en el botón "Seleccionar Trayectoria KITTI"
+   - Navegue hasta la carpeta `kitti_data/2011_09_26/`
+   - Seleccione una de las secuencias disponibles (ej: `2011_09_26_drive_0001_sync`)
+   - El sistema cargará automáticamente las imágenes de la carpeta `image_02/data/` y los datos GPS de `oxts/data/`
+
+   **Opción B: Usar datos móviles**
+   - Haga clic en el botón "Seleccionar Datos Móviles"
+   - Navegue hasta la carpeta `mobile_data/`
+   - Seleccione la trayectoria deseada (ej: `/2025_03_11`)
+   - Seleccione el archivo de video (ej: `movie.mp4`)
+   - El sistema cargará automáticamente el archivo GPS correspondiente (`location.csv`)
+
+4. Configure los parámetros del algoritmo si es necesario (ventana de configuración en la interfaz).
+
+5. Presione el botón "Ejecutar SLAM" para iniciar el procesamiento.
+
+6. Espere a que finalice la ejecución y revise los resultados generados en la carpeta `resultados/`.
+
 ## Manual de usuario
 
 pendiente
