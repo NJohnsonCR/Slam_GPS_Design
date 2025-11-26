@@ -39,7 +39,9 @@ pip install \
     psutil \
     pillow \
     torch \
-    pyproj 
-
+    pyproj \
+    pandas \
+    scikit-learn \
+    simplekml
 
 echo "Entorno configurado correctamente."
