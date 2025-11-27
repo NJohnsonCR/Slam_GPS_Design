@@ -981,14 +981,22 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                 # ====================================================================
                 
                 print("\n" + "="*80)
-                print("ANÁLISIS KITTI - MEJORA vs SLAM PURO")
+                print("ANÁLISIS KITTI - COMPARACIÓN CONTRA GPS GROUND TRUTH")
                 print("="*80)
-                print(f"SLAM puro vs GPS:    {slam_ate:.2f}m (deriva de escala sin corrección)")
-                print(f"Pipeline vs GPS:     {pipeline_ate:.2f}m (con fusión GPS+SLAM+RL)")
-                print(f"Diferencia corregida: {slam_ate - pipeline_ate:.2f}m")
+                print("Ambos métodos son evaluados contra el mismo GPS de referencia:")
+                print("")
+                print(f"  1. SLAM puro (sin GPS):        {slam_ate:.2f}m de error vs GPS")
+                print(f"     → Deriva de escala acumulada sin corrección")
+                print("")
+                print(f"  2. Pipeline (SLAM+GPS+RL):     {pipeline_ate:.2f}m de error vs GPS")
+                print(f"     → Con fusión inteligente de sensores")
+                print("")
+                print(f"  3. Reducción de error lograda:  {slam_ate - pipeline_ate:.2f}m")
+                print(f"     → Pipeline se acerca {mejora:.1f}% más al GPS real")
+                print("")
                 print(f"Distancia recorrida: {traj_length:.0f}m")
                 print("-"*80)
-                print(f"MEJORA TOTAL:        {mejora:.1f}%")
+                print(f"MEJORA vs GPS GROUND TRUTH:  {mejora:.1f}%")
                 print("-"*80)
                 
                 # ====================================================================
@@ -1234,9 +1242,12 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
         plt.close()
 
         # Calcular métricas individuales (legacy - para compatibilidad)
-        if has_gps_keyframes and len(self.gps_keyframes) == len(self.keyframe_poses):
+        # SOLO EN KITTI: GPS keyframes puede usarse como ground truth
+        if has_gps_keyframes and len(self.gps_keyframes) == len(self.keyframe_poses) and reference_method == 'gps':
             print("\n" + "="*60)
-            print("MÉTRICAS INDIVIDUALES (Pipeline vs GPS)")
+            print("MÉTRICAS INDIVIDUALES (Pipeline vs GPS Keyframes)")
+            print("="*60)
+            print("NOTA: Estas métricas usan GPS por keyframe (puede diferir ligeramente de GPS puro)")
             print("="*60)
             
             estimated_traj = np.array([pose[:3, 3] for pose in self.keyframe_poses])
@@ -1258,6 +1269,14 @@ class RL_ORB_SLAM_GPS(PoseGraphSLAM):
                                                    metric_name="RPE Translación")
             
             print(f"Métricas individuales guardadas en: {metrics_file}")
+            print("="*60 + "\n")
+        elif has_gps_keyframes and len(self.gps_keyframes) == len(self.keyframe_poses) and reference_method == 'slam':
+            # MÓVIL: Omitir métricas individuales (GPS no es confiable)
+            print("\n" + "="*60)
+            print("MÉTRICAS INDIVIDUALES: OMITIDAS EN MODO MÓVIL")
+            print("="*60)
+            print("Razón: GPS móvil no es ground truth válido")
+            print("       Use la tabla comparativa arriba para métricas precisas")
             print("="*60 + "\n")
 
         print(f"\n{'='*80}")
@@ -1564,6 +1583,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

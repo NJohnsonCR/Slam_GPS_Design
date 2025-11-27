@@ -229,51 +229,119 @@ class TrajectoryMetrics:
     @staticmethod
     def print_comparison_table(results: Dict[str, Dict[str, float]]):
         """
-        Imprime tabla comparativa de métricas.
+        Imprime tabla comparativa de métricas adaptada según la referencia.
         """
         print(f"\n{'='*85}")
         print(f"{'TABLA COMPARATIVA DE METRICAS ATE/RPE':^85}")
         print(f"{'='*85}")
-        print(f"{'Metodo':<35} {'ATE Mean':<12} {'ATE RMSE':<12} {'RPE Mean':<12} {'Mejora':<10}")
-        print(f"{'-'*85}")
         
-        # Filtrar solo los resultados de métricas (ignorar metadatos como reference_method, etc.)
-        metrics_only = {k: v for k, v in results.items() 
-                       if isinstance(v, dict) and 'method' in v and 'ate' in v}
+        # Detectar tipo de referencia
+        reference_method = results.get('reference_method', 'unknown')
         
-        # Obtener el SLAM puro como baseline
-        baseline_ate = None
-        baseline_name = None
+        # Extraer métrica del pipeline (siempre presente)
+        pipeline_data = results.get('pipeline_vs_ref', {})
+        pipeline_ate = pipeline_data.get('ate', {}).get('rmse', 0)
         
-        for key, data in metrics_only.items():
-            if 'slam_vs_ref' in key:
-                baseline_ate = data['ate']['rmse']
-                baseline_name = data['method']
-                break
-        
-        for key, data in metrics_only.items():
-            method = data['method']
-            ate_mean = data['ate']['mean']
-            ate_rmse = data['ate']['rmse']
-            rpe_mean = data['rpe']['trans_mean']
+        # ====================================================================
+        # FIX: Manejo diferente según tipo de referencia
+        # ====================================================================
+        if reference_method == 'gps':
+            # KITTI: Mostrar tabla con columna "Mejora %"
+            print(f"{'Metodo':<35} {'ATE Mean':<12} {'ATE RMSE':<12} {'RPE Mean':<12} {'Mejora':<12}")
+            print(f"{'-'*85}")
             
-            if baseline_ate and ate_rmse < baseline_ate and 'pipeline' in key.lower():
-                improvement = ((baseline_ate - ate_rmse) / baseline_ate) * 100
-                improvement_str = f"+{improvement:.1f}%"
-            elif baseline_ate and ate_rmse > baseline_ate:
-                degradation = ((ate_rmse - baseline_ate) / baseline_ate) * 100
-                improvement_str = f"-{degradation:.1f}%"
+            baseline_data = results.get('slam_vs_ref', {})
+            baseline_name = "SLAM puro (sin GPS)"
+            baseline_ate = baseline_data.get('ate', {}).get('rmse', 0)
+            
+            # Calcular mejora porcentual
+            if baseline_ate > 0:
+                improvement = ((baseline_ate - pipeline_ate) / baseline_ate) * 100
+                mejora_str = f"+{improvement:.1f}%" if improvement > 0 else f"{improvement:.1f}%"
             else:
-                improvement_str = "-"
+                mejora_str = "N/A"
             
-            print(f"{method:<35} {ate_mean:>10.3f}m {ate_rmse:>10.3f}m {rpe_mean:>10.3f}m  {improvement_str:<10}")
+            # FILA 1: Pipeline
+            pipeline_mean = pipeline_data.get('ate', {}).get('mean', 0)
+            pipeline_rpe = pipeline_data.get('rpe', {}).get('trans_mean', 0)
+            print(f"{'Pipeline (SLAM+GPS+RL)':<35} {pipeline_mean:>10.3f}m {pipeline_ate:>10.3f}m {pipeline_rpe:>10.3f}m  {mejora_str}")
+            
+            # FILA 2: Baseline (SLAM puro)
+            baseline_mean = baseline_data.get('ate', {}).get('mean', 0)
+            baseline_rpe = baseline_data.get('rpe', {}).get('trans_mean', 0)
+            print(f"{baseline_name:<35} {baseline_mean:>10.3f}m {baseline_ate:>10.3f}m {baseline_rpe:>10.3f}m  -")
+            
+            # FILA 3: Diferencia directa Pipeline vs SLAM (si existe)
+            if 'pipeline_vs_slam' in results:
+                diff_data = results['pipeline_vs_slam']
+                diff_mean = diff_data.get('ate', {}).get('mean', 0)
+                diff_ate = diff_data.get('ate', {}).get('rmse', 0)
+                diff_rpe = diff_data.get('rpe', {}).get('trans_mean', 0)
+                
+                if baseline_ate > 0:
+                    diff_improvement = ((baseline_ate - diff_ate) / baseline_ate) * 100
+                    diff_mejora_str = f"+{diff_improvement:.1f}%" if diff_improvement > 0 else f"{diff_improvement:.1f}%"
+                else:
+                    diff_mejora_str = "N/A"
+                
+                print(f"{'Pipeline vs SLAM (diferencia directa)':<35} {diff_mean:>10.3f}m  {diff_ate:>10.3f}m  {diff_rpe:>10.3f}m  {diff_mejora_str}")
+            
+        else:
+            # ====================================================================
+            # MÓVIL: Tabla mejorada sin 0.000m confusos
+            # ====================================================================
+            print(f"{'Metodo':<40} {'Error vs SLAM':<15} {'Interpretación':<20}")
+            print(f"{'-'*85}")
+            
+            # FILA 1: Pipeline (degradación)
+            pipeline_mean = pipeline_data.get('ate', {}).get('mean', 0)
+            pipeline_rpe = pipeline_data.get('rpe', {}).get('trans_mean', 0)
+            
+            # Clasificar degradación
+            if pipeline_ate < 1.0:
+                interpretacion = "EXCELENTE ✓"
+            elif pipeline_ate < 1.5:
+                interpretacion = "BUENO ✓"
+            elif pipeline_ate < 3.0:
+                interpretacion = "MODERADO"
+            else:
+                interpretacion = "ALTO ✗"
+            
+            print(f"{'Pipeline (SLAM+GPS+RL)':<40} {pipeline_ate:>8.3f}m       {interpretacion:<20}")
+            print(f"{'  └─ ATE Mean:':<40} {pipeline_mean:>8.3f}m")
+            print(f"{'  └─ RPE Mean:':<40} {pipeline_rpe:>8.3f}m")
+            print()
+            print(f"{'SLAM puro (REFERENCIA PERFECTA)':<40} {'0.000m':>8}       {'(por definición)':<20}")
+            print()
+            
+            # FILA 2: GPS para contexto (si existe)
+            if 'gps_vs_ref' in results:
+                gps_data = results['gps_vs_ref']
+                gps_ate = gps_data.get('ate', {}).get('rmse', 0)
+                gps_mean = gps_data.get('ate', {}).get('mean', 0)
+                
+                print(f"{'GPS consumer (PARA CONTEXTO)':<40} {gps_ate:>8.3f}m       {'ruidoso (esperado)':<20}")
+                print(f"{'  └─ ATE Mean:':<40} {gps_mean:>8.3f}m")
         
         print(f"{'='*85}\n")
         
-        if baseline_name:
-            print(f"Baseline: {baseline_name} (RMSE = {baseline_ate:.3f}m)")
-            print(f"Mejora % = ((Baseline - Metodo) / Baseline) x 100")
-            print(f"   + = Mejor que baseline | - = Peor que baseline\n")
+        # NOTA EXPLICATIVA ADAPTADA
+        if reference_method == 'gps':
+            print(f"Referencia: GPS Ground Truth")
+            baseline_ate = results.get('slam_vs_ref', {}).get('ate', {}).get('rmse', 0)
+            baseline_name = "SLAM puro (sin GPS)"
+            print(f"Baseline: {baseline_name} (error vs GPS = {baseline_ate:.3f}m)")
+            print(f"Mejora % = ((RMSE_SLAM - RMSE_Pipeline) / RMSE_SLAM) × 100")
+            print(f"   + = Pipeline más cercano a GPS | - = Pipeline más alejado de GPS")
+        else:
+            print(f"Referencia: SLAM puro (0.000m por definición - es la referencia perfecta)")
+            print(f"Degradación Pipeline = {pipeline_ate:.3f}m")
+            print(f"   Objetivo: < 1.5m (EXCELENTE/BUENO) para preservar precisión visual")
+            gps_error = results.get('gps_vs_ref', {}).get('ate', {}).get('rmse', 0)
+            if gps_error > 0:
+                print(f"   GPS consumer: {gps_error:.1f}m de error (por eso NO es ground truth)")
+        
+        print()
     
     @staticmethod
     def save_metrics_to_csv(results: Dict[str, Dict[str, float]], output_path: str):
