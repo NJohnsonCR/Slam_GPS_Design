@@ -115,7 +115,7 @@ class GUIProcessor:
                     video_path=dataset_info.video_path,
                     location_csv=dataset_info.gps_csv_path,
                     frame_timestamps_file=dataset_info.timestamps_path,
-                    max_frames = 3000
+                    max_frames = max_frames
                 )
                 
                 result_type = "Mobile"

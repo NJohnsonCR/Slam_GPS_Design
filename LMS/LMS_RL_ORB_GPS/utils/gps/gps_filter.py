@@ -219,24 +219,69 @@ class GPSFilter:
         snr = signal / (noise + 1e-6)
         
         # ============================================================
+        # FIX: UMBRALES AJUSTADOS PARA KITTI CON MANIOBRAS AGRESIVAS
+        # ============================================================
+        # Umbrales calibrados con KITTI (incluyendo secuencias con giros)
+        JITTER_THRESHOLD = 0.5
+        JUMP_FREQ_THRESHOLD = 0.35  # ← AUMENTADO de 0.1 a 0.35 (35%)
+        MAX_JUMP_THRESHOLD = 2.5    # ← AUMENTADO de 2.0 a 2.5m
+        ACCELERATION_THRESHOLD = 0.5  # ← AUMENTADO de 0.3 a 0.5
+        SNR_THRESHOLD = 2.0
+        
+        # ============================================================
+        # FIX: REGLA ESPECIAL PARA KITTI CON MANIOBRAS
+        # ============================================================
+        # Si SNR es alto (>5) pero jump_frequency es moderado (20-40%),
+        # probablemente es KITTI con maniobras agresivas (NO GPS móvil)
+        
+        special_rule_applied = False
+        if (snr > 5.0 and 
+            jump_frequency < 0.40 and 
+            jitter < 0.5):
+            # Es KITTI con movimiento agresivo, NO GPS móvil
+            special_rule_applied = True
+            print(f"\n[GPS QUALITY] ⚙️ Regla especial aplicada:")
+            print(f"  • SNR alto: {snr:.2f} > 5.0 → Señal limpia")
+            print(f"  • Jitter bajo: {jitter:.3f}m < 0.5m → GPS estable")
+            print(f"  • Jump frequency moderado: {jump_frequency*100:.1f}% < 40%")
+            print(f"  → Clasificado como ALTA PRECISIÓN (KITTI con maniobras)")
+        
+        # ============================================================
         # DECISION: Alta vs Baja precisión
         # ============================================================
         
-        # Umbrales calibrados con KITTI y datos móviles
-        is_high_precision = (
-            jitter < 0.5 and                    # Poco jitter
-            jump_frequency < 0.1 and            # Pocos saltos
-            max_jump < 2.0 and                  # Saltos pequeños
-            avg_acceleration < 0.3 and          # Aceleración suave
-            snr > 2.0                           # Buena relación señal/ruido
-        )
+        conditions_met = 0
+        total_conditions = 5
+        
+        # Condición 1: Jitter bajo
+        if jitter < JITTER_THRESHOLD:
+            conditions_met += 1
+        
+        # Condición 2: Jump frequency (con regla especial)
+        if special_rule_applied or jump_frequency < JUMP_FREQ_THRESHOLD:
+            conditions_met += 1
+        
+        # Condición 3: Max jump pequeño
+        if max_jump < MAX_JUMP_THRESHOLD:
+            conditions_met += 1
+        
+        # Condición 4: Aceleración suave
+        if avg_acceleration < ACCELERATION_THRESHOLD:
+            conditions_met += 1
+        
+        # Condición 5: SNR alto
+        if snr > SNR_THRESHOLD:
+            conditions_met += 1
+        
+        # Necesita al menos 4 de 5 condiciones para ser alta precisión
+        is_high_precision = conditions_met >= 4
         
         quality_type = "ALTA PRECISION (tipo KITTI)" if is_high_precision else "BAJA PRECISION (tipo movil)"
         
         self.is_high_precision = is_high_precision
         self.quality_detection_done = True
         self.quality_metrics = {
-            'detected': bool(True),  # Convertir explícitamente a bool estándar
+            'detected': bool(True),
             'is_high_precision': bool(is_high_precision),
             'quality_type': quality_type,
             'metrics': {
@@ -249,12 +294,14 @@ class GPSFilter:
                 'num_samples': int(len(self.all_measurements))
             },
             'thresholds_used': {
-                'jitter_threshold': float(0.5),
-                'jump_freq_threshold': float(0.1),
-                'max_jump_threshold': float(2.0),
-                'acceleration_threshold': float(0.3),
-                'snr_threshold': float(2.0)
-            }
+                'jitter_threshold': float(JITTER_THRESHOLD),
+                'jump_freq_threshold': float(JUMP_FREQ_THRESHOLD),
+                'max_jump_threshold': float(MAX_JUMP_THRESHOLD),
+                'acceleration_threshold': float(ACCELERATION_THRESHOLD),
+                'snr_threshold': float(SNR_THRESHOLD)
+            },
+            'special_rule_applied': bool(special_rule_applied),
+            'conditions_met': f"{conditions_met}/{total_conditions}"
         }
         
         return self.quality_metrics
