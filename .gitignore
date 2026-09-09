@@ -40,3 +40,24 @@ mobile_data/*
 # Archivos temporales de métricas
 **/*_metrics_temp.json
 **/*_training_report_*.json
+
+# Documentos de contexto de trabajo (notas locales, no forman parte del código)
+CONTEXTO.md
+CONTEXTO_*.md
+**/CONTEXTO.md
+**/CONTEXTO_*.md
+context.md
+**/context.md
+
+# App móvil Android (fork de MARS Logger — vive en su propio repositorio)
+android/
+app/
+mobile_app/
+mars-logger/
+mobile-ar-sensor-logger/
+*.apk
+*.aab
+*.keystore
+.gradle/
+local.properties
+**/build/outputs/
