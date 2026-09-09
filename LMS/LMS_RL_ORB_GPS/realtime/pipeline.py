@@ -1,30 +1,30 @@
 """
-Pipeline de tiempo real: hilos, colas y medición de latencia.
+Real-time pipeline: threads, queues and latency measurement.
 
-ARQUITECTURA
+    [capture thread] --queue of 1, drops oldest--> [processing thread]
+    [GPS thread]     --causal circular buffer---->        |
+    [depth thread]   --speed (m/s), ~3 Hz-------->        |
+                                                          v
+                                             [metrics: latency, Hz, drops]
 
-    [hilo captura] --cola de 1, descarta lo viejo--> [hilo procesamiento]
-    [hilo GPS]     --buffer circular causal-------->        |
-                                                            v
-                                                    [métricas: latencia, Hz, descartes]
+WHY THREADS AND NOT A SINGLE LOOP
+    The camera produces a frame every 33 ms whether it is being served or not.
+    A single 60 ms loop lets frames pile up in the system buffer, so each read
+    returns an older one. The FPS counter still looks fine while the reported
+    position falls seconds behind.
 
-POR QUÉ HILOS Y NO UN SOLO BUCLE
---------------------------------
-La cámara produce frames cada 33 ms la estés atendiendo o no. Con un único
-bucle que tarda 60 ms por frame, los frames se acumulan en el buffer del
-sistema y cada lectura devuelve uno cada vez más viejo. A los 10 segundos
-estarías reportando dónde estaba el vehículo hace 5 segundos, aunque el
-contador de FPS se vea bien.
+WHY THE QUEUE HOLDS EXACTLY ONE ITEM
+    Queueing everything would keep throughput looking good while latency grew
+    without bound. An approximate current position is worth more than an
+    accurate old one, so intermediate frames are dropped on purpose. The drop
+    rate is itself a metric that has to be reported.
 
-Con un hilo de captura que sobrescribe siempre el más reciente, se procesa
-el frame más fresco disponible y los intermedios se descartan a propósito.
-Una posición actual aproximada vale más que una vieja y precisa.
-
-LA COLA DE TAMAÑO 1 ES LO IMPORTANTE
-------------------------------------
-Si se encolara todo, el throughput se vería bien pero la latencia crecería sin
-límite y dejaría de ser tiempo real. La tasa de descarte es, en sí misma, una
-métrica que hay que reportar.
+WHY METRIC SCALE RUNS IN ITS OWN THREAD
+    The depth model takes 66-150 ms per frame, five times the 33 ms budget of
+    the main loop. It does not need to be in line: what it produces is a
+    SPEED, and vehicle speed is smooth. Estimating it at ~3 Hz and holding it
+    between updates is enough while the camera keeps supplying direction at
+    30 Hz. Each frame's metric step is direction * (speed * dt).
 """
 
 import queue
@@ -39,10 +39,10 @@ import numpy as np
 from .sources import Frame, GpsBuffer
 
 
-# --------------------------------------------------------------- comunicación
+# ----------------------------------------------------------- communication
 
 def put_drop_oldest(q: queue.Queue, item, counter: list):
-    """Cola de un elemento: si había uno sin consumir, se descarta."""
+    """Single-slot queue: an unconsumed item is discarded to make room."""
     try:
         q.put_nowait(item)
     except queue.Full:
@@ -57,7 +57,7 @@ def put_drop_oldest(q: queue.Queue, item, counter: list):
             counter[0] += 1
 
 
-# --------------------------------------------------------------- métricas
+# --------------------------------------------------------------- metrics
 
 @dataclass
 class StageTimes:
@@ -72,13 +72,16 @@ class StageTimes:
 
 @dataclass
 class Metrics:
-    """Acumula tiempos por etapa y latencia extremo a extremo."""
+    """Per-stage times plus end-to-end latency."""
+
     stages: List[StageTimes] = field(default_factory=list)
     e2e_ms: List[float] = field(default_factory=list)
     gps_age_ms: List[float] = field(default_factory=list)
+    depth_ms: List[float] = field(default_factory=list)
     processed: int = 0
     dropped: int = 0
     no_gps: int = 0
+    no_scale: int = 0
     t_start: float = 0.0
     t_end: float = 0.0
 
@@ -106,18 +109,25 @@ class Metrics:
             "gps_age_ms_p50": pct(self.gps_age_ms, 50),
             "gps_age_ms_p95": pct(self.gps_age_ms, 95),
             "frames_sin_gps": self.no_gps,
+            # Scale runs on another thread, so it is reported separately and
+            # never counted against the per-frame budget.
+            "depth_estimaciones": len(self.depth_ms),
+            "depth_ms_p50": pct(self.depth_ms, 50),
+            "depth_ms_p95": pct(self.depth_ms, 95),
+            "frames_sin_escala": self.no_scale,
         }
 
 
-# --------------------------------------------------------------- procesamiento
+# ------------------------------------------------------------- processing
 
 class VisualFrontEnd:
     """
-    Front-end visual: ORB, emparejamiento y estimación de pose relativa.
+    Visual front-end: ORB, matching and relative pose estimation.
 
-    Usa exactamente la misma configuración que el pipeline offline
-    (ORB_create(2000), BFMatcher Hamming, ratio de Lowe 0.75) para que los
-    resultados sean comparables.
+    Uses the same configuration as the offline pipeline -- ORB_create(2000),
+    BFMatcher Hamming, Lowe ratio 0.75, minimum 15 matches -- so both systems
+    stay comparable. The T6 invariant in scripts/rl/sanity_checks.py fails
+    loudly if these ever drift apart.
     """
 
     MIN_MATCHES = 15
@@ -132,7 +142,7 @@ class VisualFrontEnd:
         self._prev_des = None
 
     def process(self, image: np.ndarray):
-        """Devuelve (R, t, n_matches, n_inliers, StageTimes)."""
+        """Return (R, t, n_matches, n_inliers, StageTimes). ||t|| == 1."""
         st = StageTimes()
 
         t0 = time.perf_counter()
@@ -168,37 +178,136 @@ class VisualFrontEnd:
         self._prev_kp, self._prev_des = kp, des
         return R, t, n_matches, n_inliers, st
 
+    @property
+    def last_features(self):
+        """
+        Keypoints and descriptors of the last processed frame.
+
+        Exposed so the scale estimator can reuse them instead of running ORB
+        again (~9 ms per estimation) and so both modules see identical
+        features.
+        """
+        return self._prev_kp, self._prev_des
+
+
+# ------------------------------------------------------------ metric scale
+
+class DepthScaleWorker:
+    """
+    Runs the DepthScaleEstimator outside the main loop and exposes the latest
+    speed.
+
+    TWO MODES, FOR THE SAME REASON AS REPLAY (see run_replay.py)
+        threaded=True   estimation runs on its own thread behind a single-slot
+                        drop-oldest queue. Real behaviour: the main loop never
+                        waits for the model. NOT deterministic -- which frames
+                        it manages to process depends on the clock.
+        threaded=False  estimation runs in line, at the same data instants.
+                        Reproducible. Its cost is measured separately and is
+                        NOT added to the per-frame budget, because in the real
+                        system that work happens on another thread. Strict
+                        mode is what validates that assumption.
+
+    In both modes the rate is driven by DATA time, not wall-clock time, so the
+    set of frames handed to the model is the same either way.
+    """
+
+    def __init__(self, estimator, rate_hz: float = 3.0, threaded: bool = True):
+        self.est = estimator
+        self.period = 1.0 / max(rate_hz, 1e-9)
+        self.threaded = threaded
+        self.times_ms: List[float] = []
+        self.n_submitted = 0
+        self.n_dropped = [0]
+        self._last_submit = None
+        self._q = queue.Queue(maxsize=1)
+        self._stop = threading.Event()
+        self._thread = None
+
+    @property
+    def velocity(self) -> Optional[float]:
+        return self.est.velocity
+
+    def start(self):
+        if self.threaded:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+    def submit(self, t_s: float, image: np.ndarray, kp=None, des=None) -> bool:
+        """
+        Offer a frame to the estimator. False if skipped by rate limiting.
+
+        Rate limiting is deliberate: feeding 30 frames per second to a model
+        that takes 100 ms would only fill a queue.
+        """
+        if self._last_submit is not None and t_s - self._last_submit < self.period:
+            return False
+        self._last_submit = t_s
+        self.n_submitted += 1
+
+        if self.threaded:
+            put_drop_oldest(self._q, (t_s, image, kp, des), self.n_dropped)
+        else:
+            self._estimate(t_s, image, kp, des)
+        return True
+
+    def stop(self):
+        # No sentinel is pushed on purpose: the queue holds one item and put()
+        # would block forever if the thread had already exited. The thread
+        # notices by itself because its get() times out every 0.5 s.
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                item = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            self._estimate(*item)
+
+    def _estimate(self, t_s, image, kp, des):
+        t0 = time.perf_counter()
+        self.est.push(t_s, image, kp, des)
+        self.est.try_update()
+        self.times_ms.append((time.perf_counter() - t0) * 1000)
+
 
 # --------------------------------------------------------------- pipeline
 
 class RealtimePipeline:
     """
-    Une fuente, hilos y métricas.
+    Ties source, threads and metrics together.
 
-    `strict=True`  -> comportamiento real: duerme y descarta. No determinista.
-    `strict=False` -> procesa todo y calcula DESPUÉS qué se habría descartado.
-                      Reproducible; es el modo para desarrollar y reportar.
+    strict=True   real behaviour: sleeps and drops. Not deterministic.
+    strict=False  processes everything and works out AFTERWARDS what would
+                  have been dropped. Reproducible; the mode for development
+                  and for reported numbers.
     """
 
     def __init__(self, front_end: VisualFrontEnd, gps_buffer: GpsBuffer,
-                 strict: bool = True, on_result=None):
+                 strict: bool = True, on_result=None,
+                 scale_worker: Optional[DepthScaleWorker] = None):
         self.fe = front_end
         self.gps = gps_buffer
         self.strict = strict
         self.on_result = on_result
+        self.scale = scale_worker
         self.metrics = Metrics()
         self._q = queue.Queue(maxsize=1)
         self._dropped = [0]
         self._stop = threading.Event()
+        self._t_prev_ns = None
 
-    # ---- hilo productor -------------------------------------------------
     def _capture_worker(self, source):
         """
-        En modo estricto descarta lo viejo: es el comportamiento real.
+        Strict mode drops the old frame: that is the real behaviour.
 
-        En modo determinista NO descarta — encola bloqueando — porque el
-        objetivo es medir cuánto tarda CADA frame. Los descartes se calculan
-        después con simulate_drops() a partir de esos tiempos.
+        Deterministic mode does NOT drop -- it enqueues blocking -- because
+        the goal is to measure how long EACH frame takes. Drops are derived
+        afterwards by simulate_drops() from those times.
         """
         try:
             for frame in source.frames():
@@ -207,11 +316,10 @@ class RealtimePipeline:
                 if self.strict:
                     put_drop_oldest(self._q, frame, self._dropped)
                 else:
-                    self._q.put(frame)          # bloquea hasta que haya lugar
+                    self._q.put(frame)          # blocks until there is room
         finally:
-            self._q.put(None)          # centinela de fin
+            self._q.put(None)                   # end sentinel
 
-    # ---- consumidor -----------------------------------------------------
     def run(self, source, t0_data_ns: int):
         self.metrics.t_start = time.perf_counter()
         t0_wall = self.metrics.t_start
@@ -219,6 +327,9 @@ class RealtimePipeline:
         cap_thread = threading.Thread(
             target=self._capture_worker, args=(source,), daemon=True)
         cap_thread.start()
+
+        if self.scale is not None:
+            self.scale.start()
 
         while True:
             try:
@@ -231,15 +342,18 @@ class RealtimePipeline:
             frame: Frame = item
             R, t, n_m, n_i, st = self.fe.process(frame.image)
 
-            # emparejamiento CAUSAL con el GPS
+            # Metres travelled in THIS step, from the camera rather than the
+            # GPS. Since ||t|| == 1 the metric step is just t * scale.
+            scale = self._metric_step(frame)
+
+            # CAUSAL pairing with the GPS
             fix = self.gps.latest_before(frame.t_ns)
             if fix is None:
                 self.metrics.no_gps += 1
             else:
                 self.metrics.gps_age_ms.append((frame.t_ns - fix[0]) / 1e6)
 
-            # latencia extremo a extremo: cuánto nos atrasamos respecto del
-            # instante en que ese frame fue capturado
+            # End-to-end latency: how far behind the capture instant we are.
             if self.strict:
                 elapsed_wall = time.perf_counter() - t0_wall
                 elapsed_data = (frame.t_ns - t0_data_ns) / 1e9
@@ -251,56 +365,91 @@ class RealtimePipeline:
             self.metrics.processed += 1
 
             if self.on_result is not None:
-                self.on_result(frame, R, t, n_m, n_i, fix)
+                self.on_result(frame, R, t, n_m, n_i, fix, scale)
 
         self.metrics.t_end = time.perf_counter()
         self.metrics.dropped = self._dropped[0]
         self._stop.set()
         cap_thread.join(timeout=2.0)
+        if self.scale is not None:
+            self.scale.stop()
+            self.metrics.depth_ms = self.scale.times_ms
         return self.metrics
+
+    def _metric_step(self, frame: Frame) -> Optional[float]:
+        """
+        Metres since the previous processed frame, or None if there is no
+        speed yet.
+
+        Uses the REAL dt between processed frames, not 1/30 s: with drops the
+        steps are not uniform, and assuming they are would shorten the
+        trajectory exactly when the system is most loaded.
+
+        Speed is HELD between model updates (~3 Hz). That is an explicit
+        constant-speed approximation over ~0.33 s, fine because vehicle speed
+        changes slowly. It would not be fine for direction, which is why
+        direction still comes from the camera at 30 Hz.
+        """
+        if self.scale is None:
+            return None
+
+        self.scale.submit(frame.t_ns / 1e9, frame.image, *self.fe.last_features)
+
+        v = self.scale.velocity
+        t_prev, self._t_prev_ns = self._t_prev_ns, frame.t_ns
+        if v is None:
+            # Start-up: the estimator needs triangulation baseline before it
+            # can report a first speed.
+            self.metrics.no_scale += 1
+            return None
+        if t_prev is None:
+            return None
+        return v * (frame.t_ns - t_prev) / 1e9
 
     def stop(self):
         self._stop.set()
+        if self.scale is not None:
+            self.scale.stop()
 
 
 def simulate_drops(frame_times_ns, proc_seconds) -> dict:
     """
-    Modo determinista: dado cuánto tardó cada frame, calcula cuáles se habrían
-    descartado con una cola de tamaño 1.
+    Deterministic mode: given how long each frame took, work out which ones a
+    single-slot queue would have dropped.
 
-    Se simula un reloj virtual: si al terminar un frame ya llegaron otros, solo
-    se atiende el más reciente y los intermedios se descartan.
+    Simulates a virtual clock: if other frames arrived while one was being
+    processed, only the most recent is served and the rest are dropped.
     """
     t = np.asarray(frame_times_ns, dtype=np.float64) / 1e9
     t = t - t[0]
     d = np.asarray(proc_seconds, dtype=np.float64)
 
-    reloj = 0.0
-    procesados, descartados, latencias = 0, 0, []
+    clock = 0.0
+    processed, dropped, latencies = 0, 0, []
     i = 0
     n = len(t)
     while i < n:
-        if reloj <= t[i]:
-            reloj = t[i]
+        if clock <= t[i]:
+            clock = t[i]
         else:
-            # ya pasó su momento: saltar a los que ya llegaron y quedarse
-            # con el más reciente
+            # Its moment has passed: skip to the ones already arrived and keep
+            # only the most recent.
             j = i
-            while j + 1 < n and t[j + 1] <= reloj:
+            while j + 1 < n and t[j + 1] <= clock:
                 j += 1
-            descartados += (j - i)
+            dropped += (j - i)
             i = j
-        inicio = max(reloj, t[i])
-        reloj = inicio + d[min(i, len(d) - 1)]
-        latencias.append((reloj - t[i]) * 1000)
-        procesados += 1
+        start = max(clock, t[i])
+        clock = start + d[min(i, len(d) - 1)]
+        latencies.append((clock - t[i]) * 1000)
+        processed += 1
         i += 1
 
     return {
-        "frames_procesados": procesados,
-        "frames_descartados": descartados,
-        "tasa_descarte_%": 100.0 * descartados / max(procesados + descartados, 1),
-        "e2e_ms_p50": float(np.percentile(latencias, 50)),
-        "e2e_ms_p95": float(np.percentile(latencias, 95)),
-        "e2e_ms_max": float(np.max(latencias)),
+        "frames_procesados": processed,
+        "frames_descartados": dropped,
+        "tasa_descarte_%": 100.0 * dropped / max(processed + dropped, 1),
+        "e2e_ms_p50": float(np.percentile(latencies, 50)),
+        "e2e_ms_p95": float(np.percentile(latencies, 95)),
+        "e2e_ms_max": float(np.max(latencies)),
     }

@@ -1,36 +1,29 @@
 """
-Estimador de escala métrica por profundidad monocular.
+Metric scale estimation from monocular depth.
 
-QUÉ RESUELVE
-------------
-`cv2.recoverPose` entrega la dirección del movimiento pero no su magnitud: el
-vector de traslación siempre tiene norma 1. Históricamente esa magnitud se
-tomaba del GPS, lo que encadenaba ambos sensores: al degradarse el GPS se
-degradaba también la cámara.
+WHAT IT SOLVES
+    cv2.recoverPose gives the direction of motion but not its magnitude: the
+    translation vector always has norm 1. That magnitude used to be taken from
+    the GPS, which chained both sensors together -- when the GPS degraded, so
+    did the camera.
 
-Este módulo le da a la cámara una escala PROPIA, obtenida de la imagen:
+    This module gives the camera a scale of its OWN, taken from the image:
+      1. Triangulate correspondences with the unit-norm pose  -> depths in
+         "VO units".
+      2. A metric depth model predicts those same depths in metres.
+      3. scale = median(metres / units)  ->  distance travelled in metres.
 
-  1. Se triangulan las correspondencias con la pose de norma unitaria.
-     Da profundidades en "unidades de VO".
-  2. Un modelo de profundidad métrica predice esas mismas profundidades en
-     metros.
-  3. escala = mediana( metros / unidades )  ->  distancia recorrida en metros.
+THE TRIANGULATION BASELINE IS CRITICAL
+    Triangulation needs parallax. At 30 fps a vehicle advances ~14 cm between
+    neighbouring frames, not enough for points 10-50 m away. Measured on real
+    data: 1 frame apart gave a 2.64x bias, ~0.33 s apart gives 1.08x. That is
+    why the estimator compares frames `min_baseline_s` apart, never
+    consecutive ones.
 
-LA BASE DE TRIANGULACIÓN ES CRÍTICA
------------------------------------
-Triangular necesita paralaje. A 30 fps un vehículo avanza ~14 cm entre frames
-vecinos, insuficiente para puntos a 10-50 m: el resultado es ruido. Medido
-sobre datos reales, con separación de 1 frame el sesgo era 2.64x; separando
-~0.33 s baja a 1.08x.
-
-Por eso el estimador NO compara frames consecutivos, sino frames separados por
-`min_baseline_s` segundos.
-
-USO OFFLINE Y EN VIVO
----------------------
-La misma clase sirve para ambos: se le entregan frames con su timestamp y
-devuelve una VELOCIDAD (m/s) cuando tiene base suficiente. La velocidad es
-suave, así que el pipeline puede sostenerla entre actualizaciones.
+OFFLINE AND LIVE
+    The same class serves both: it is fed frames with timestamps and returns a
+    SPEED (m/s) once it has enough baseline. Speed is smooth, so the pipeline
+    can hold it between updates.
 """
 
 import threading
@@ -43,9 +36,9 @@ import numpy as np
 
 class DepthScaleEstimator:
     """
-    Estima la velocidad métrica del vehículo a partir de la imagen.
+    Estimates the vehicle's metric speed from the image.
 
-    Es deliberadamente independiente del GPS: no lo consume en ningún momento.
+    Deliberately independent of the GPS: it never consumes it.
     """
 
     MODEL_DEFAULT = "depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf"
@@ -58,6 +51,7 @@ class DepthScaleEstimator:
                  min_points: int = 20,
                  max_speed_ms: float = 40.0,
                  smooth_window: int = 7,
+                 hist_len: int = 120,
                  device: Optional[int] = None,
                  orb=None, matcher=None, lowe_ratio: float = 0.75):
         self.K = camera_matrix
@@ -66,11 +60,11 @@ class DepthScaleEstimator:
         self.dmin, self.dmax = depth_range
         self.min_points = min_points
         self.lowe = lowe_ratio
-        # Filtro de plausibilidad física. Un vehículo no salta de 7 a 75 m/s
-        # entre frames; esas estimaciones son errores de triangulación.
+        # Physical plausibility filter. A vehicle does not jump from 7 to
+        # 75 m/s between frames; those are triangulation errors.
         self.max_speed = max_speed_ms
         self._raw = deque(maxlen=smooth_window)
-        self.n_rechazadas = 0
+        self.n_rejected = 0
 
         self.orb = orb if orb is not None else cv2.ORB_create(2000)
         self.matcher = matcher if matcher is not None else cv2.BFMatcher(cv2.NORM_HAMMING)
@@ -81,46 +75,47 @@ class DepthScaleEstimator:
         from transformers import pipeline
         self._pipe = pipeline("depth-estimation", model=model, device=device)
 
-        # historial de frames para tener base de triangulación suficiente
-        self._hist = deque(maxlen=120)
+        # Frame history, only deep enough to cover min_baseline_s. Each entry
+        # retains a full image, so storing more costs memory without changing
+        # the result: try_update() picks the MOST RECENT frame that already
+        # has baseline.
+        self._hist = deque(maxlen=hist_len)
         self._lock = threading.Lock()
-        self._velocity = None          # m/s, última estimación válida
+        self._velocity = None          # m/s, last valid estimate
         self._last_t = None
         self.n_ok = 0
         self.n_fail = 0
 
     # ------------------------------------------------------------------ API
+
     @property
     def velocity(self) -> Optional[float]:
-        """Última velocidad estimada en m/s, o None si aún no hay ninguna."""
+        """Last estimated speed in m/s, or None if there is none yet."""
         with self._lock:
             return self._velocity
 
     def push(self, t_s: float, image: np.ndarray, kp=None, des=None):
-        """Registra un frame. Las features se calculan si no se entregan."""
+        """Register a frame. Features are computed if not supplied."""
         if kp is None or des is None:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
             kp, des = self.orb.detectAndCompute(gray, None)
         self._hist.append((t_s, image, kp, des))
 
     def try_update(self) -> Optional[float]:
-        """
-        Intenta estimar la velocidad con el frame más reciente contra uno
-        suficientemente antiguo. Devuelve m/s o None.
-        """
+        """Estimate speed from the newest frame against an old enough one."""
         if len(self._hist) < 2:
             return None
         t1, img1, kp1, des1 = self._hist[-1]
 
-        anterior = None
+        previous = None
         for entry in reversed(self._hist):
             if t1 - entry[0] >= self.min_baseline_s:
-                anterior = entry
+                previous = entry
                 break
-        if anterior is None:
+        if previous is None:
             return None
 
-        t0, img0, kp0, des0 = anterior
+        t0, img0, kp0, des0 = previous
         dt = t1 - t0
         dist = self._metric_distance(img0, kp0, des0, kp1, des1)
         if dist is None or dt <= 0:
@@ -129,18 +124,16 @@ class DepthScaleEstimator:
 
         v_raw = dist / dt
 
-        # ---- 1) límite físico duro ---------------------------------------
-        # Errores de triangulación producen valores absurdos: se observaron
-        # picos de 75 m/s (270 km/h) en datos reales. Se descartan por
-        # imposibles, sin compararlos con ninguna otra fuente.
+        # 1) Hard physical limit. Triangulation errors produce absurd values;
+        #    peaks of 75 m/s (270 km/h) were observed on real data. Rejected
+        #    as impossible, without comparing against any other source.
         if not np.isfinite(v_raw) or v_raw < 0 or v_raw > self.max_speed:
-            self.n_rechazadas += 1
+            self.n_rejected += 1
             return None
 
-        # ---- 2) mediana móvil --------------------------------------------
-        # Un rechazo duro por aceleración descarta demasiadas estimaciones
-        # legítimas (el estimador es ruidoso, no solo el vehículo). La mediana
-        # suprime los picos restantes conservando la variación real.
+        # 2) Rolling median. A hard acceleration test discards too many valid
+        #    estimates (the estimator is noisy, not just the vehicle). The
+        #    median suppresses remaining spikes while keeping real variation.
         self._raw.append(v_raw)
         v = float(np.median(self._raw))
 
@@ -150,9 +143,10 @@ class DepthScaleEstimator:
         self.n_ok += 1
         return v
 
-    # -------------------------------------------------------------- interno
+    # -------------------------------------------------------------- internal
+
     def _metric_distance(self, img0, kp0, des0, kp1, des1) -> Optional[float]:
-        """Distancia en metros entre las dos vistas, o None si no es fiable."""
+        """Metres between the two views, or None if not trustworthy."""
         if des0 is None or des1 is None or len(des0) < 2 or len(des1) < 2:
             return None
 
@@ -172,7 +166,7 @@ class DepthScaleEstimator:
         except cv2.error:
             return None
 
-        # descartar puntos con poca paralaje: triangulan mal
+        # Drop low-parallax points: they triangulate badly.
         keep = np.linalg.norm(p1 - p0, axis=1) > self.min_parallax
         if keep.sum() < self.min_points:
             return None
@@ -202,10 +196,10 @@ class DepthScaleEstimator:
         if ok.sum() < self.min_points:
             return None
 
-        razones = zm[ok] / z[ok]
-        # ||t|| = 1 por construcción, así que la mediana de razones ES la
-        # distancia métrica recorrida entre las dos vistas
-        return float(np.median(razones))
+        # ||t|| == 1 by construction, so the median ratio IS the metric
+        # distance travelled between the two views.
+        ratios = zm[ok] / z[ok]
+        return float(np.median(ratios))
 
     def depth_map(self, image: np.ndarray) -> np.ndarray:
         from PIL import Image

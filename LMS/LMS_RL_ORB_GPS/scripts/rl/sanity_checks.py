@@ -16,6 +16,10 @@ PARTE 1 - INVARIANTES
   T4  Con el rumbo inicial correcto, propagar la VO durante 1 segundo desde el
       ground truth debe dar poco error. Detecta el bug de marco de referencia.
   T5  Determinismo: misma semilla, mismo resultado.
+  T6  Los parámetros de la odometría visual coinciden entre el sistema viejo
+      (`PoseGraphSLAM` / `main.py`) y el de tiempo real (`VisualFrontEnd`).
+      Sin esto, la comparación "sistema anterior vs sistema en tiempo real"
+      del OE4 mediría dos VO distintas y no la arquitectura.
 
 PARTE 2 - AUDITORÍA DE FUGAS
   Mide cuánto ayuda información que el sistema real NO tendría:
@@ -27,14 +31,21 @@ Uso:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.rl.sanity_checks
 """
 
+import ast
+import inspect
 import os
 import sys
 
 import numpy as np
 
+# El proyecto usa imports relativos a dos raíces distintas: la raíz del repo
+# (para LMS.*) y la carpeta LMS_RL_ORB_GPS (para realtime.* y utils.*).
 _THIS = os.path.dirname(os.path.abspath(__file__))
-if _THIS not in sys.path:
-    sys.path.insert(0, _THIS)
+_LMS_RL = os.path.abspath(os.path.join(_THIS, '..', '..'))
+_ROOT = os.path.abspath(os.path.join(_LMS_RL, '..', '..'))
+for _p in (_THIS, _ROOT, _LMS_RL):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from realistic_rates import load_caches, degrade_gps, estimate_initial_rotation, ate
 from imitate_oracle import run_episode
@@ -73,6 +84,90 @@ def gps_derived_scales(gps, period, n, smooth_fixes=5):
     if spans:
         scales[spans[-1][1]:] = scales[spans[-1][1] - 1]
     return scales
+
+
+# --------------------------------------------------------------------------
+# T6 — los parámetros de la VO no se comparten entre los dos sistemas, se
+# verifican. `realtime/` reimplementa la odometría a propósito (no importa el
+# código viejo, que arrastra la calibración de KITTI y estado de keyframes que
+# no usa), pero el ALGORITMO tiene que ser idéntico o la comparación del OE4
+# deja de medir la arquitectura.
+#
+# Sin esta prueba, cambiar 2000 features en un lado y no en el otro haría
+# divergir los sistemas EN SILENCIO.
+# --------------------------------------------------------------------------
+
+# Todo lo que OpenCV expone del detector: así el invariante no se limita al
+# número de features, que es lo único que alguien pensaría en revisar a mano.
+_ORB_GETTERS = ('getMaxFeatures', 'getScaleFactor', 'getNLevels',
+                'getEdgeThreshold', 'getFirstLevel', 'getWTA_K',
+                'getPatchSize', 'getFastThreshold')
+
+
+def _min_matches_del_fuente(path, clase, metodo):
+    """
+    Lee `minimumMatches` del código viejo SIN importarlo.
+
+    Importar `main.py` traería torch, el agente RL y matplotlib, y además sus
+    imports fallan según desde dónde se ejecute (bug conocido). El umbral es un
+    literal en el fuente; leerlo con ast es exacto y no cuesta nada.
+    """
+    with open(path, encoding='utf-8') as f:
+        arbol = ast.parse(f.read(), filename=path)
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, ast.ClassDef) and nodo.name == clase:
+            for hijo in ast.walk(nodo):
+                if isinstance(hijo, ast.FunctionDef) and hijo.name == metodo:
+                    for st in ast.walk(hijo):
+                        if isinstance(st, ast.Assign) and any(
+                                isinstance(t, ast.Name) and t.id == 'minimumMatches'
+                                for t in st.targets):
+                            return ast.literal_eval(st.value)
+    return None
+
+
+def check_parametros_vo():
+    """Compara el front-end de tiempo real contra el sistema viejo."""
+    import cv2
+    from LMS.LMS_ORB_with_PG.main import PoseGraphSLAM
+    from realtime.pipeline import VisualFrontEnd
+
+    viejo = PoseGraphSLAM()
+    nuevo = VisualFrontEnd(np.eye(3))
+
+    difs = []
+
+    for g in _ORB_GETTERS:
+        a, b = getattr(viejo.orb_detector, g)(), getattr(nuevo.orb, g)()
+        if a != b:
+            difs.append(f"ORB.{g[3:]}: viejo={a} nuevo={b}")
+
+    # ratio de Lowe: en el sistema viejo es el default del método que filtra
+    lowe_viejo = inspect.signature(
+        PoseGraphSLAM.filter_matches_lowe_ratio).parameters['ratio'].default
+    if lowe_viejo != nuevo.lowe:
+        difs.append(f"ratio de Lowe: viejo={lowe_viejo} nuevo={nuevo.lowe}")
+
+    # mínimo de matches: el del sistema RL+GPS, que es el baseline del OE4
+    main_py = os.path.join(_LMS_RL, 'main.py')
+    mm_viejo = _min_matches_del_fuente(main_py, 'RL_ORB_SLAM_GPS',
+                                       'process_frame_with_gps')
+    if mm_viejo is None:
+        difs.append("no se encontró `minimumMatches` en "
+                    "RL_ORB_SLAM_GPS.process_frame_with_gps")
+    elif mm_viejo != nuevo.MIN_MATCHES:
+        difs.append(f"mínimo de matches: viejo={mm_viejo} nuevo={nuevo.MIN_MATCHES}")
+
+    # el matcher no expone su normType en Python; se compara el tipo, que es
+    # lo verificable, y el resto queda cubierto por la revisión del algoritmo
+    if type(viejo.matcher) is not type(nuevo.matcher):
+        difs.append(f"matcher: viejo={type(viejo.matcher).__name__} "
+                    f"nuevo={type(nuevo.matcher).__name__}")
+
+    detalle = ("idénticos: features, escala, niveles, ratio de Lowe y mínimo de matches"
+               if not difs else " | ".join(difs))
+    return check("T6  los parámetros de la VO coinciden entre main.py y realtime/",
+                 not difs, detalle)
 
 
 def main():
@@ -141,6 +236,9 @@ def main():
     r1 = run_episode(seq, degrade_gps(gt, 5.0, np.random.default_rng(9)), PERIOD, R0, 'oracle')[0]
     r2 = run_episode(seq, degrade_gps(gt, 5.0, np.random.default_rng(9)), PERIOD, R0, 'oracle')[0]
     check("T5  determinismo con la misma semilla", np.array_equal(r1, r2))
+
+    # ---- T6: la VO del sistema viejo y la del de tiempo real coinciden ----
+    check_parametros_vo()
 
     # =====================================================================
     print("\n" + "=" * 96)

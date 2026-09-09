@@ -1,33 +1,25 @@
 """
-Fuentes de datos para el pipeline en tiempo real.
+Data sources for the real-time pipeline.
 
-IDEA CENTRAL
-------------
-La fuente es un módulo intercambiable. Todas entregan lo mismo:
+Sources are interchangeable: they all deliver the same thing, so the rest of
+the system never knows where the data came from. Today it comes from recorded
+files; tomorrow it will come from the Android app over UDP.
 
     FrameSource  ->  (timestamp_ns, frame)
-    GpsSource    ->  empuja (timestamp_ns, posición) a un buffer
+    GpsSource    ->  pushes (timestamp_ns, position) into a buffer
 
-El resto del sistema NO sabe de dónde salieron los datos. Hoy vienen de
-archivos grabados; mañana vendrán de la app Android por UDP. Cambiar de una a
-otra es escribir una clase nueva, no rehacer el pipeline.
+Replay runs in two modes, and the distinction matters for every measurement:
 
-MODOS DE REPLAY
----------------
-  'estricto'      duerme hasta el tiempo real de cada frame y descarta de
-                  verdad. Reproduce el comportamiento de la calle, pero NO es
-                  determinista: dos corridas dan resultados distintos.
-
-  'determinista'  entrega todos los frames sin dormir. Se mide cuánto tarda
-                  cada uno y DESPUÉS se calcula cuáles se habrían descartado.
-                  Reproducible: es el modo para desarrollar y para los números
-                  del informe.
+    strict         sleeps until each frame's real timestamp and drops for real.
+                   Reproduces street behaviour, but is NOT deterministic.
+    deterministic  delivers every frame without sleeping. Drops are computed
+                   afterwards from the measured times. Reproducible, so it is
+                   the mode used for development and for reported numbers.
 """
 
-import csv
+import collections
 import threading
 import time
-import collections
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -35,15 +27,15 @@ import cv2
 import numpy as np
 
 
-# --------------------------------------------------------------- GPS
+# --------------------------------------------------------------------- GPS
 
 class GpsBuffer:
     """
-    Buffer de fixes GPS con acceso CAUSAL.
+    GPS fix buffer with CAUSAL access.
 
-    `latest_before` solo devuelve mediciones que ya habían llegado en el
-    instante consultado. Es lo que impide que el sistema use información del
-    futuro, que es la trampa más fácil de cometer al pasar de offline a vivo.
+    `latest_before` only returns fixes that had already arrived at the queried
+    instant. This is what stops the system from using information from the
+    future -- the easiest mistake to make when moving from offline to live.
     """
 
     def __init__(self, maxlen: int = 600):
@@ -57,7 +49,7 @@ class GpsBuffer:
             self.received += 1
 
     def latest_before(self, t_ns: int) -> Optional[Tuple[int, np.ndarray]]:
-        """El fix más reciente que YA HABÍA LLEGADO en t_ns."""
+        """Most recent fix that had ALREADY ARRIVED at t_ns."""
         with self._lock:
             for ts, pos in reversed(self._buf):
                 if ts <= t_ns:
@@ -69,29 +61,23 @@ class GpsBuffer:
             return len(self._buf)
 
 
-# --------------------------------------------------------------- frames
+# ------------------------------------------------------------------ frames
 
 @dataclass
 class Frame:
-    t_ns: int          # timestamp de captura (reloj de la fuente)
-    index: int         # número de frame en la secuencia
+    t_ns: int          # capture timestamp (source clock)
+    index: int         # position in the sequence
     image: np.ndarray
 
 
 class ReplayFrameSource:
-    """
-    Reproduce un video grabado respetando los tiempos reales entre frames.
-
-    En modo estricto duerme hasta que 'toca' cada frame, igual que si la
-    cámara los estuviera entregando. En modo determinista los entrega de
-    corrido.
-    """
+    """Replays a recorded video honouring the real time between frames."""
 
     def __init__(self, video_path: str, timestamps_ns, crop_bottom: float = 0.0,
                  strict: bool = True, max_frames: Optional[int] = None):
         self.video_path = video_path
         self.timestamps = np.asarray(timestamps_ns, dtype=np.int64)
-        self.crop_bottom = crop_bottom      # fracción inferior a recortar (tablero)
+        self.crop_bottom = crop_bottom      # bottom fraction to cut: car dashboard
         self.strict = strict
         self.max_frames = max_frames
         self._cap = None
@@ -107,13 +93,15 @@ class ReplayFrameSource:
             self._cap.release()
 
     def _preprocess(self, img: np.ndarray) -> np.ndarray:
+        # The dashboard sits in the lower part of the frame and produces
+        # correspondences that claim the vehicle did not move.
         if self.crop_bottom > 0:
             h = img.shape[0]
             img = img[: int(h * (1.0 - self.crop_bottom))]
         return img
 
     def frames(self):
-        """Generador de Frame. En modo estricto bloquea hasta el tiempo real."""
+        """Frame generator. In strict mode it blocks until real time."""
         n = len(self.timestamps)
         if self.max_frames:
             n = min(n, self.max_frames)
@@ -127,11 +115,10 @@ class ReplayFrameSource:
                 break
 
             if self.strict:
-                # esperar hasta que "toque" este frame según su timestamp real
-                objetivo = t0_wall + (int(self.timestamps[i]) - t0_data) / 1e9
-                espera = objetivo - time.perf_counter()
-                if espera > 0:
-                    time.sleep(espera)
+                target = t0_wall + (int(self.timestamps[i]) - t0_data) / 1e9
+                wait = target - time.perf_counter()
+                if wait > 0:
+                    time.sleep(wait)
 
             yield Frame(t_ns=int(self.timestamps[i]), index=i,
                         image=self._preprocess(img))
@@ -139,14 +126,16 @@ class ReplayFrameSource:
 
 class ReplayGpsSource:
     """
-    Entrega los fixes de GPS a su ritmo real (1 Hz en los datos móviles).
+    Delivers GPS fixes at their real rate (1 Hz in the mobile data).
 
-    Corre en su propio hilo: el GPS llega cuando llega, no cuando el
-    procesamiento lo pide.
+    Runs in its own thread: GPS arrives when it arrives, not when processing
+    asks for it.
     """
 
+    _idx = 0
+
     def __init__(self, fixes, buffer: GpsBuffer, strict: bool = True):
-        self.fixes = fixes                  # lista de (t_ns, np.array([x, y, z]))
+        self.fixes = fixes                  # list of (t_ns, np.array([x, y, z]))
         self.buffer = buffer
         self.strict = strict
         self._thread = None
@@ -162,49 +151,48 @@ class ReplayGpsSource:
             if self._stop.is_set():
                 return
             if self.strict:
-                objetivo = t0_wall + (t_ns - t0_data_ns) / 1e9
-                espera = objetivo - time.perf_counter()
-                if espera > 0:
-                    time.sleep(espera)
+                target = t0_wall + (t_ns - t0_data_ns) / 1e9
+                wait = target - time.perf_counter()
+                if wait > 0:
+                    time.sleep(wait)
             self.buffer.push(t_ns, pos)
 
     def push_all_up_to(self, t_ns: int):
-        """Modo determinista: publica todos los fixes que ya habrían llegado."""
+        """Deterministic mode: publish every fix that would have arrived."""
         while self._idx < len(self.fixes) and self.fixes[self._idx][0] <= t_ns:
             t, pos = self.fixes[self._idx]
             self.buffer.push(t, pos)
             self._idx += 1
 
-    _idx = 0
-
     def stop(self):
         self._stop.set()
 
 
-# --------------------------------------------------------------- carga
+# -------------------------------------------------------------------- load
 
 def load_mobile_session(session_dir: str, latlon_to_utm):
     """
-    Lee una sesión grabada con MARS Logger (formato de mobile_data/).
+    Read a session recorded with MARS Logger (mobile_data/ format).
 
-    Devuelve (timestamps_de_frames_ns, lista_de_fixes_gps).
-    Ambos se alinean por el campo 'Unix time', que la app escribe con el mismo
-    reloj para todos los sensores.
+    Returns (frame_timestamps_ns, gps_fixes). Both are aligned through the
+    'Unix time' field, which the app writes from a single clock for every
+    sensor.
     """
     import os
+
     import pandas as pd
 
     ft = pd.read_csv(os.path.join(session_dir, "frame_timestamps.txt"))
     frame_t = ft["Unix time[nanosec]"].values.astype(np.int64)
 
     loc = pd.read_csv(os.path.join(session_dir, "location.csv"))
-    origen = None
+    origin = None
     fixes = []
     for _, r in loc.iterrows():
         utm = latlon_to_utm(r["latitude[degrees]"], r["longitude[degrees]"],
                             r["altitude[meters]"])
-        if origen is None:
-            origen = utm
-        fixes.append((int(r["Unix time[nanosecond]"]), utm - origen))
+        if origin is None:
+            origin = utm
+        fixes.append((int(r["Unix time[nanosecond]"]), utm - origin))
 
     return frame_t, fixes

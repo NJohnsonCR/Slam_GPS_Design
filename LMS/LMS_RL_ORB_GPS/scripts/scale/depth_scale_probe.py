@@ -28,7 +28,7 @@ REFERENCIAS YA MEDIDAS (mismo problema, otras fuentes de escala):
     plano de tierra (implementación simple) -> ~50 % de error mediano
 
 Uso:
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.rl.depth_scale_probe \
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.scale.depth_scale_probe \
         kitti_data/2011_09_26/2011_09_26_drive_0009_sync
 """
 

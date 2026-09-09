@@ -18,7 +18,7 @@ ALINEACIÓN: rígida (rotación + traslación), SIN escala. Alinear con escala
 absorbería justamente el error que se quiere medir.
 
 Uso:
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.rl.depth_trajectory_test \
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.scale.depth_trajectory_test \
         kitti_data/2011_09_26/2011_09_26_drive_0009_sync
 """
 

@@ -25,7 +25,7 @@ Una vez validado, h se fija como constante medida con cinta métrica y el métod
 funciona sin GPS ni ground truth.
 
 Uso:
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.rl.ground_plane_probe \
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.scale.ground_plane_probe \
         kitti_data/2011_09_26/2011_09_26_drive_0009_sync
 """
 
