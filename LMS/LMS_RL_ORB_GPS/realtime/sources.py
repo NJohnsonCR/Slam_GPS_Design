@@ -96,21 +96,31 @@ def _crop_bottom(img: np.ndarray, fraction: float) -> np.ndarray:
 
 
 class ReplayFrameSource:
-    """Replays a recorded video honouring the real time between frames."""
+    """
+    Replays a recorded video honouring the real time between frames.
+
+    skip_start discards that many frames at the start of the video, which the
+    phone's encoder writes before it catches up. timestamps_ns must already
+    leave them out.
+    """
 
     def __init__(self, video_path: str, timestamps_ns, crop_bottom: float = 0.0,
-                 strict: bool = True, max_frames: Optional[int] = None):
+                 strict: bool = True, max_frames: Optional[int] = None,
+                 skip_start: int = 0):
         self.video_path = video_path
         self.timestamps = np.asarray(timestamps_ns, dtype=np.int64)
         self.crop_bottom = crop_bottom      # bottom fraction to cut: car dashboard
         self.strict = strict
         self.max_frames = max_frames
+        self.skip_start = skip_start
         self._cap = None
 
     def __enter__(self):
         self._cap = cv2.VideoCapture(self.video_path)
         if not self._cap.isOpened():
             raise RuntimeError(f"No se pudo abrir el video: {self.video_path}")
+        for _ in range(self.skip_start):
+            self._cap.grab()
         return self
 
     def __exit__(self, *exc):
@@ -143,7 +153,7 @@ class ReplayFrameSource:
 
 class ReplayGpsSource:
     """
-    Delivers GPS fixes at their real rate (1 Hz in the mobile data).
+    Delivers GPS fixes at their real rate.
 
     Runs in its own thread: GPS arrives when it arrives, not when processing
     asks for it.
@@ -458,18 +468,19 @@ class LiveGpsSource:
 
 def load_mobile_session(session_dir: str, latlon_to_utm):
     """
-    Read a session recorded with MARS Logger (mobile_data/ format).
+    Read a session recorded by the phone app (mobile_data/ format).
 
-    Returns (frame_timestamps_ns, gps_fixes). Both are aligned through the
-    'Unix time' field, which the app writes from a single clock for every
-    sensor.
+    Returns (frame_timestamps_ns, gps_fixes), both on the phone's boot clock:
+    the first column of each file. The 'Unix time' column of the camera files
+    is when the frame reached the app, tens of milliseconds after capture and
+    with jitter, so it must not be used for alignment.
     """
     import os
 
     import pandas as pd
 
     ft = pd.read_csv(os.path.join(session_dir, "frame_timestamps.txt"))
-    frame_t = ft["Unix time[nanosec]"].values.astype(np.int64)
+    frame_t = ft["Frame timestamp[nanosec]"].values.astype(np.int64)
 
     loc = pd.read_csv(os.path.join(session_dir, "location.csv"))
     origin = None
@@ -479,6 +490,6 @@ def load_mobile_session(session_dir: str, latlon_to_utm):
                             r["altitude[meters]"])
         if origin is None:
             origin = utm
-        fixes.append((int(r["Unix time[nanosecond]"]), utm - origin))
+        fixes.append((int(r["Timestamp[nanosecond]"]), utm - origin))
 
     return frame_t, fixes
