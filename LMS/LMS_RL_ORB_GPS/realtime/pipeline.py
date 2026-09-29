@@ -76,6 +76,7 @@ class Metrics:
 
     stages: List[StageTimes] = field(default_factory=list)
     e2e_ms: List[float] = field(default_factory=list)
+    pc_ms: List[float] = field(default_factory=list)      # live: arrival -> result
     gps_age_ms: List[float] = field(default_factory=list)
     depth_ms: List[float] = field(default_factory=list)
     processed: int = 0
@@ -92,7 +93,7 @@ class Metrics:
         tot = [s.total * 1000 for s in self.stages]
         wall = max(self.t_end - self.t_start, 1e-9)
         total_frames = self.processed + self.dropped
-        return {
+        out = {
             "frames_procesados": self.processed,
             "frames_descartados": self.dropped,
             "tasa_descarte_%": 100.0 * self.dropped / max(total_frames, 1),
@@ -116,6 +117,10 @@ class Metrics:
             "depth_ms_p95": pct(self.depth_ms, 95),
             "frames_sin_escala": self.no_scale,
         }
+        if self.pc_ms:
+            out["pc_ms_p50"] = pct(self.pc_ms, 50)
+            out["pc_ms_p95"] = pct(self.pc_ms, 95)
+        return out
 
 
 # ------------------------------------------------------------- processing
@@ -320,7 +325,8 @@ class RealtimePipeline:
         finally:
             self._q.put(None)                   # end sentinel
 
-    def run(self, source, t0_data_ns: int):
+    def run(self, source, t0_data_ns: Optional[int] = None):
+        """Process until the source ends. t0_data_ns is only used by replay."""
         self.metrics.t_start = time.perf_counter()
         t0_wall = self.metrics.t_start
 
@@ -354,7 +360,13 @@ class RealtimePipeline:
                 self.metrics.gps_age_ms.append((frame.t_ns - fix[0]) / 1e6)
 
             # End-to-end latency: how far behind the capture instant we are.
-            if self.strict:
+            if frame.unix_ns is not None:
+                # Live: phone capture time against the PC clock, so it
+                # includes whatever offset separates the two clocks.
+                now_ns = time.time_ns()
+                self.metrics.e2e_ms.append((now_ns - frame.unix_ns) / 1e6)
+                self.metrics.pc_ms.append((now_ns - frame.arrival_ns) / 1e6)
+            elif self.strict:
                 elapsed_wall = time.perf_counter() - t0_wall
                 elapsed_data = (frame.t_ns - t0_data_ns) / 1e9
                 self.metrics.e2e_ms.append(max(elapsed_wall - elapsed_data, 0.0) * 1000)
@@ -363,11 +375,15 @@ class RealtimePipeline:
 
             self.metrics.stages.append(st)
             self.metrics.processed += 1
+            # Up to the last processed frame: a live session can end on an
+            # idle timeout, and that wait is not processing time.
+            self.metrics.t_end = time.perf_counter()
 
             if self.on_result is not None:
                 self.on_result(frame, R, t, n_m, n_i, fix, scale)
 
-        self.metrics.t_end = time.perf_counter()
+        if self.metrics.processed == 0:
+            self.metrics.t_end = time.perf_counter()
         self.metrics.dropped = self._dropped[0]
         self._stop.set()
         cap_thread.join(timeout=2.0)
