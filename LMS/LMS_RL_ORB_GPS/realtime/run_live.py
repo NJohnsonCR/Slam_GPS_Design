@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 
+import cv2
 import numpy as np
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +42,26 @@ from realtime.run_replay import (build_scale_worker, plot_trajectory,
 # Same header as the phone's location.csv, so both files read the same way.
 LOCATION_HEADER = ("Timestamp[nanosecond],latitude[degrees],longitude[degrees],"
                    "altitude[meters],speed[meters/second],Unix time[nanosecond]")
+
+
+def warm_up(K, width, height, est=None):
+    """
+    Run the models once on synthetic frames before connecting.
+
+    The first ORB call pays a one-off initialisation (~200 ms), and so does
+    the first depth inference (~0.3 s, several seconds with cold caches).
+    Paid here, it does not reach the first live frames as latency.
+    """
+    rng = np.random.default_rng(0)
+    noise = cv2.GaussianBlur(
+        rng.integers(0, 256, (height + 8, width + 8), dtype=np.uint8), (0, 0), 1.5)
+    fe = VisualFrontEnd(K)
+    # Two shifted copies, so matching and pose estimation run as well.
+    for dy, dx in ((0, 0), (4, 6)):
+        img = cv2.cvtColor(noise[dy:dy + height, dx:dx + width], cv2.COLOR_GRAY2BGR)
+        fe.process(img)
+    if est is not None:
+        est.depth_map(img)
 
 
 def status_loop(stop, src, gps, pipe, scaler):
@@ -136,6 +157,9 @@ def run_session(args, hello, gps, gps_buf):
     K = hello.camera_matrix()
     est, scaler = (build_scale_worker(K, args.scale_hz, threaded=True)
                    if args.scale == "depth" else (None, None))
+    t0 = time.perf_counter()
+    warm_up(K, hello.width, int(hello.height * (1.0 - args.crop_bottom)), est)
+    print(f"  Precalentamiento: {time.perf_counter() - t0:.1f} s")
 
     src = LiveFrameSource(args.phone_ip, hello, args.video_port, args.crop_bottom)
     track = {key: [] for key in ("rel", "t_ns", "unix_ns", "matches", "inliers",
