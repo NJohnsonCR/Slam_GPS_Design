@@ -2,11 +2,11 @@
 Data sources for the real-time pipeline.
 
 Sources are interchangeable: they all deliver the same thing, so the rest of
-the system never knows where the data came from. Today it comes from recorded
-files; tomorrow it will come from the Android app over UDP.
+the system never knows where the data came from. The data comes either from a
+recorded session (replay) or live from the Android app over the network.
 
-    FrameSource  ->  (timestamp_ns, frame)
-    GpsSource    ->  pushes (timestamp_ns, position) into a buffer
+    FrameSource  ->  Frame(t_ns, index, image)
+    GpsSource    ->  pushes (t_ns, position) into a GpsBuffer
 
 Replay runs in two modes, and the distinction matters for every measurement:
 
@@ -15,16 +15,31 @@ Replay runs in two modes, and the distinction matters for every measurement:
     deterministic  delivers every frame without sleeping. Drops are computed
                    afterwards from the measured times. Reproducible, so it is
                    the mode used for development and for reported numbers.
+
+Live sources always behave like strict replay. The phone is the server:
+
+    TCP 5000  "HELLO,<w>,<h>,<fx>,<fy>,<cx>,<cy>,<fps>\\n", then per frame a
+              20-byte big-endian header (uint32 JPEG length, uint64 capture
+              time on the phone's boot clock in ns, uint64 capture time in
+              Unix ns) followed by the JPEG.
+    UDP 5001  the PC sends SUBSCRIBE every ~2 s, and START/STOP from the same
+              socket. The phone answers SUBSCRIBED, STATE,... and one line per
+              fix: GPS,<t_ns>,<lat>,<lon>,<alt>,<speed>,<unix_ns>.
+
+Frames and fixes are stamped with the same boot clock, so they align directly.
 """
 
 import collections
+import socket
+import struct
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 import cv2
 import numpy as np
+from pyproj import Transformer
 
 
 # --------------------------------------------------------------------- GPS
@@ -68,6 +83,16 @@ class Frame:
     t_ns: int          # capture timestamp (source clock)
     index: int         # position in the sequence
     image: np.ndarray
+    unix_ns: Optional[int] = None       # live only: capture time, phone wall clock
+    arrival_ns: Optional[int] = None    # live only: arrival time, PC wall clock
+
+
+def _crop_bottom(img: np.ndarray, fraction: float) -> np.ndarray:
+    # The dashboard sits in the lower part of the frame and produces
+    # correspondences that claim the vehicle did not move.
+    if fraction > 0:
+        img = img[: int(img.shape[0] * (1.0 - fraction))]
+    return img
 
 
 class ReplayFrameSource:
@@ -92,14 +117,6 @@ class ReplayFrameSource:
         if self._cap is not None:
             self._cap.release()
 
-    def _preprocess(self, img: np.ndarray) -> np.ndarray:
-        # The dashboard sits in the lower part of the frame and produces
-        # correspondences that claim the vehicle did not move.
-        if self.crop_bottom > 0:
-            h = img.shape[0]
-            img = img[: int(h * (1.0 - self.crop_bottom))]
-        return img
-
     def frames(self):
         """Frame generator. In strict mode it blocks until real time."""
         n = len(self.timestamps)
@@ -121,7 +138,7 @@ class ReplayFrameSource:
                     time.sleep(wait)
 
             yield Frame(t_ns=int(self.timestamps[i]), index=i,
-                        image=self._preprocess(img))
+                        image=_crop_bottom(img, self.crop_bottom))
 
 
 class ReplayGpsSource:
@@ -166,6 +183,275 @@ class ReplayGpsSource:
 
     def stop(self):
         self._stop.set()
+
+
+# -------------------------------------------------------------------- live
+
+_HEADER = struct.Struct(">IQQ")     # JPEG length, boot-clock ns, Unix ns
+
+
+class Hello(NamedTuple):
+    """Camera parameters the phone sends on connect, in transmitted pixels."""
+    width: int
+    height: int
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    fps: int
+
+    def camera_matrix(self) -> np.ndarray:
+        return np.array([[self.fx, 0.0, self.cx],
+                         [0.0, self.fy, self.cy],
+                         [0.0, 0.0, 1.0]], dtype=np.float64)
+
+
+def parse_hello(line: str) -> Optional[Hello]:
+    """Parse the HELLO line. None if malformed."""
+    parts = line.strip().split(",")
+    if len(parts) != 8 or parts[0] != "HELLO":
+        return None
+    try:
+        return Hello(int(parts[1]), int(parts[2]), float(parts[3]),
+                     float(parts[4]), float(parts[5]), float(parts[6]),
+                     int(parts[7]))
+    except ValueError:
+        return None
+
+
+def read_hello(ip: str, port: int = 5000, timeout: float = 5.0) -> Hello:
+    """
+    Connect once just to read the camera parameters, then hang up.
+
+    The stream is opened later, when the pipeline starts reading: whatever the
+    phone sent in between (loading the depth model takes seconds) would reach
+    the pipeline stale.
+    """
+    with socket.create_connection((ip, port), timeout=timeout) as sock, \
+            sock.makefile("rb") as stream:
+        line = stream.readline(256).decode("ascii", errors="replace")
+    hello = parse_hello(line)
+    if hello is None:
+        raise ConnectionError(f"saludo inválido del teléfono: {line!r}")
+    return hello
+
+
+class LiveFrameSource:
+    """
+    Video streamed by the phone over TCP.
+
+    JPEGs are decoded here, on the capture thread, outside the per-frame
+    budget. The phone never queues frames: when the network is busy it skips
+    them, and those gaps are counted from the timestamps.
+    """
+
+    IDLE_TIMEOUT_S = 5.0
+    MAX_JPEG_BYTES = 20_000_000     # anything larger means a corrupt header
+
+    def __init__(self, ip: str, hello: Hello, port: int = 5000,
+                 crop_bottom: float = 0.0):
+        self.ip = ip
+        self.port = port
+        self.hello = hello
+        self.crop_bottom = crop_bottom
+        self.n_received = 0
+        self.n_missing = 0                  # captured by the phone, never sent
+        self.n_bad = 0                      # JPEGs that failed to decode
+        self.transit_ms: List[float] = []   # capture -> arrival
+        self.last_t_ns = None
+        self.end_reason = None
+        self._sock = None
+        self._stopped = False
+
+    def frames(self):
+        """Frame generator. Ends on stop(), on disconnection or after 5 s idle."""
+        try:
+            sock = socket.create_connection((self.ip, self.port),
+                                            timeout=self.IDLE_TIMEOUT_S)
+        except OSError as e:
+            self.end_reason = f"no se pudo conectar al video ({e})"
+            return
+        self._sock = sock
+        interval_ns = 1e9 / self.hello.fps
+        try:
+            with sock.makefile("rb") as stream:
+                line = stream.readline(256).decode("ascii", errors="replace")
+                if parse_hello(line) != self.hello:
+                    self.end_reason = "la cámara cambió entre conexiones"
+                    return
+                while not self._stopped:
+                    head = stream.read(_HEADER.size)
+                    if len(head) < _HEADER.size:
+                        break
+                    length, t_ns, unix_ns = _HEADER.unpack(head)
+                    if length > self.MAX_JPEG_BYTES:
+                        self.end_reason = "cabecera de frame inválida"
+                        return
+                    jpeg = stream.read(length)
+                    if len(jpeg) < length:
+                        break
+                    arrival_ns = time.time_ns()
+
+                    if self.last_t_ns is not None:
+                        gap = round((t_ns - self.last_t_ns) / interval_ns)
+                        self.n_missing += max(gap - 1, 0)
+                    self.last_t_ns = t_ns
+                    self.transit_ms.append((arrival_ns - unix_ns) / 1e6)
+
+                    img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+                    if img is None:
+                        self.n_bad += 1
+                        continue
+                    self.n_received += 1
+                    yield Frame(t_ns=t_ns, index=self.n_received - 1,
+                                image=_crop_bottom(img, self.crop_bottom),
+                                unix_ns=unix_ns, arrival_ns=arrival_ns)
+            self.end_reason = ("sesión detenida" if self._stopped
+                               else "el teléfono cerró la conexión de video")
+        except socket.timeout:
+            self.end_reason = "no llegan frames hace 5 s"
+        except OSError:
+            # stop() shuts the socket down to unblock a pending read.
+            self.end_reason = ("sesión detenida" if self._stopped
+                               else "se cortó la conexión de video")
+        finally:
+            sock.close()
+
+    def stop(self):
+        """End the stream from another thread (Ctrl+C, time limit)."""
+        self._stopped = True
+        if self._sock is not None:
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+
+class LiveGpsSource:
+    """
+    GPS fixes and recording control from the phone over UDP.
+
+    One socket does everything: the phone sends to the address that last
+    subscribed, so commands must leave from that same socket.
+    """
+
+    SUBSCRIBE_EVERY_S = 2.0
+
+    def __init__(self, ip: str, buffer: GpsBuffer, port: int = 5001):
+        self.phone = (ip, port)
+        self.buffer = buffer
+        self.fixes = []             # (t_ns, lat, lon, alt, speed, unix_ns)
+        self.n_bad = 0              # unrecognised datagrams
+        self.state = None           # last "STATE,..." line
+        self.last_reply = None      # monotonic time of the last SUBSCRIBED
+        self.epsg = None            # UTM zone, fixed by the first fix
+        self.origin = None          # UTM of the first fix
+        self._to_utm = None
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.settimeout(0.5)
+        self._state_changed = threading.Condition()
+        self._stop = threading.Event()
+        self._thread = None
+
+    @property
+    def recording_folder(self) -> Optional[str]:
+        """Folder the phone is recording into, or None when idle."""
+        state = self.state or ""
+        if state.startswith("STATE,RECORDING,"):
+            return state.split(",", 2)[2]
+        return None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def wait_reply(self, timeout: float = 3.0) -> bool:
+        """True once the phone has answered a SUBSCRIBE."""
+        deadline = time.monotonic() + timeout
+        while self.last_reply is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return self.last_reply is not None
+
+    def command(self, word: str, timeout: float = 5.0) -> bool:
+        """
+        Send START or STOP until the phone reports the matching state.
+
+        UDP can lose the command or the reply. Repeating is harmless: the
+        phone only acts when its state has to change.
+        """
+        wanted = "STATE,RECORDING" if word == "START" else "STATE,IDLE"
+        deadline = time.monotonic() + timeout
+        with self._state_changed:
+            while time.monotonic() < deadline:
+                self._send(word)
+                self._state_changed.wait(0.5)
+                if self.state is not None and self.state.startswith(wanted):
+                    return True
+        return False
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        self._sock.close()
+
+    def _send(self, text: str):
+        try:
+            self._sock.sendto(text.encode("ascii"), self.phone)
+        except OSError:
+            pass        # network down: the next SUBSCRIBE tries again
+
+    def _run(self):
+        last_subscribe = 0.0
+        while not self._stop.is_set():
+            now = time.monotonic()
+            if now - last_subscribe >= self.SUBSCRIBE_EVERY_S:
+                self._send("SUBSCRIBE")
+                last_subscribe = now
+            try:
+                data, _ = self._sock.recvfrom(2048)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            self._handle(data.decode("ascii", errors="replace").strip())
+
+    def _handle(self, msg: str):
+        if msg == "SUBSCRIBED":
+            self.last_reply = time.monotonic()
+        elif msg.startswith("STATE,"):
+            with self._state_changed:
+                self.state = msg
+                self._state_changed.notify_all()
+        elif msg.startswith("GPS,"):
+            parts = msg.split(",")
+            try:
+                if len(parts) != 7:
+                    raise ValueError(msg)
+                t_ns, unix_ns = int(parts[1]), int(parts[6])
+                lat, lon, alt, speed = (float(p) for p in parts[2:6])
+            except ValueError:
+                self.n_bad += 1
+                return
+            self.fixes.append((t_ns, lat, lon, alt, speed, unix_ns))
+            self.buffer.push(t_ns, self._position(lat, lon, alt))
+        else:
+            self.n_bad += 1
+
+    def _position(self, lat: float, lon: float, alt: float) -> np.ndarray:
+        """Metres relative to the first fix."""
+        # The zone is fixed by the first fix: switching zones mid-route (the
+        # 84 W boundary crosses Costa Rica) would make positions jump.
+        if self._to_utm is None:
+            zone = int((lon + 180) / 6) + 1
+            self.epsg = (32600 if lat >= 0 else 32700) + zone
+            self._to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{self.epsg}",
+                                                always_xy=True)
+        x, y = self._to_utm.transform(lon, lat)
+        utm = np.array([x, y, alt])
+        if self.origin is None:
+            self.origin = utm
+        return utm - self.origin
 
 
 # -------------------------------------------------------------------- load
