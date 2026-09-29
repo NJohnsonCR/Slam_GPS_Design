@@ -2,10 +2,9 @@
 Replay mode: run the real-time pipeline over a recorded session, honouring the
 real time between frames.
 
-It is the same system that will run live; only the data source changes. It
-validates the architecture and measures latency WITHOUT depending on the
-Android app, the network or the field hardware, which is what answers OE1 with
-numbers: is real-time operation viable?
+It is the same system that runs live (run_live.py); only the data source
+changes. It validates the architecture and measures latency WITHOUT depending
+on the Android app, the network or the field hardware.
 
 Usage:
     # deterministic mode (reproducible, for development and reporting)
@@ -146,10 +145,10 @@ def plot_trajectory(track, out_dir, mode, metric=False):
     print(f"                        mediana : {np.median(err):.2f} m")
     print(f"                        máxima  : {err.max():.2f} m")
 
-    # Same thing, but only at the instant a new fix arrives. The GPS runs at
-    # 1 Hz: between fixes its position freezes while the vehicle keeps moving,
-    # which is the sawtooth in the deviation curve. At arrival its age is ~0,
-    # so the comparison there is clean.
+    # Same thing, but only at the instant a new fix arrives. Between fixes the
+    # GPS position freezes while the vehicle keeps moving, which is the
+    # sawtooth in the deviation curve. At arrival its age is ~0, so the
+    # comparison there is clean.
     t_fix = np.array([t for t, g in zip(track["gps_t"][:n], track["gps"][:n])
                       if g is not None], dtype=np.int64)
     is_new = np.ones(len(t_fix), dtype=bool)
@@ -157,7 +156,7 @@ def plot_trajectory(track, out_dir, mode, metric=False):
     if is_new.sum() >= 5:
         vo_f, _ = _umeyama(vo_p[is_new], gps[is_new], with_scale=not metric)
         err_f = np.linalg.norm(vo_f - gps[is_new], axis=1)
-        print("  Solo al llegar cada fix (sin el efecto escalera del GPS a 1 Hz):")
+        print("  Solo al llegar cada fix (sin el efecto escalera del GPS):")
         print(f"                        RMSE    : {np.sqrt((err_f**2).mean()):.2f} m"
               f"   ({int(is_new.sum())} fixes)")
         print(f"                        mediana : {np.median(err_f):.2f} m")
@@ -173,7 +172,7 @@ def plot_trajectory(track, out_dir, mode, metric=False):
                 else "Odometría visual (alineada)")
     fig, ax = plt.subplots(1, 2, figsize=(13, 5.5))
     ax[0].plot(gps[:, 0], gps[:, 1], "-", lw=2, color="#F2A03D",
-               label="GPS del teléfono (1 Hz)")
+               label="GPS del teléfono")
     ax[0].plot(vo_al[:, 0], vo_al[:, 1], "--", lw=1.6, color="#4FD1C5",
                label=vo_label)
     ax[0].set_xlabel("X (m)"); ax[0].set_ylabel("Y (m)")
@@ -188,7 +187,8 @@ def plot_trajectory(track, out_dir, mode, metric=False):
     ax[1].grid(alpha=0.3); ax[1].legend()
 
     suffix = "_metric" if metric else ""
-    fig.suptitle(f"Modo replay ({mode}) — trayectoria reconstruida"
+    fig.suptitle(("En vivo" if mode == "live" else f"Modo replay ({mode})")
+                 + " — trayectoria reconstruida"
                  + (" con escala por profundidad" if metric else ""))
     fig.tight_layout()
     png = os.path.join(out_dir, f"trajectory_{mode}{suffix}.png")
@@ -196,9 +196,9 @@ def plot_trajectory(track, out_dir, mode, metric=False):
     print(f"  Gráfico: {png}")
 
 
-def build_scale_worker(args, K):
+def build_scale_worker(K, rate_hz, threaded):
     """
-    Build the depth-based scale estimator, or None if not requested.
+    Build the depth-based scale estimator and its worker.
 
     The estimator does NOT share the front-end's OpenCV objects: they run on
     different threads and cv2 gives no thread-safety guarantee. What is reused
@@ -206,21 +206,29 @@ def build_scale_worker(args, K):
     VisualFrontEnd.last_features), which are immutable data, so the estimator
     sees exactly the same features without running ORB again.
     """
-    if args.scale != "depth":
-        return None, None
-
     from realtime.depth_scale import DepthScaleEstimator
     print("  Escala métrica: modelo de profundidad monocular "
-          f"(~{args.scale_hz:.0f} Hz, "
-          f"{'hilo aparte' if args.strict else 'en línea, determinista'})")
+          f"(~{rate_hz:.0f} Hz, "
+          f"{'hilo aparte' if threaded else 'en línea, determinista'})")
     print("  Cargando el modelo...", flush=True)
     est = DepthScaleEstimator(K, hist_len=12)
-    worker = DepthScaleWorker(est, rate_hz=args.scale_hz, threaded=args.strict)
+    worker = DepthScaleWorker(est, rate_hz=rate_hz, threaded=threaded)
     print("  Modelo listo.\n")
     return est, worker
 
 
-def print_results(res, args, est, worker):
+def print_verdict(e2e_p95_ms, hz, target_ms=150.0, target_hz=10.0):
+    """Verdict against the real-time objective."""
+    print("\n" + "=" * 78)
+    print(f"OBJETIVO PROPUESTO: latencia p95 < {target_ms:.0f} ms  "
+          f"y  ≥ {target_hz:.0f} Hz sostenidos")
+    print(f"  Latencia p95 : {e2e_p95_ms:7.1f} ms   "
+          f"{'CUMPLE' if e2e_p95_ms < target_ms else 'NO CUMPLE'}")
+    print(f"  Frecuencia   : {hz:7.1f} Hz   {'CUMPLE' if hz >= target_hz else 'NO CUMPLE'}")
+    print("=" * 78)
+
+
+def print_results(res, strict, est, worker):
     """Print the measurement report."""
     print("-" * 78)
     print("RESULTADOS")
@@ -257,7 +265,7 @@ def print_results(res, args, est, worker):
     v = est.velocity
     print("     Última velocidad estimada    : "
           + (f"{v:.2f} m/s" if v is not None else "—"))
-    if not args.strict:
+    if not strict:
         print("     (en este modo el modelo corre EN LÍNEA para ser reproducible,")
         print("      así que 'frecuencia efectiva' de arriba lo incluye y baja;")
         print("      el número comparable es el p50 del bucle.)")
@@ -317,7 +325,8 @@ def main():
 
     gps_buf = GpsBuffer()
     fe = VisualFrontEnd(K)
-    est, scaler = build_scale_worker(args, K)
+    est, scaler = (build_scale_worker(K, args.scale_hz, threaded=args.strict)
+                   if args.scale == "depth" else (None, None))
 
     # Trajectory accumulation (optional). The pipeline only measures times;
     # this callback also rebuilds the route.
@@ -350,7 +359,7 @@ def main():
         m = pipe.run(src, t0_data)
 
     res = m.summary()
-    print_results(res, args, est, scaler)
+    print_results(res, args.strict, est, scaler)
 
     if scaler is not None:
         res["escala"] = {
@@ -374,17 +383,9 @@ def main():
               f"{sim['e2e_ms_p50']:.1f} / {sim['e2e_ms_p95']:.1f} ms")
         res["simulacion"] = sim
 
-    # Verdict against the real-time objective.
-    target_ms, target_hz = 150.0, 10.0
     e2e = res["e2e_ms_p95"] if args.strict else res["simulacion"]["e2e_ms_p95"]
     hz = res["hz_efectivo"] if args.strict else 1000.0 / max(res["proc_ms_p50"], 1e-9)
-
-    print("\n" + "=" * 78)
-    print(f"OBJETIVO PROPUESTO: latencia p95 < {target_ms:.0f} ms  "
-          f"y  ≥ {target_hz:.0f} Hz sostenidos")
-    print(f"  Latencia p95 : {e2e:7.1f} ms   {'CUMPLE' if e2e < target_ms else 'NO CUMPLE'}")
-    print(f"  Frecuencia   : {hz:7.1f} Hz   {'CUMPLE' if hz >= target_hz else 'NO CUMPLE'}")
-    print("=" * 78)
+    print_verdict(e2e, hz)
 
     os.makedirs(args.out, exist_ok=True)
     mode = "strict" if args.strict else "deterministic"
