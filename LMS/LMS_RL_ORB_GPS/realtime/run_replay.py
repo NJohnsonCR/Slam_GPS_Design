@@ -19,6 +19,12 @@ Usage:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay \
         mobile_data/2025_03_11 --frames 900 --scale depth --trajectory
 
+    # a recording of the current app: intrinsics from its HELLO, no dashboard,
+    # and without the first frames the encoder writes before catching up
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay \
+        mobile_data/2026_09_29_13_01_19 --fx 867.81 --fy 868.55 \
+        --cx 630.75 --cy 367.79 --crop-bottom 0 --skip-start 6
+
 Console output stays in Spanish: it is evidence for the thesis report.
 """
 
@@ -44,14 +50,19 @@ from realtime.pipeline import (DepthScaleWorker, RealtimePipeline, VisualFrontEn
                                simulate_drops)
 
 
-def mobile_camera_matrix(width: int, height: int, fx: float = 899.0):
+def mobile_camera_matrix(width: int, height: int, fx: float = 899.0,
+                         fy: float = None, cx: float = None, cy: float = None):
     """
-    Real phone calibration: fx/fy come from movie_metadata.csv and the optical
-    centre is the image centre. The offline pipeline defaults to KITTI values,
-    which are wrong for this video.
+    Real phone calibration. fx/fy come from movie_metadata.csv or from the
+    app's HELLO; the optical centre defaults to the image centre, since the
+    recording files do not store it. The offline pipeline defaults to KITTI
+    values, which are wrong for this video.
     """
-    return np.array([[fx, 0.0, width / 2.0],
-                     [0.0, fx, height / 2.0],
+    fy = fx if fy is None else fy
+    cx = width / 2.0 if cx is None else cx
+    cy = height / 2.0 if cy is None else cy
+    return np.array([[fx, 0.0, cx],
+                     [0.0, fy, cy],
                      [0.0, 0.0, 1.0]], dtype=np.float64)
 
 
@@ -281,6 +292,12 @@ def main():
     ap.add_argument("--crop-bottom", type=float, default=0.14,
                     help="Fracción inferior a recortar: el tablero del carro")
     ap.add_argument("--fx", type=float, default=899.0)
+    ap.add_argument("--fy", type=float, default=None, help="Por defecto, igual a fx")
+    ap.add_argument("--cx", type=float, default=None, help="Por defecto, el centro de la imagen")
+    ap.add_argument("--cy", type=float, default=None, help="Por defecto, el centro de la imagen")
+    ap.add_argument("--skip-start", type=int, default=0,
+                    help="Frames a descartar al inicio del video (app actual: 6, "
+                         "el codificador todavía no escribe la imagen de su marca)")
     ap.add_argument("--out", default="resultados/realtime")
     ap.add_argument("--trajectory", action="store_true",
                     help="Reconstruir y graficar el recorrido además de medir tiempos")
@@ -296,6 +313,7 @@ def main():
     print("=" * 78)
 
     frame_t, fixes = load_mobile_session(args.session, latlon_to_utm)
+    frame_t = frame_t[args.skip_start:]     # the source discards the same frames
     n_total = len(frame_t) if args.frames is None else min(args.frames, len(frame_t))
     dur_s = (frame_t[n_total - 1] - frame_t[0]) / 1e9
 
@@ -309,6 +327,8 @@ def main():
     print(f"  Fixes de GPS:  {len(fixes)} en la ventana  "
           f"({len(fixes)/max(dur_s,1e-9):.2f} Hz)")
     print(f"  Recorte inferior (tablero): {args.crop_bottom*100:.0f}%")
+    if args.skip_start:
+        print(f"  Frames descartados al inicio: {args.skip_start}")
 
     video_path = os.path.join(args.session, args.video)
 
@@ -319,9 +339,10 @@ def main():
     h_full = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
     h = int(h_full * (1.0 - args.crop_bottom))
-    K = mobile_camera_matrix(w, h_full, args.fx)   # cy w.r.t. the full image
+    # cy w.r.t. the full image: cropping the bottom does not move it.
+    K = mobile_camera_matrix(w, h_full, args.fx, args.fy, args.cx, args.cy)
     print(f"  Imagen:        {w}x{h_full}  ->  {w}x{h} tras recorte")
-    print(f"  fx={args.fx:.1f}  cx={K[0,2]:.1f}  cy={K[1,2]:.1f}\n")
+    print(f"  fx={K[0,0]:.1f}  fy={K[1,1]:.1f}  cx={K[0,2]:.1f}  cy={K[1,2]:.1f}\n")
 
     gps_buf = GpsBuffer()
     fe = VisualFrontEnd(K)
@@ -346,7 +367,8 @@ def main():
     t0_data = int(frame_t[0])
 
     with ReplayFrameSource(video_path, frame_t, crop_bottom=args.crop_bottom,
-                           strict=args.strict, max_frames=n_total) as src:
+                           strict=args.strict, max_frames=n_total,
+                           skip_start=args.skip_start) as src:
         if args.strict:
             gps_src = ReplayGpsSource(fixes, gps_buf, strict=True)
             gps_src.start(time.perf_counter(), t0_data)
