@@ -29,6 +29,7 @@ Console output stays in Spanish: it is evidence for the thesis report.
 """
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -49,6 +50,12 @@ from realtime.sources import (GpsBuffer, ReplayFrameSource, ReplayGpsSource,
 from realtime.pipeline import (DepthScaleWorker, RealtimePipeline, VisualFrontEnd,
                                simulate_drops)
 
+# Series colours shared by every figure, so GPS and camera keep theirs across
+# charts.
+COLOR_GPS = "#2a78d6"
+COLOR_CAMERA = "#eb6834"
+COLOR_ALIGNED = "#1baf7a"
+
 
 def mobile_camera_matrix(width: int, height: int, fx: float = 899.0,
                          fy: float = None, cx: float = None, cy: float = None):
@@ -66,7 +73,80 @@ def mobile_camera_matrix(width: int, height: int, fx: float = 899.0,
                      [0.0, 0.0, 1.0]], dtype=np.float64)
 
 
-def _umeyama(est, ref, with_scale=True):
+def camera_positions(rel, scales=None):
+    """
+    Chain the relative poses into camera positions, in the first camera's frame.
+
+    recoverPose gives the transform of POINTS from the previous camera to the
+    current one (x2 = R x1 + t), so the camera itself moves by the inverse:
+    rotation R^T and displacement -R^T t. Chaining R and t directly mirrors
+    every turn and runs the route backwards.
+
+    scales holds the metres of each step, or None for unit steps; a missing
+    value (no speed yet) gives a null step.
+    """
+    P = np.eye(4)
+    out = np.zeros((len(rel), 3))
+    for i, (R, t) in enumerate(rel):
+        s = 1.0 if scales is None else scales[i]
+        if s is None or not np.isfinite(s):
+            s = 0.0
+        step = np.eye(4)
+        step[:3, :3] = R.T
+        step[:3, 3] = -R.T @ (np.asarray(t) * s)
+        P = P @ step
+        out[i] = P[:3, 3]
+    return out
+
+
+class TrackRecorder:
+    """on_result callback that keeps every processed step, for plots and CSV."""
+
+    KEYS = ("rel", "t_ns", "unix_ns", "matches", "inliers", "gps", "gps_t", "scale")
+
+    def __init__(self):
+        self.track = {key: [] for key in self.KEYS}
+
+    def __call__(self, frame, R, t, n_m, n_i, fix, scale):
+        tr = self.track
+        tr["rel"].append((R.copy(), t.copy()))
+        tr["t_ns"].append(frame.t_ns)
+        tr["unix_ns"].append(frame.unix_ns)
+        tr["matches"].append(n_m)
+        tr["inliers"].append(n_i)
+        tr["gps"].append(None if fix is None else fix[1].copy())
+        tr["gps_t"].append(0 if fix is None else int(fix[0]))
+        tr["scale"].append(scale)
+
+
+FRAME_COLUMNS = (["t_ns", "unix_ns", "matches", "inliers"]
+                 + [f"r{i}{j}" for i in range(3) for j in range(3)]
+                 + ["tx", "ty", "tz", "scale_m",
+                    "gps_t_ns", "gps_x", "gps_y", "gps_z", "e2e_ms", "pc_ms"])
+
+
+def save_frames_csv(path, track, metrics):
+    """
+    One row per processed frame: the raw relative pose from recoverPose (the
+    points convention, see camera_positions), its metres and the paired fix.
+    """
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(FRAME_COLUMNS)
+        for k, (R, t) in enumerate(track["rel"]):
+            g, s, u = track["gps"][k], track["scale"][k], track["unix_ns"][k]
+            pc = metrics.pc_ms[k] if k < len(metrics.pc_ms) else None
+            w.writerow([track["t_ns"][k], "" if u is None else u,
+                        track["matches"][k], track["inliers"][k]]
+                       + [f"{v:.9g}" for v in R.ravel()]
+                       + [f"{v:.9g}" for v in t]
+                       + ["" if s is None else f"{s:.6g}"]
+                       + (["", "", "", ""] if g is None
+                          else [track["gps_t"][k]] + [f"{v:.3f}" for v in g])
+                       + [f"{metrics.e2e_ms[k]:.2f}", "" if pc is None else f"{pc:.2f}"])
+
+
+def umeyama(est, ref, with_scale=True):
     """
     Umeyama alignment.
 
@@ -109,21 +189,7 @@ def plot_trajectory(track, out_dir, mode, metric=False):
 
     # VO chain. Without metric scale every step has norm 1; with it, direction
     # comes from the camera and magnitude from the depth model.
-    P = np.eye(4)
-    vo = [np.zeros(3)]
-    for i, (R, t) in enumerate(track["rel"]):
-        rel = np.eye(4)
-        rel[:3, :3] = R
-        if metric:
-            s = track["scale"][i]
-            # No speed yet (estimator start-up) -> null step; that is the
-            # first ~0.3 s of the route.
-            rel[:3, 3] = t * (s if s is not None else 0.0)
-        else:
-            rel[:3, 3] = t
-        P = P @ rel
-        vo.append(P[:3, 3].copy())
-    vo = np.array(vo[1:])
+    vo = camera_positions(track["rel"], track["scale"] if metric else None)
 
     # Pair BY INDEX. Filtering out the Nones without keeping their position
     # shifted the whole GPS series towards the start: with 19 initial frames
@@ -139,7 +205,7 @@ def plot_trajectory(track, out_dir, mode, metric=False):
     vo_p = vo[:n][has_gps]
     gps = np.array([g for g in track["gps"][:n] if g is not None])
 
-    vo_al, scale = _umeyama(vo_p, gps, with_scale=not metric)
+    vo_al, scale = umeyama(vo_p, gps, with_scale=not metric)
     err = np.linalg.norm(vo_al - gps, axis=1)
     dist = float(np.sum(np.linalg.norm(np.diff(gps, axis=0), axis=1)))
     dist_vo = float(np.sum(np.linalg.norm(np.diff(vo[:n], axis=0), axis=1)))
@@ -165,7 +231,7 @@ def plot_trajectory(track, out_dir, mode, metric=False):
     is_new = np.ones(len(t_fix), dtype=bool)
     is_new[1:] = np.diff(t_fix) > 0
     if is_new.sum() >= 5:
-        vo_f, _ = _umeyama(vo_p[is_new], gps[is_new], with_scale=not metric)
+        vo_f, _ = umeyama(vo_p[is_new], gps[is_new], with_scale=not metric)
         err_f = np.linalg.norm(vo_f - gps[is_new], axis=1)
         print("  Solo al llegar cada fix (sin el efecto escalera del GPS):")
         print(f"                        RMSE    : {np.sqrt((err_f**2).mean()):.2f} m"
@@ -182,15 +248,15 @@ def plot_trajectory(track, out_dir, mode, metric=False):
     vo_label = ("Cámara con escala propia (rígida)" if metric
                 else "Odometría visual (alineada)")
     fig, ax = plt.subplots(1, 2, figsize=(13, 5.5))
-    ax[0].plot(gps[:, 0], gps[:, 1], "-", lw=2, color="#F2A03D",
+    ax[0].plot(gps[:, 0], gps[:, 1], "-", lw=2, color=COLOR_GPS,
                label="GPS del teléfono")
-    ax[0].plot(vo_al[:, 0], vo_al[:, 1], "--", lw=1.6, color="#4FD1C5",
+    ax[0].plot(vo_al[:, 0], vo_al[:, 1], "--", lw=1.6, color=COLOR_CAMERA,
                label=vo_label)
     ax[0].set_xlabel("X (m)"); ax[0].set_ylabel("Y (m)")
     ax[0].set_title(f"Recorrido — {dist:.0f} m")
     ax[0].axis("equal"); ax[0].grid(alpha=0.3); ax[0].legend()
 
-    ax[1].plot(err, lw=1.2, color="#B85042")
+    ax[1].plot(err, lw=1.2, color=COLOR_CAMERA)
     ax[1].axhline(np.median(err), ls="--", color="gray",
                   label=f"mediana {np.median(err):.1f} m")
     ax[1].set_xlabel("keyframe"); ax[1].set_ylabel("desviación (m)")
@@ -298,9 +364,14 @@ def main():
     ap.add_argument("--skip-start", type=int, default=0,
                     help="Frames a descartar al inicio del video (app actual: 6, "
                          "el codificador todavía no escribe la imagen de su marca)")
+    ap.add_argument("--start", type=float, default=0.0,
+                    help="Segundo de la grabación desde el que se procesa")
     ap.add_argument("--out", default="resultados/realtime")
     ap.add_argument("--trajectory", action="store_true",
                     help="Reconstruir y graficar el recorrido además de medir tiempos")
+    ap.add_argument("--save-frames", action="store_true",
+                    help="Guardar los resultados por frame en frames_<modo>.csv, "
+                         "el formato que lee evaluate.py")
     ap.add_argument("--scale", choices=["none", "depth"], default="none",
                     help="Fuente de la escala métrica. 'depth' activa el "
                          "estimador monocular en un hilo aparte")
@@ -313,7 +384,11 @@ def main():
     print("=" * 78)
 
     frame_t, fixes = load_mobile_session(args.session, latlon_to_utm)
-    frame_t = frame_t[args.skip_start:]     # the source discards the same frames
+    # Frames left out at the start: the encoder warm-up, or everything before
+    # --start. The source discards the same ones.
+    skip = max(args.skip_start,
+               int(np.searchsorted(frame_t, frame_t[0] + int(args.start * 1e9))))
+    frame_t = frame_t[skip:]
     n_total = len(frame_t) if args.frames is None else min(args.frames, len(frame_t))
     dur_s = (frame_t[n_total - 1] - frame_t[0]) / 1e9
 
@@ -327,8 +402,9 @@ def main():
     print(f"  Fixes de GPS:  {len(fixes)} en la ventana  "
           f"({len(fixes)/max(dur_s,1e-9):.2f} Hz)")
     print(f"  Recorte inferior (tablero): {args.crop_bottom*100:.0f}%")
-    if args.skip_start:
-        print(f"  Frames descartados al inicio: {args.skip_start}")
+    if skip:
+        print(f"  Frames descartados al inicio: {skip}"
+              + (f"  (desde el segundo {args.start:.0f})" if args.start else ""))
 
     video_path = os.path.join(args.session, args.video)
 
@@ -349,26 +425,19 @@ def main():
     est, scaler = (build_scale_worker(K, args.scale_hz, threaded=args.strict)
                    if args.scale == "depth" else (None, None))
 
-    # Trajectory accumulation (optional). The pipeline only measures times;
-    # this callback also rebuilds the route.
-    track = {"rel": [], "gps": [], "gps_t": [], "t_ns": [], "scale": []}
-
-    def accumulate(frame, R, t, n_m, n_i, fix, scale):
-        track["rel"].append((R.copy(), t.copy()))
-        track["t_ns"].append(frame.t_ns)
-        track["gps"].append(None if fix is None else fix[1].copy())
-        track["gps_t"].append(0 if fix is None else int(fix[0]))
-        track["scale"].append(scale)
-
+    # The pipeline only measures times; the recorder also keeps every step,
+    # to rebuild the route and to save it.
+    recorder = TrackRecorder()
+    keep = args.trajectory or args.save_frames
     pipe = RealtimePipeline(fe, gps_buf, strict=args.strict,
-                            on_result=accumulate if args.trajectory else None,
+                            on_result=recorder if keep else None,
                             scale_worker=scaler)
 
     t0_data = int(frame_t[0])
 
     with ReplayFrameSource(video_path, frame_t, crop_bottom=args.crop_bottom,
                            strict=args.strict, max_frames=n_total,
-                           skip_start=args.skip_start) as src:
+                           skip_start=skip) as src:
         if args.strict:
             gps_src = ReplayGpsSource(fixes, gps_buf, strict=True)
             gps_src.start(time.perf_counter(), t0_data)
@@ -411,11 +480,15 @@ def main():
 
     os.makedirs(args.out, exist_ok=True)
     mode = "strict" if args.strict else "deterministic"
+    suffix = "_metric" if scaler is not None else ""
 
     if args.trajectory:
-        plot_trajectory(track, args.out, mode, metric=scaler is not None)
+        plot_trajectory(recorder.track, args.out, mode, metric=scaler is not None)
+    if args.save_frames:
+        path = os.path.join(args.out, f"frames_{mode}{suffix}.csv")
+        save_frames_csv(path, recorder.track, m)
+        print(f"  Resultados por frame: {path}")
 
-    suffix = "_metric" if scaler is not None else ""
     path = os.path.join(args.out, f"replay_{mode}{suffix}.json")
     with open(path, "w") as f:
         json.dump(res, f, indent=2)

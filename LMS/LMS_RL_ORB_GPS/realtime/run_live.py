@@ -16,7 +16,6 @@ arrive for 5 s. Each one is saved in its own folder under --out.
 """
 
 import argparse
-import csv
 import json
 import os
 import signal
@@ -36,8 +35,8 @@ for _p in (_ROOT, _LMS_RL):
 
 from realtime.sources import GpsBuffer, LiveFrameSource, LiveGpsSource, read_hello
 from realtime.pipeline import RealtimePipeline, VisualFrontEnd
-from realtime.run_replay import (build_scale_worker, plot_trajectory,
-                                 print_results, print_verdict)
+from realtime.run_replay import (TrackRecorder, build_scale_worker, plot_trajectory,
+                                 print_results, print_verdict, save_frames_csv)
 
 # Same header as the phone's location.csv, so both files read the same way.
 LOCATION_HEADER = ("Timestamp[nanosecond],latitude[degrees],longitude[degrees],"
@@ -119,23 +118,7 @@ def print_live_results(res, src, gps):
 def save_session(out_dir, track, m, res, gps):
     """Per-frame results, received fixes and metrics, to compare later."""
     os.makedirs(out_dir, exist_ok=True)
-
-    with open(os.path.join(out_dir, "frames.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["t_ns", "unix_ns", "matches", "inliers"]
-                   + [f"r{i}{j}" for i in range(3) for j in range(3)]
-                   + ["tx", "ty", "tz", "scale_m",
-                      "gps_t_ns", "gps_x", "gps_y", "gps_z", "e2e_ms", "pc_ms"])
-        for k, (R, t) in enumerate(track["rel"]):
-            g, s = track["gps"][k], track["scale"][k]
-            w.writerow([track["t_ns"][k], track["unix_ns"][k],
-                        track["matches"][k], track["inliers"][k]]
-                       + [f"{v:.9g}" for v in R.ravel()]
-                       + [f"{v:.9g}" for v in t]
-                       + ["" if s is None else f"{s:.6g}"]
-                       + (["", "", "", ""] if g is None
-                          else [track["gps_t"][k]] + [f"{v:.3f}" for v in g])
-                       + [f"{m.e2e_ms[k]:.2f}", f"{m.pc_ms[k]:.2f}"])
+    save_frames_csv(os.path.join(out_dir, "frames.csv"), track, m)
 
     with open(os.path.join(out_dir, "gps.csv"), "w") as f:
         f.write(LOCATION_HEADER + "\n")
@@ -162,21 +145,10 @@ def run_session(args, hello, gps, gps_buf):
     print(f"  Precalentamiento: {time.perf_counter() - t0:.1f} s")
 
     src = LiveFrameSource(args.phone_ip, hello, args.video_port, args.crop_bottom)
-    track = {key: [] for key in ("rel", "t_ns", "unix_ns", "matches", "inliers",
-                                 "gps", "gps_t", "scale")}
-
-    def accumulate(frame, R, t, n_m, n_i, fix, scale):
-        track["rel"].append((R.copy(), t.copy()))
-        track["t_ns"].append(frame.t_ns)
-        track["unix_ns"].append(frame.unix_ns)
-        track["matches"].append(n_m)
-        track["inliers"].append(n_i)
-        track["gps"].append(None if fix is None else fix[1].copy())
-        track["gps_t"].append(0 if fix is None else int(fix[0]))
-        track["scale"].append(scale)
-
+    recorder = TrackRecorder()
+    track = recorder.track
     pipe = RealtimePipeline(VisualFrontEnd(K), gps_buf, strict=True,
-                            on_result=accumulate, scale_worker=scaler)
+                            on_result=recorder, scale_worker=scaler)
 
     def on_sigint(*_):
         # The first Ctrl+C ends the session and still saves it; a second one
