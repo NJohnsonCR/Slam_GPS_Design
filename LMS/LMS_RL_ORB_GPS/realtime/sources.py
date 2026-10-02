@@ -87,14 +87,6 @@ class Frame:
     arrival_ns: Optional[int] = None    # live only: arrival time, PC wall clock
 
 
-def _crop_bottom(img: np.ndarray, fraction: float) -> np.ndarray:
-    # The dashboard sits in the lower part of the frame and produces
-    # correspondences that claim the vehicle did not move.
-    if fraction > 0:
-        img = img[: int(img.shape[0] * (1.0 - fraction))]
-    return img
-
-
 class ReplayFrameSource:
     """
     Replays a recorded video honouring the real time between frames.
@@ -104,12 +96,10 @@ class ReplayFrameSource:
     leave them out.
     """
 
-    def __init__(self, video_path: str, timestamps_ns, crop_bottom: float = 0.0,
-                 strict: bool = True, max_frames: Optional[int] = None,
-                 skip_start: int = 0):
+    def __init__(self, video_path: str, timestamps_ns, strict: bool = True,
+                 max_frames: Optional[int] = None, skip_start: int = 0):
         self.video_path = video_path
         self.timestamps = np.asarray(timestamps_ns, dtype=np.int64)
-        self.crop_bottom = crop_bottom      # bottom fraction to cut: car dashboard
         self.strict = strict
         self.max_frames = max_frames
         self.skip_start = skip_start
@@ -147,8 +137,7 @@ class ReplayFrameSource:
                 if wait > 0:
                     time.sleep(wait)
 
-            yield Frame(t_ns=int(self.timestamps[i]), index=i,
-                        image=_crop_bottom(img, self.crop_bottom))
+            yield Frame(t_ns=int(self.timestamps[i]), index=i, image=img)
 
 
 class ReplayGpsSource:
@@ -258,12 +247,10 @@ class LiveFrameSource:
     IDLE_TIMEOUT_S = 5.0
     MAX_JPEG_BYTES = 20_000_000     # anything larger means a corrupt header
 
-    def __init__(self, ip: str, hello: Hello, port: int = 5000,
-                 crop_bottom: float = 0.0):
+    def __init__(self, ip: str, hello: Hello, port: int = 5000):
         self.ip = ip
         self.port = port
         self.hello = hello
-        self.crop_bottom = crop_bottom
         self.n_received = 0
         self.n_missing = 0                  # captured by the phone, never sent
         self.n_bad = 0                      # JPEGs that failed to decode
@@ -313,8 +300,7 @@ class LiveFrameSource:
                         self.n_bad += 1
                         continue
                     self.n_received += 1
-                    yield Frame(t_ns=t_ns, index=self.n_received - 1,
-                                image=_crop_bottom(img, self.crop_bottom),
+                    yield Frame(t_ns=t_ns, index=self.n_received - 1, image=img,
                                 unix_ns=unix_ns, arrival_ns=arrival_ns)
             self.end_reason = ("sesión detenida" if self._stopped
                                else "el teléfono cerró la conexión de video")

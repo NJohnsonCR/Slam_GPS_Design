@@ -83,6 +83,7 @@ class Metrics:
     dropped: int = 0
     no_gps: int = 0
     no_scale: int = 0
+    rejected_poses: int = 0
     t_start: float = 0.0
     t_end: float = 0.0
 
@@ -110,6 +111,7 @@ class Metrics:
             "gps_age_ms_p50": pct(self.gps_age_ms, 50),
             "gps_age_ms_p95": pct(self.gps_age_ms, 95),
             "frames_sin_gps": self.no_gps,
+            "poses_giro_imposible": self.rejected_poses,
             # Scale runs on another thread, so it is reported separately and
             # never counted against the per-frame budget.
             "depth_estimaciones": len(self.depth_ms),
@@ -133,26 +135,67 @@ class VisualFrontEnd:
     BFMatcher Hamming, Lowe ratio 0.75, minimum 15 matches -- so both systems
     stay comparable. The T6 invariant in scripts/rl/sanity_checks.py fails
     loudly if these ever drift apart.
+
+    mask_bottom is the lower fraction of the frame where ORB does not look for
+    points: the dashboard, or the hood that reflects the scene. The frame is
+    not cropped, because the depth model's metric scale changes with framing.
     """
 
     MIN_MATCHES = 15
+    # Safety net: a car does not turn this much between frames (the gyroscope
+    # peaked at 6.1 degrees, on a bump), so such a pose is a failed estimate.
+    MAX_ROTATION_DEG = 10.0
 
     def __init__(self, camera_matrix: np.ndarray, n_features: int = 2000,
-                 lowe_ratio: float = 0.75):
+                 lowe_ratio: float = 0.75, mask_bottom: float = 0.0):
         self.K = camera_matrix
         self.orb = cv2.ORB_create(n_features)
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
         self.lowe = lowe_ratio
+        self.mask_bottom = mask_bottom
+        self.n_rejected = 0                 # poses dropped by MAX_ROTATION_DEG
+        self._mask = None
         self._prev_kp = None
         self._prev_des = None
 
+    def _feature_mask(self, shape):
+        """Where ORB may look for points, or None for the whole frame."""
+        if self.mask_bottom <= 0:
+            return None
+        if self._mask is None or self._mask.shape != shape:
+            # ORB already keeps its points this far from the frame border; the
+            # same margin above the masked rows gives the points of a crop.
+            rows = int(shape[0] * (1.0 - self.mask_bottom)) - self.orb.getEdgeThreshold()
+            self._mask = np.zeros(shape, np.uint8)
+            self._mask[:max(rows, 0)] = 255
+        return self._mask
+
+    def _recover_pose(self, E, p0, p1):
+        """
+        Pose from E, letting every point vote among its four solutions.
+
+        By default recoverPose ignores points beyond 50 baselines. With little
+        motion between frames none is left, and the tie returns the first
+        solution: about half of the time, the right one turned 180 degrees
+        about the baseline. The inlier count keeps the default meaning, so it
+        still drops to ~0 when the camera barely moves.
+        """
+        _, R, t, mask, X = cv2.recoverPose(E, p0, p1, self.K, distanceThresh=1e7)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            X = X[:3] / X[3]
+            near = (mask.ravel() > 0) & (X[2] < 50) & ((R @ X + t)[2] < 50)
+        return R, t.ravel(), int(np.count_nonzero(near))
+
     def process(self, image: np.ndarray):
-        """Return (R, t, n_matches, n_inliers, StageTimes). ||t|| == 1."""
+        """
+        Return (R, t, n_matches, n_inliers, StageTimes). ||t|| == 1, or R = I
+        and t = 0 when there is no reliable pose.
+        """
         st = StageTimes()
 
         t0 = time.perf_counter()
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        kp, des = self.orb.detectAndCompute(gray, None)
+        kp, des = self.orb.detectAndCompute(gray, self._feature_mask(gray.shape))
         st.detect = time.perf_counter() - t0
 
         R, t = np.eye(3), np.zeros(3)
@@ -174,8 +217,12 @@ class VisualFrontEnd:
                                             prob=0.999, threshold=1.0)
                 if E is not None and E.shape == (3, 3):
                     try:
-                        n_in, R_est, t_est, _ = cv2.recoverPose(E, p0, p1, self.K)
-                        R, t, n_inliers = R_est, t_est.ravel(), int(n_in)
+                        R_est, t_est, n_in = self._recover_pose(E, p0, p1)
+                        angle = np.degrees(np.arccos(np.clip((np.trace(R_est) - 1) / 2, -1, 1)))
+                        if angle <= self.MAX_ROTATION_DEG:
+                            R, t, n_inliers = R_est, t_est, n_in
+                        else:
+                            self.n_rejected += 1
                     except cv2.error:
                         pass
                 st.pose = time.perf_counter() - t0
@@ -385,6 +432,7 @@ class RealtimePipeline:
         if self.metrics.processed == 0:
             self.metrics.t_end = time.perf_counter()
         self.metrics.dropped = self._dropped[0]
+        self.metrics.rejected_poses = self.fe.n_rejected
         self._stop.set()
         cap_thread.join(timeout=2.0)
         if self.scale is not None:

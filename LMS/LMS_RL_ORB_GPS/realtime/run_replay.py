@@ -23,7 +23,7 @@ Usage:
     # and without the first frames the encoder writes before catching up
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay \
         mobile_data/2026_09_29_13_01_19 --fx 867.81 --fy 868.55 \
-        --cx 630.75 --cy 367.79 --crop-bottom 0 --skip-start 6
+        --cx 630.75 --cy 367.79 --mask-bottom 0 --skip-start 6
 
 Console output stays in Spanish: it is evidence for the thesis report.
 """
@@ -325,6 +325,8 @@ def print_results(res, strict, est, worker):
     print(f"  Antigüedad del fix GPS   p50    : {res['gps_age_ms_p50']:.0f} ms")
     print(f"                           p95    : {res['gps_age_ms_p95']:.0f} ms")
     print(f"  Frames sin GPS disponible       : {res['frames_sin_gps']}")
+    print(f"  Poses descartadas (giro de más de {VisualFrontEnd.MAX_ROTATION_DEG:.0f}° "
+          f"entre frames): {res['poses_giro_imposible']}")
 
     if worker is None:
         return
@@ -355,8 +357,9 @@ def main():
     ap.add_argument("--frames", type=int, default=None, help="Máximo de frames")
     ap.add_argument("--strict", action="store_true",
                     help="Duerme y descarta de verdad (no determinista)")
-    ap.add_argument("--crop-bottom", type=float, default=0.14,
-                    help="Fracción inferior a recortar: el tablero del carro")
+    ap.add_argument("--mask-bottom", type=float, default=0.14,
+                    help="Fracción inferior donde ORB no busca puntos (tablero o "
+                         "capó); el modelo de profundidad ve la imagen completa")
     ap.add_argument("--fx", type=float, default=899.0)
     ap.add_argument("--fy", type=float, default=None, help="Por defecto, igual a fx")
     ap.add_argument("--cx", type=float, default=None, help="Por defecto, el centro de la imagen")
@@ -401,27 +404,25 @@ def main():
           f"{n_total/max(dur_s,1e-9):.1f} fps nominales)")
     print(f"  Fixes de GPS:  {len(fixes)} en la ventana  "
           f"({len(fixes)/max(dur_s,1e-9):.2f} Hz)")
-    print(f"  Recorte inferior (tablero): {args.crop_bottom*100:.0f}%")
+    print(f"  Máscara inferior (tablero o capó): {args.mask_bottom*100:.0f}%")
     if skip:
         print(f"  Frames descartados al inicio: {skip}"
               + (f"  (desde el segundo {args.start:.0f})" if args.start else ""))
 
     video_path = os.path.join(args.session, args.video)
 
-    # Real dimensions after cropping, for the optical centre.
+    # Real dimensions, for the optical centre.
     import cv2
     cap = cv2.VideoCapture(video_path)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h_full = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
-    h = int(h_full * (1.0 - args.crop_bottom))
-    # cy w.r.t. the full image: cropping the bottom does not move it.
-    K = mobile_camera_matrix(w, h_full, args.fx, args.fy, args.cx, args.cy)
-    print(f"  Imagen:        {w}x{h_full}  ->  {w}x{h} tras recorte")
+    K = mobile_camera_matrix(w, h, args.fx, args.fy, args.cx, args.cy)
+    print(f"  Imagen:        {w}x{h}")
     print(f"  fx={K[0,0]:.1f}  fy={K[1,1]:.1f}  cx={K[0,2]:.1f}  cy={K[1,2]:.1f}\n")
 
     gps_buf = GpsBuffer()
-    fe = VisualFrontEnd(K)
+    fe = VisualFrontEnd(K, mask_bottom=args.mask_bottom)
     est, scaler = (build_scale_worker(K, args.scale_hz, threaded=args.strict)
                    if args.scale == "depth" else (None, None))
 
@@ -435,9 +436,8 @@ def main():
 
     t0_data = int(frame_t[0])
 
-    with ReplayFrameSource(video_path, frame_t, crop_bottom=args.crop_bottom,
-                           strict=args.strict, max_frames=n_total,
-                           skip_start=skip) as src:
+    with ReplayFrameSource(video_path, frame_t, strict=args.strict,
+                           max_frames=n_total, skip_start=skip) as src:
         if args.strict:
             gps_src = ReplayGpsSource(fixes, gps_buf, strict=True)
             gps_src.start(time.perf_counter(), t0_data)

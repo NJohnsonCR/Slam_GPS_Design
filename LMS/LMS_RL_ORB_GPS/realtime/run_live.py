@@ -141,14 +141,14 @@ def run_session(args, hello, gps, gps_buf):
     est, scaler = (build_scale_worker(K, args.scale_hz, threaded=True)
                    if args.scale == "depth" else (None, None))
     t0 = time.perf_counter()
-    warm_up(K, hello.width, int(hello.height * (1.0 - args.crop_bottom)), est)
+    warm_up(K, hello.width, hello.height, est)
     print(f"  Precalentamiento: {time.perf_counter() - t0:.1f} s")
 
-    src = LiveFrameSource(args.phone_ip, hello, args.video_port, args.crop_bottom)
+    src = LiveFrameSource(args.phone_ip, hello, args.video_port)
     recorder = TrackRecorder()
     track = recorder.track
-    pipe = RealtimePipeline(VisualFrontEnd(K), gps_buf, strict=True,
-                            on_result=recorder, scale_worker=scaler)
+    pipe = RealtimePipeline(VisualFrontEnd(K, mask_bottom=args.mask_bottom), gps_buf,
+                            strict=True, on_result=recorder, scale_worker=scaler)
 
     def on_sigint(*_):
         # The first Ctrl+C ends the session and still saves it; a second one
@@ -222,7 +222,7 @@ def run_session(args, hello, gps, gps_buf):
         "udp_invalidos": gps.n_bad,
         "utm_epsg": gps.epsg,
         "utm_origen": None if gps.origin is None else gps.origin.tolist(),
-        "recorte_inferior": args.crop_bottom,
+        "mascara_inferior": args.mask_bottom,
     }
 
     out_dir = os.path.join(args.out, f"live_{stamp}")
@@ -240,8 +240,9 @@ def main():
                     help="Grabar también en el teléfono (START al empezar, STOP al terminar)")
     ap.add_argument("--duration", type=float, default=None,
                     help="Duración de la sesión en segundos; sin esto, hasta Ctrl+C")
-    ap.add_argument("--crop-bottom", type=float, default=0.0,
-                    help="Fracción inferior a recortar si se ve el tablero")
+    ap.add_argument("--mask-bottom", type=float, default=0.0,
+                    help="Fracción inferior donde ORB no busca puntos, si se ve el "
+                         "tablero o el capó")
     ap.add_argument("--scale", choices=["none", "depth"], default="none",
                     help="Fuente de la escala métrica. 'depth' activa el "
                          "estimador monocular en un hilo aparte")
@@ -263,8 +264,8 @@ def main():
     print(f"  Teléfono:  {args.phone_ip}  (video {args.video_port}, GPS {args.gps_port})")
     print(f"  Cámara:    {hello.width}x{hello.height} a {hello.fps} fps  "
           f"fx {hello.fx:.2f}  fy {hello.fy:.2f}  cx {hello.cx:.2f}  cy {hello.cy:.2f}")
-    if args.crop_bottom > 0:
-        print(f"  Recorte inferior (tablero): {args.crop_bottom * 100:.0f}%")
+    if args.mask_bottom > 0:
+        print(f"  Máscara inferior (tablero o capó): {args.mask_bottom * 100:.0f}%")
 
     gps_buf = GpsBuffer()
     gps = LiveGpsSource(args.phone_ip, gps_buf, args.gps_port)
