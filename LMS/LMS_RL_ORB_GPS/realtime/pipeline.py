@@ -143,7 +143,8 @@ class VisualFrontEnd:
 
     MIN_MATCHES = 15
     # Safety net: a car does not turn this much between frames (the gyroscope
-    # peaked at 6.1 degrees, on a bump), so such a pose is a failed estimate.
+    # peaked at 9.5 degrees, a pothole at 71 km/h), so such a pose is a failed
+    # estimate.
     MAX_ROTATION_DEG = 10.0
 
     def __init__(self, camera_matrix: np.ndarray, n_features: int = 2000,
