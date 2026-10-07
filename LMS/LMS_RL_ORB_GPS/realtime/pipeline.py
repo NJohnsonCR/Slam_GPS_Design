@@ -354,6 +354,11 @@ class RealtimePipeline:
         self._stop = threading.Event()
         self._t_prev_ns = None
 
+    @property
+    def n_dropped(self) -> int:
+        """Frames dropped so far by the single-slot queue."""
+        return self._dropped[0]
+
     def _capture_worker(self, source):
         """
         Strict mode drops the old frame: that is the real behaviour.

@@ -2,7 +2,9 @@
 Live mode: the real-time pipeline fed by the Android app over the network.
 
 Same pipeline as replay; only the sources change. Live always behaves like
-strict replay: real time, real drops, not deterministic.
+strict replay: real time, real drops, not deterministic. The session itself
+lives in session.py, shared with the window (live_window.py); this is its
+console.
 
 Usage:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_live 192.168.100.108
@@ -16,14 +18,12 @@ arrive for 5 s. Each one is saved in its own folder under --out.
 """
 
 import argparse
-import json
 import os
 import signal
 import sys
 import threading
 import time
 
-import cv2
 import numpy as np
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
@@ -33,61 +33,36 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from realtime.sources import GpsBuffer, LiveFrameSource, LiveGpsSource, read_hello
-from realtime.pipeline import RealtimePipeline, VisualFrontEnd
-from realtime.run_replay import (TrackRecorder, build_scale_worker, plot_trajectory,
-                                 print_results, print_verdict, save_frames_csv)
-
-# Same header as the phone's location.csv, so both files read the same way.
-LOCATION_HEADER = ("Timestamp[nanosecond],latitude[degrees],longitude[degrees],"
-                   "altitude[meters],speed[meters/second],Unix time[nanosecond]")
+from realtime.run_replay import print_results, print_verdict
+from realtime.session import LiveSession, SessionError
 
 
-def warm_up(K, width, height, est=None):
-    """
-    Run the models once on synthetic frames before connecting.
+def status_line(st):
+    """One console line from LiveSession.status()."""
+    line = (f"  {st['elapsed_s']:4.0f} s | video {st['video_fps']:2.0f} fps, "
+            f"faltan {st['missing']:2d} | procesados {st['processed_fps']:2.0f}")
+    if st["latency_ms"] is not None:
+        line += f", latencia {st['latency_ms']:4.0f} ms"
+    line += f" | GPS {st.get('gps_fixes', 0)} fix"
+    if "fix_age_s" in st:
+        line += f" (hace {st['fix_age_s']:3.1f} s, {st['gps_speed']:.1f} m/s)"
+    if st["camera_speed"] is not None:
+        line += f" | cámara {st['camera_speed']:.1f} m/s"
+    if st["stopped"]:
+        line += " (detenido)"
+    if st.get("recording"):
+        line += " | grabando"
+    if st.get("udp_silent"):
+        line += " | sin respuesta UDP"
+    return line
 
-    The first ORB call pays a one-off initialisation (~200 ms), and so does
-    the first depth inference (~0.3 s, several seconds with cold caches).
-    Paid here, it does not reach the first live frames as latency.
-    """
-    rng = np.random.default_rng(0)
-    noise = cv2.GaussianBlur(
-        rng.integers(0, 256, (height + 8, width + 8), dtype=np.uint8), (0, 0), 1.5)
-    fe = VisualFrontEnd(K)
-    # Two shifted copies, so matching and pose estimation run as well.
-    for dy, dx in ((0, 0), (4, 6)):
-        img = cv2.cvtColor(noise[dy:dy + height, dx:dx + width], cv2.COLOR_GRAY2BGR)
-        fe.process(img)
-    if est is not None:
-        est.depth_map(img)
 
-
-def status_loop(stop, src, gps, pipe, scaler):
+def status_loop(stop, session):
     """One console line per second while the session runs."""
-    t0 = time.monotonic()
-    prev = (0, 0, 0, 0)
     while not stop.wait(1.0):
-        m = pipe.metrics
-        now = (src.n_received, src.n_missing, m.processed, len(gps.fixes))
-        received, missing, processed, fixes = (a - b for a, b in zip(now, prev))
-        prev = now
-
-        line = (f"  {time.monotonic() - t0:4.0f} s | video {received:2d} fps, "
-                f"faltan {missing:2d} | procesados {processed:2d}")
-        if processed:
-            line += f", latencia {np.median(m.e2e_ms[-processed:]):4.0f} ms"
-        line += f" | GPS {fixes} fix"
-        if gps.fixes and src.last_t_ns is not None:
-            t_fix, speed = gps.fixes[-1][0], gps.fixes[-1][4]
-            line += f" (hace {(src.last_t_ns - t_fix) / 1e9:3.1f} s, {speed:.1f} m/s)"
-        if scaler is not None and scaler.velocity is not None:
-            line += f" | cámara {scaler.velocity:.1f} m/s"
-        if gps.recording_folder:
-            line += " | grabando"
-        if gps.last_reply is not None and time.monotonic() - gps.last_reply > 6.0:
-            line += " | sin respuesta UDP"
-        print(line, flush=True)
+        st = session.status()
+        if "elapsed_s" in st:
+            print(status_line(st), flush=True)
 
 
 def print_live_results(res, src, gps):
@@ -115,119 +90,55 @@ def print_live_results(res, src, gps):
         print(f"  Mensajes inválidos              : {gps.n_bad} UDP, {src.n_bad} JPEG")
 
 
-def save_session(out_dir, track, m, res, gps):
-    """Per-frame results, received fixes and metrics, to compare later."""
-    os.makedirs(out_dir, exist_ok=True)
-    save_frames_csv(os.path.join(out_dir, "frames.csv"), track, m)
-
-    with open(os.path.join(out_dir, "gps.csv"), "w") as f:
-        f.write(LOCATION_HEADER + "\n")
-        for fix in gps.fixes:
-            f.write(",".join(str(v) for v in fix) + "\n")
-
-    with open(os.path.join(out_dir, "metrics.json"), "w") as f:
-        json.dump(res, f, indent=2)
-    print(f"\n  Sesión guardada en: {out_dir}")
-
-
-def run_session(args, hello, gps, gps_buf):
-    if gps.wait_reply():
-        print("  GPS:       el teléfono responde por UDP")
-    else:
-        print("  GPS:       el teléfono no responde por UDP; sigue solo con video")
+def run(session, args):
+    """Prepare, run until Ctrl+C or the end, and report. Returns the exit code."""
+    print("  GPS:       el teléfono responde por UDP" if session.gps_ok
+          else "  GPS:       el teléfono no responde por UDP; sigue solo con video")
     print()
-
-    K = hello.camera_matrix()
-    est, scaler = (build_scale_worker(K, args.scale_hz, threaded=True)
-                   if args.scale == "depth" else (None, None))
     t0 = time.perf_counter()
-    warm_up(K, hello.width, hello.height, est)
+    session.prepare()
     print(f"  Precalentamiento: {time.perf_counter() - t0:.1f} s")
-
-    src = LiveFrameSource(args.phone_ip, hello, args.video_port)
-    recorder = TrackRecorder()
-    track = recorder.track
-    pipe = RealtimePipeline(VisualFrontEnd(K, mask_bottom=args.mask_bottom), gps_buf,
-                            strict=True, on_result=recorder, scale_worker=scaler)
 
     def on_sigint(*_):
         # The first Ctrl+C ends the session and still saves it; a second one
         # aborts.
         signal.signal(signal.SIGINT, signal.default_int_handler)
-        src.stop()
+        session.stop()
 
-    stamp = time.strftime("%Y%m%d_%H%M%S")
     stop_status = threading.Event()
-    status = threading.Thread(target=status_loop, daemon=True,
-                              args=(stop_status, src, gps, pipe, scaler))
-    timer = threading.Timer(args.duration, src.stop) if args.duration else None
-    recording = False
-    folder = None
+    status = threading.Thread(target=status_loop, args=(stop_status, session), daemon=True)
     try:
         if args.record:
-            if not gps.command("START"):
-                print("  No se pudo iniciar la grabación en el teléfono.")
-                print("  ¿Está la app en primer plano, en la pantalla de video?")
-                return 1
-            recording = True
-            folder = gps.recording_folder
-            print(f"  Grabando en el teléfono, carpeta {folder}")
+            print("  Grabando también en el teléfono.")
         print("  Ctrl+C para terminar.\n")
         signal.signal(signal.SIGINT, on_sigint)
-        if timer is not None:
-            timer.start()
         status.start()
-        m = pipe.run(src)
+        session.run()
+    except SessionError as e:
+        print(f"  {e}")
+        return 1
     finally:
         signal.signal(signal.SIGINT, signal.default_int_handler)
         stop_status.set()
         if status.is_alive():
             status.join()
-        if timer is not None:
-            timer.cancel()
-        if recording:
-            print("  Grabación detenida en el teléfono." if gps.command("STOP")
+        if session.folder:
+            print(f"  Carpeta de la grabación en el teléfono: {session.folder}")
+        if session.recording_stopped is not None:
+            print("  Grabación detenida en el teléfono." if session.recording_stopped
                   else "  No se pudo detener la grabación: detenerla desde el teléfono.")
 
-    print(f"\n  Sesión terminada: {src.end_reason or 'sin frames nuevos'}.\n")
-    if m.processed == 0:
+    print(f"\n  Sesión terminada: {session.end_reason or 'sin frames nuevos'}.\n")
+    if session.metrics.processed == 0:
         print("  No se procesó ningún frame.")
         return 1
 
-    res = m.summary()
-    print_results(res, True, est, scaler)
-    print_live_results(res, src, gps)
+    res = session.summary()
+    print_results(res, True, session.est, session.scaler)
+    print_live_results(res, session.source, session.gps)
     print_verdict(res["e2e_ms_p95"], res["hz_efectivo"])
-
-    if scaler is not None:
-        res["escala"] = {
-            "enviadas": scaler.n_submitted,
-            "descartadas_cola": scaler.n_dropped[0],
-            "aceptadas": est.n_ok,
-            "falladas": est.n_fail,
-            "fuera_de_rango": est.n_rejected,
-        }
-    transit = src.transit_ms or [float("nan")]
-    res["en_vivo"] = {
-        "telefono": args.phone_ip,
-        "camara": hello._asdict(),
-        "carpeta_telefono": folder,
-        "fin": src.end_reason,
-        "frames_recibidos": src.n_received,
-        "frames_no_enviados": src.n_missing,
-        "jpeg_invalidos": src.n_bad,
-        "captura_llegada_ms_p50": float(np.percentile(transit, 50)),
-        "captura_llegada_ms_p95": float(np.percentile(transit, 95)),
-        "fixes_gps": len(gps.fixes),
-        "udp_invalidos": gps.n_bad,
-        "utm_epsg": gps.epsg,
-        "utm_origen": None if gps.origin is None else gps.origin.tolist(),
-        "mascara_inferior": args.mask_bottom,
-    }
-
-    out_dir = os.path.join(args.out, f"live_{stamp}")
-    save_session(out_dir, track, m, res, gps)
-    plot_trajectory(track, out_dir, "live", metric=scaler is not None)
+    session.save(res)
+    print(f"\n  Sesión guardada en: {session.out_dir}")
     return 0
 
 
@@ -240,9 +151,9 @@ def main():
                     help="Grabar también en el teléfono (START al empezar, STOP al terminar)")
     ap.add_argument("--duration", type=float, default=None,
                     help="Duración de la sesión en segundos; sin esto, hasta Ctrl+C")
-    ap.add_argument("--mask-bottom", type=float, default=0.0,
-                    help="Fracción inferior donde ORB no busca puntos, si se ve el "
-                         "tablero o el capó")
+    ap.add_argument("--mask-bottom", type=float, default=0.25,
+                    help="Fracción inferior donde ORB no busca puntos: el capó y el "
+                         "tablero con el teléfono en el carro (0 si no se ven)")
     ap.add_argument("--scale", choices=["none", "depth"], default="none",
                     help="Fuente de la escala métrica. 'depth' activa el "
                          "estimador monocular en un hilo aparte")
@@ -255,28 +166,30 @@ def main():
     print("MODO EN VIVO")
     print("=" * 78)
 
+    session = LiveSession(args.phone_ip, args.video_port, args.gps_port, args.record,
+                          mask_bottom=args.mask_bottom, scale=args.scale == "depth",
+                          scale_hz=args.scale_hz, duration=args.duration, out=args.out)
     try:
-        hello = read_hello(args.phone_ip, args.video_port)
+        session.connect()
     except OSError as e:
         print(f"  No se pudo leer la cámara del teléfono ({e}).")
-        print("  Revisar: misma red WiFi, IP correcta y la app en la pantalla de video.")
+        print("  Revisar: misma red (WiFi o cable), IP correcta y la app en la pantalla de video.")
+        session.close()
         return 1
+    h = session.hello
     print(f"  Teléfono:  {args.phone_ip}  (video {args.video_port}, GPS {args.gps_port})")
-    print(f"  Cámara:    {hello.width}x{hello.height} a {hello.fps} fps  "
-          f"fx {hello.fx:.2f}  fy {hello.fy:.2f}  cx {hello.cx:.2f}  cy {hello.cy:.2f}")
+    print(f"  Cámara:    {h.width}x{h.height} a {h.fps} fps  "
+          f"fx {h.fx:.2f}  fy {h.fy:.2f}  cx {h.cx:.2f}  cy {h.cy:.2f}")
     if args.mask_bottom > 0:
         print(f"  Máscara inferior (tablero o capó): {args.mask_bottom * 100:.0f}%")
 
-    gps_buf = GpsBuffer()
-    gps = LiveGpsSource(args.phone_ip, gps_buf, args.gps_port)
-    gps.start()
     try:
-        return run_session(args, hello, gps, gps_buf)
+        return run(session, args)
     except KeyboardInterrupt:
         print("\n  Sesión abortada.")
         return 130
     finally:
-        gps.stop()
+        session.close()
 
 
 if __name__ == "__main__":

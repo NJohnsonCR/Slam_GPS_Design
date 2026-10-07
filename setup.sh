@@ -28,20 +28,37 @@ source venv/bin/activate
 # Actualizar pip
 pip install --upgrade pip
 
-# Instalar dependencias de Python
+# Instalar dependencias de Python. Una sola versión de OpenCV: opencv-python y
+# opencv-contrib-python instalan el mismo módulo cv2 y chocan.
 echo "Instalando dependencias de Python..."
 pip install \
     opencv-python \
-    opencv-contrib-python \
     numpy \
     matplotlib \
     scipy \
     psutil \
     pillow \
     torch \
+    transformers \
     pyproj \
     pandas \
     scikit-learn \
     simplekml
+
+# El modelo de profundidad se descarga ahora, con internet: en campo el sistema
+# lo carga desde el disco. También avisa si la GPU no sirve con esta versión de
+# torch (las más recientes no soportan algunas tarjetas viejas).
+echo "Descargando el modelo de profundidad..."
+python - <<'EOF'
+import sys
+import numpy as np
+sys.path.insert(0, "LMS/LMS_RL_ORB_GPS")
+from realtime.depth_scale import DepthScaleEstimator, usable_gpu
+DepthScaleEstimator(np.eye(3), device=-1)
+print("Modelo de profundidad descargado.")
+gpu = usable_gpu()
+print(f"GPU disponible: {gpu}" if gpu else
+      "AVISO: sin GPU utilizable; el modelo de profundidad correrá en la CPU (más lento).")
+EOF
 
 echo "Entorno configurado correctamente."

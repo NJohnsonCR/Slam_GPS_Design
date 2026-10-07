@@ -44,6 +44,17 @@ from pyproj import Transformer
 
 # --------------------------------------------------------------------- GPS
 
+def utm_zone(lat: float, lon: float):
+    """
+    EPSG code and lat/lon -> metres transformer of the UTM zone holding
+    (lat, lon). Each route keeps the zone of its first fix: switching zones
+    mid-route (the 84 W boundary crosses Costa Rica) would make positions
+    jump hundreds of kilometres.
+    """
+    epsg = (32600 if lat >= 0 else 32700) + int((lon + 180) / 6) + 1
+    return epsg, Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
+
+
 class GpsBuffer:
     """
     GPS fix buffer with CAUSAL access.
@@ -187,6 +198,11 @@ class ReplayGpsSource:
 # -------------------------------------------------------------------- live
 
 _HEADER = struct.Struct(">IQQ")     # JPEG length, boot-clock ns, Unix ns
+
+
+# What the Galaxy S23 sends. Its recordings keep fx and fy but not the optical
+# centre, so replay takes the whole line from here.
+HELLO_S23 = "HELLO,1280,720,867.81,868.55,630.75,367.79,30"
 
 
 class Hello(NamedTuple):
@@ -435,14 +451,9 @@ class LiveGpsSource:
             self.n_bad += 1
 
     def _position(self, lat: float, lon: float, alt: float) -> np.ndarray:
-        """Metres relative to the first fix."""
-        # The zone is fixed by the first fix: switching zones mid-route (the
-        # 84 W boundary crosses Costa Rica) would make positions jump.
+        """Metres relative to the first fix, in the first fix's UTM zone."""
         if self._to_utm is None:
-            zone = int((lon + 180) / 6) + 1
-            self.epsg = (32600 if lat >= 0 else 32700) + zone
-            self._to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{self.epsg}",
-                                                always_xy=True)
+            self.epsg, self._to_utm = utm_zone(lat, lon)
         x, y = self._to_utm.transform(lon, lat)
         utm = np.array([x, y, alt])
         if self.origin is None:
@@ -452,14 +463,15 @@ class LiveGpsSource:
 
 # -------------------------------------------------------------------- load
 
-def load_mobile_session(session_dir: str, latlon_to_utm):
+def load_mobile_session(session_dir: str):
     """
     Read a session recorded by the phone app (mobile_data/ format).
 
     Returns (frame_timestamps_ns, gps_fixes), both on the phone's boot clock:
     the first column of each file. The 'Unix time' column of the camera files
     is when the frame reached the app, tens of milliseconds after capture and
-    with jitter, so it must not be used for alignment.
+    with jitter, so it must not be used for alignment. Positions are metres
+    from the first fix, in its UTM zone, as in live mode.
     """
     import os
 
@@ -469,13 +481,12 @@ def load_mobile_session(session_dir: str, latlon_to_utm):
     frame_t = ft["Frame timestamp[nanosec]"].values.astype(np.int64)
 
     loc = pd.read_csv(os.path.join(session_dir, "location.csv"))
-    origin = None
-    fixes = []
-    for _, r in loc.iterrows():
-        utm = latlon_to_utm(r["latitude[degrees]"], r["longitude[degrees]"],
-                            r["altitude[meters]"])
-        if origin is None:
-            origin = utm
-        fixes.append((int(r["Timestamp[nanosecond]"]), utm - origin))
+    lat = loc["latitude[degrees]"].to_numpy(float)
+    lon = loc["longitude[degrees]"].to_numpy(float)
+    _, to_utm = utm_zone(lat[0], lon[0])
+    x, y = to_utm.transform(lon, lat)
+    utm = np.column_stack([x, y, loc["altitude[meters]"].to_numpy(float)])
+    t = loc["Timestamp[nanosecond]"].to_numpy(np.int64)
+    fixes = [(int(ti), p) for ti, p in zip(t, utm - utm[0])]
 
     return frame_t, fixes

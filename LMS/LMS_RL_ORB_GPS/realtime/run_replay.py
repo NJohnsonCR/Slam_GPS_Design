@@ -44,7 +44,6 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from utils.gps.gps_utils import latlon_to_utm
 from realtime.sources import (GpsBuffer, ReplayFrameSource, ReplayGpsSource,
                               load_mobile_session)
 from realtime.pipeline import (DepthScaleWorker, RealtimePipeline, VisualFrontEnd,
@@ -55,6 +54,7 @@ from realtime.pipeline import (DepthScaleWorker, RealtimePipeline, VisualFrontEn
 COLOR_GPS = "#2a78d6"
 COLOR_CAMERA = "#eb6834"
 COLOR_ALIGNED = "#1baf7a"
+COLOR_FUSED = "#b8407f"
 
 
 def mobile_camera_matrix(width: int, height: int, fx: float = 899.0,
@@ -290,7 +290,7 @@ def build_scale_worker(K, rate_hz, threaded):
     print("  Cargando el modelo...", flush=True)
     est = DepthScaleEstimator(K, hist_len=12)
     worker = DepthScaleWorker(est, rate_hz=rate_hz, threaded=threaded)
-    print("  Modelo listo.\n")
+    print(f"  Modelo listo, en {'la GPU ' + est.gpu if est.gpu else 'la CPU (más lento)'}.\n")
     return est, worker
 
 
@@ -340,6 +340,7 @@ def print_results(res, strict, est, worker):
           f"{res['depth_ms_p50']:.0f} / {res['depth_ms_p95']:.0f} ms")
     print(f"     Aceptadas / falladas / fuera de rango físico    : "
           f"{est.n_ok} / {est.n_fail} / {est.n_rejected}")
+    print(f"     Detenido (velocidad 0)       : {est.n_stopped}")
     print(f"     Frames sin escala (arranque) : {res['frames_sin_escala']}")
     v = est.velocity
     print("     Última velocidad estimada    : "
@@ -386,7 +387,7 @@ def main():
     print(f"MODO REPLAY — {'ESTRICTO' if args.strict else 'DETERMINISTA'}")
     print("=" * 78)
 
-    frame_t, fixes = load_mobile_session(args.session, latlon_to_utm)
+    frame_t, fixes = load_mobile_session(args.session)
     # Frames left out at the start: the encoder warm-up, or everything before
     # --start. The source discards the same ones.
     skip = max(args.skip_start,
@@ -459,6 +460,7 @@ def main():
             "aceptadas": est.n_ok,
             "falladas": est.n_fail,
             "fuera_de_rango": est.n_rejected,
+            "detenido": est.n_stopped,
         }
 
     if args.strict:

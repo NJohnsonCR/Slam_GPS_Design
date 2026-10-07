@@ -312,21 +312,38 @@ def ejecutar_lms_rl_orb_gps_auto():
     thread.start()
 # ============================================================================
 
+_realtime_window = None
+
+
+def open_realtime_window(parent):
+    """Open the real-time pipeline window, or bring it forward if it is open."""
+    global _realtime_window
+    if _realtime_window is not None and _realtime_window.winfo_exists():
+        _realtime_window.lift()
+        return
+    if lms_rl_path not in sys.path:
+        sys.path.insert(0, lms_rl_path)
+    # Loaded on demand, so the launcher opens without loading the pipeline.
+    from realtime.live_window import PipelineWindow
+    _realtime_window = tk.Toplevel(parent)
+    PipelineWindow(_realtime_window)
+
+
 def crear_interfaz():
     ventana = tk.Tk()
     ventana.title("Plataforma LMS múltiple")
-    ventana.geometry("800x500")
+    ventana.geometry("800x600")
     ventana.resizable(False, False)
 
     # === Canvas con degradado ===
-    canvas = tk.Canvas(ventana, width=800, height=500)
+    canvas = tk.Canvas(ventana, width=800, height=600)
     canvas.pack(fill="both", expand=True)
 
     # Degradado de #99c2ff a #f0f4f8
-    for i in range(500):
-        r = int(153 + (240 - 153) * (i / 500))  # Red: 153 → 240
-        g = int(194 + (244 - 194) * (i / 500))  # Green: 194 → 244
-        b = int(255 + (248 - 255) * (i / 500))  # Blue: 255 → 248
+    for i in range(600):
+        r = int(153 + (240 - 153) * (i / 600))  # Red: 153 → 240
+        g = int(194 + (244 - 194) * (i / 600))  # Green: 194 → 244
+        b = int(255 + (248 - 255) * (i / 600))  # Blue: 255 → 248
         color = f'#{r:02x}{g:02x}{b:02x}'
         canvas.create_line(0, i, 800, i, fill=color)
 
@@ -342,7 +359,7 @@ def crear_interfaz():
     estilo.configure("TLabel", background="#ffffff", foreground="#333")
 
     frame = tk.Frame(canvas, bg="white", bd=2, relief="ridge")
-    frame.place(relx=0.5, rely=0.5, anchor="center", width=600, height=350)
+    frame.place(relx=0.5, rely=0.5, anchor="center", width=600, height=470)
 
     tk.Label(frame, text="Plataforma LMS múltiple", font=("Helvetica Neue", 20, "bold"), bg="white", fg="#0d47a1").pack(pady=(20, 10))
     tk.Label(frame, text="Seleccione un LMS y un video .mp4 para generar una trayectoria 2D", font=("Segoe UI", 11), bg="white").pack()
@@ -388,6 +405,12 @@ def crear_interfaz():
                     break
         
         boton_rl_orb.grid(row=row_especial, column=0, columnspan=2, padx=15, pady=10, sticky="ew")
+
+    # Pipeline en tiempo real: el video del teléfono o de una grabación, sin consola
+    fila_realtime = (len(lms_normales) + 1) // 2 + (1 if tiene_rl_orb_gps else 0)
+    ttk.Button(frame_botones, text="SLAM GPS con realtime",
+               command=lambda: open_realtime_window(ventana)).grid(
+        row=fila_realtime, column=0, columnspan=2, padx=15, pady=10, sticky="ew")
     # ========================================================================
 
     tk.Label(frame, text="© TEC 2025 | Proyecto SLAM", font=("Segoe UI", 11), bg="white", fg="black").pack(side="bottom", pady=10)

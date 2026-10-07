@@ -20,18 +20,70 @@ THE TRIANGULATION BASELINE IS CRITICAL
     why the estimator compares frames `min_baseline_s` apart, never
     consecutive ones.
 
+A STOPPED CAR
+    With no motion there is nothing to triangulate, and the estimate is noise
+    (0.6-0.9 m/s measured in the car). Between two views ~0.33 s apart, the
+    image motion left after the best pure rotation tells both cases apart:
+    keypoint noise (~1 px) when stopped, even while the phone rocks on a
+    braking car, and parallax when moving. Below 3 m/s two such estimates in a
+    row report 0 m/s; at highway speed a distant scene can look the same, and
+    a car cannot stop that fast anyway.
+
 OFFLINE AND LIVE
     The same class serves both: it is fed frames with timestamps and returns a
     SPEED (m/s) once it has enough baseline. Speed is smooth, so the pipeline
     can hold it between updates.
 """
 
+import os
 import threading
 from collections import deque
 from typing import Optional
 
 import cv2
 import numpy as np
+
+
+def model_cached(model: str) -> bool:
+    """Whether the model is already in the local Hugging Face cache."""
+    home = os.environ.get("HF_HOME") or os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "huggingface")
+    hub = os.environ.get("HF_HUB_CACHE", os.path.join(home, "hub"))
+    snapshots = os.path.join(hub, "models--" + model.replace("/", "--"), "snapshots")
+    return os.path.isdir(snapshots) and bool(os.listdir(snapshots))
+
+
+def usable_gpu() -> Optional[str]:
+    """Name of the GPU if this torch build can run on it, else None."""
+    import torch
+    if not torch.cuda.is_available():
+        return None
+    try:
+        torch.zeros(1, device="cuda") + 1     # recent builds lack kernels for some old GPUs
+    except RuntimeError:
+        return None
+    return torch.cuda.get_device_name(0)
+
+
+def rotation_residual(K, p0, p1, rounds=4):
+    """
+    Median pixel motion between two views that the best pure rotation does
+    not explain. The rotation is refitted on the better half of the points,
+    so moving objects and bad matches drop out.
+    """
+    def bearings(p):
+        b = np.column_stack([p, np.ones(len(p))]) @ np.linalg.inv(K).T
+        return b / np.linalg.norm(b, axis=1, keepdims=True)
+
+    b0, b1 = bearings(p0), bearings(p1)
+    keep = np.ones(len(b0), bool)
+    for _ in range(rounds):
+        U, _, Vt = np.linalg.svd(b0[keep].T @ b1[keep])
+        R = Vt.T @ np.diag([1.0, 1.0, np.sign(np.linalg.det(Vt.T @ U.T))]) @ U.T
+        err = np.linalg.norm(b1 - b0 @ R.T, axis=1)
+        keep = err <= np.median(err)
+    h = (b0 @ R.T) @ K.T
+    return float(np.median(np.linalg.norm(p1 - h[:, :2] / h[:, 2:3], axis=1)))
 
 
 class DepthScaleEstimator:
@@ -52,6 +104,8 @@ class DepthScaleEstimator:
                  max_speed_ms: float = 40.0,
                  smooth_window: int = 7,
                  hist_len: int = 120,
+                 stop_px=(2.0, 3.0),
+                 stop_max_speed: float = 3.0,
                  device: Optional[int] = None,
                  orb=None, matcher=None, lowe_ratio: float = 0.75):
         self.K = camera_matrix
@@ -65,13 +119,26 @@ class DepthScaleEstimator:
         self.max_speed = max_speed_ms
         self._raw = deque(maxlen=smooth_window)
         self.n_rejected = 0
+        # Stop detection: rotation residual (px) to declare a stop and to leave
+        # it, and the speed above which a stop is not believed.
+        self.stop_enter_px, self.stop_leave_px = stop_px
+        self.stop_max_speed = stop_max_speed
+        self.stopped = False
+        self._was_still = False
+        self.n_stopped = 0
 
         self.orb = orb if orb is not None else cv2.ORB_create(2000)
         self.matcher = matcher if matcher is not None else cv2.BFMatcher(cv2.NORM_HAMMING)
 
         if device is None:
-            import torch
-            device = 0 if torch.cuda.is_available() else -1
+            self.gpu = usable_gpu()
+            device = 0 if self.gpu else -1
+        else:
+            self.gpu = usable_gpu() if device >= 0 else None
+        # Without internet the hub is retried for ~1.5 min before the local copy
+        # is used; once the model is downloaded there is nothing to ask.
+        if model_cached(model):
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
         from transformers import pipeline
         self._pipe = pipeline("depth-estimation", model=model, device=device)
 
@@ -117,8 +184,22 @@ class DepthScaleEstimator:
 
         t0, img0, kp0, des0 = previous
         dt = t1 - t0
-        dist = self._metric_distance(img0, kp0, des0, kp1, des1)
-        if dist is None or dt <= 0:
+        pts = self._match(kp0, des0, kp1, des1)
+        if pts is None or dt <= 0:
+            self.n_fail += 1
+            return None
+
+        if self._update_stopped(*pts):
+            # The history before the stop says nothing about the restart.
+            self._raw.clear()
+            with self._lock:
+                self._velocity = 0.0
+                self._last_t = t1
+            self.n_stopped += 1
+            return 0.0
+
+        dist = self._metric_distance(img0, *pts)
+        if dist is None:
             self.n_fail += 1
             return None
 
@@ -145,8 +226,8 @@ class DepthScaleEstimator:
 
     # -------------------------------------------------------------- internal
 
-    def _metric_distance(self, img0, kp0, des0, kp1, des1) -> Optional[float]:
-        """Metres between the two views, or None if not trustworthy."""
+    def _match(self, kp0, des0, kp1, des1):
+        """Matched points of the two views, or None if too few."""
         if des0 is None or des1 is None or len(des0) < 2 or len(des1) < 2:
             return None
 
@@ -157,7 +238,23 @@ class DepthScaleEstimator:
 
         p0 = np.float32([kp0[m.queryIdx].pt for m in good])
         p1 = np.float32([kp1[m.trainIdx].pt for m in good])
+        return p0, p1
 
+    def _update_stopped(self, p0, p1) -> bool:
+        """Whether the car is stopped, with some hysteresis."""
+        residual = rotation_residual(self.K, p0, p1)
+        still = residual < self.stop_enter_px
+        if self.stopped:
+            self.stopped = residual < self.stop_leave_px
+        else:
+            v = self._velocity
+            self.stopped = (still and self._was_still
+                            and (v is None or v < self.stop_max_speed))
+        self._was_still = still
+        return self.stopped
+
+    def _metric_distance(self, img0, p0, p1) -> Optional[float]:
+        """Metres between the two views, or None if not trustworthy."""
         E, _ = cv2.findEssentialMat(p0, p1, self.K, cv2.RANSAC, 0.999, 1.0)
         if E is None or E.shape != (3, 3):
             return None
