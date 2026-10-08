@@ -294,14 +294,19 @@ def build_scale_worker(K, rate_hz, threaded):
     return est, worker
 
 
-def print_verdict(e2e_p95_ms, hz, target_ms=150.0, target_hz=10.0):
-    """Verdict against the real-time objective."""
+def print_verdict(latency_p95_ms, hz, target_ms=150.0, target_hz=10.0,
+                  what="Latencia p95", note=None):
+    """Verdict against the real-time objective; `what` names the latency judged."""
+    w = max(len(what), len("Frecuencia"))
     print("\n" + "=" * 78)
     print(f"OBJETIVO PROPUESTO: latencia p95 < {target_ms:.0f} ms  "
           f"y  ≥ {target_hz:.0f} Hz sostenidos")
-    print(f"  Latencia p95 : {e2e_p95_ms:7.1f} ms   "
-          f"{'CUMPLE' if e2e_p95_ms < target_ms else 'NO CUMPLE'}")
-    print(f"  Frecuencia   : {hz:7.1f} Hz   {'CUMPLE' if hz >= target_hz else 'NO CUMPLE'}")
+    print(f"  {what:<{w}} : {latency_p95_ms:7.1f} ms   "
+          f"{'CUMPLE' if latency_p95_ms < target_ms else 'NO CUMPLE'}")
+    print(f"  {'Frecuencia':<{w}} : {hz:7.1f} Hz   "
+          f"{'CUMPLE' if hz >= target_hz else 'NO CUMPLE'}")
+    for line in (note or "").splitlines():
+        print(f"  {line}")
     print("=" * 78)
 
 

@@ -41,8 +41,9 @@ def status_line(st):
     """One console line from LiveSession.status()."""
     line = (f"  {st['elapsed_s']:4.0f} s | video {st['video_fps']:2.0f} fps, "
             f"faltan {st['missing']:2d} | procesados {st['processed_fps']:2.0f}")
-    if st["latency_ms"] is not None:
-        line += f", latencia {st['latency_ms']:4.0f} ms"
+    # Only the PC's share: the capture time comes from the phone's clock.
+    if st["pc_latency_ms"] is not None:
+        line += f", latencia en la PC {st['pc_latency_ms']:3.0f} ms"
     line += f" | GPS {st.get('gps_fixes', 0)} fix"
     if "fix_age_s" in st:
         line += f" (hace {st['fix_age_s']:3.1f} s, {st['gps_speed']:.1f} m/s)"
@@ -72,16 +73,19 @@ def print_live_results(res, src, gps):
     print(f"  Frames recibidos del teléfono   : {src.n_received}"
           f"  ({src.n_missing} no enviados por el teléfono, "
           f"{100 * src.n_missing / max(sent, 1):.1f}%)")
-    if src.transit_ms:
-        p50, p95 = np.percentile(src.transit_ms, [50, 95])
-        print(f"  Captura → llegada   p50 / p95   : {p50:.0f} / {p95:.0f} ms")
     if "pc_ms_p50" in res:
-        print(f"  Llegada → resultado p50 / p95   : "
-              f"{res['pc_ms_p50']:.0f} / {res['pc_ms_p95']:.0f} ms   (solo la PC)")
-        print(f"  Captura → resultado p50 / p95   : "
+        print(f"  Latencia en la PC   p50 / p95   : "
+              f"{res['pc_ms_p50']:.0f} / {res['pc_ms_p95']:.0f} ms   (llegada → resultado)")
+    if src.transit_ms:
+        # The capture time comes from the phone's clock, whose offset from the
+        # PC's is not measured: a reference, not the real latency.
+        p50, p95 = np.percentile(src.transit_ms, [50, 95])
+        print("  Referencia, desde la captura (reloj del teléfono):")
+        print(f"     Captura → llegada   p50 / p95 : {p50:.0f} / {p95:.0f} ms")
+        print(f"     Captura → resultado p50 / p95 : "
               f"{res['e2e_ms_p50']:.0f} / {res['e2e_ms_p95']:.0f} ms")
-        print("     (la captura usa el reloj del teléfono y el resultado el de la PC:")
-        print("      incluye el desfase entre los dos relojes)")
+        print("     (incluyen el desfase entre los relojes del teléfono y de la PC,")
+        print("      que cambia de un día a otro: no son la latencia real)")
     n = len(gps.fixes)
     span_s = (gps.fixes[-1][0] - gps.fixes[0][0]) / 1e9 if n >= 2 else 0.0
     rate = f"{(n - 1) / span_s:.2f} Hz" if span_s > 0 else "—"
@@ -136,7 +140,9 @@ def run(session, args):
     res = session.summary()
     print_results(res, True, session.est, session.scaler)
     print_live_results(res, session.source, session.gps)
-    print_verdict(res["e2e_ms_p95"], res["hz_efectivo"])
+    print_verdict(res["pc_ms_p95"], res["hz_efectivo"], what="Latencia p95 en la PC",
+                  note="La latencia desde la captura no entra en el veredicto: sin medir el\n"
+                       "desfase entre los relojes del teléfono y de la PC no se puede verificar.")
     session.save(res)
     print(f"\n  Sesión guardada en: {session.out_dir}")
     return 0
