@@ -251,6 +251,8 @@ class PipelineWindow:
     # -------------------------------------------------------------- polling
 
     def _tick_video(self):
+        # Rescheduled first, so an error below cannot stop the video.
+        self._timers["video"] = self.top.after(VIDEO_MS, self._tick_video)
         frame = self.session.latest_frame if self.session is not None else None
         if frame is not None and frame is not self._shown:
             self._shown = frame
@@ -260,19 +262,19 @@ class PipelineWindow:
             self.video.itemconfigure(self._image_item, image=self._photo)
             self.video.itemconfigure(self._idle_text, state="hidden")
             self.frames_shown += 1
-        self._timers["video"] = self.top.after(VIDEO_MS, self._tick_video)
 
     def _tick_status(self):
+        self._timers["status"] = self.top.after(STATUS_MS, self._tick_status)
         if self.worker is not None and self.worker.is_alive():
             if self.session.state in ("detenida", "guardando", "terminada"):
                 self.lines["state"].configure(text="Guardando la sesión…")
             else:
                 self._show_status(self.session.status())
         elif self.outcome is not None:
-            self._report(*self.outcome)
-            self.outcome = None
+            # Controls back before the report: if it fails, they stay usable.
+            outcome, self.outcome = self.outcome, None
             self._set_running(False)
-        self._timers["status"] = self.top.after(STATUS_MS, self._tick_status)
+            self._report(*outcome)
 
     def _show_status(self, st):
         state = st["state"]
@@ -283,7 +285,11 @@ class PipelineWindow:
         if isinstance(self.session, LiveSession):
             video += f", faltan {st['missing']}"
         video += f" | procesados {st['processed_fps']:.0f}"
-        if st["latency_ms"] is not None:
+        # Live, the capture time comes from the phone's clock, which is not in
+        # sync with the PC's: only the PC's share of the latency is reliable.
+        if st["pc_latency_ms"] is not None:
+            video += f" | latencia en la PC {st['pc_latency_ms']:.0f} ms"
+        elif st["latency_ms"] is not None:
             video += f" | latencia {st['latency_ms']:.0f} ms"
         self.lines["video"].configure(text=video)
         if "fix_age_s" in st:
@@ -317,13 +323,16 @@ class PipelineWindow:
             self.result.configure(text=error, foreground="#c0392b")
             return
         self.lines["state"].configure(text=f"Terminada: {self.session.end_reason}")
+        if "pc_ms_p95" in res:
+            latency = f"latencia en la PC p95 {res['pc_ms_p95']:.0f} ms"
+        else:
+            latency = f"latencia p95 {res['e2e_ms_p95']:.0f} ms"
         self.lines["video"].configure(
-            text=f"{res['frames_procesados']} frames procesados "
-                 f"({res['tasa_descarte_%']:.1f} % descartados), latencia p95 "
-                 f"{res['e2e_ms_p95']:.0f} ms")
+            text=f"{res['frames_procesados']} procesados "
+                 f"({res['tasa_descarte_%']:.1f} % descartados), {latency}")
         if isinstance(self.session, LiveSession):
-            folder = self.session.folder
-            self.lines["source"].configure(text=f"Grabó en el teléfono: {folder}" if folder
+            phone = self.session.folder
+            self.lines["source"].configure(text=f"Grabó en el teléfono: {phone}" if phone
                                            else "Sin grabar en el teléfono")
         self.result.configure(text=f"Sesión guardada en {os.path.relpath(folder, _ROOT)}",
                               foreground="")

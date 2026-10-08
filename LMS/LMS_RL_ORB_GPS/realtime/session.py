@@ -161,6 +161,9 @@ class PipelineSession:
             "missing": now[2] - prev[2],
             "processed_fps": processed / span,
             "latency_ms": float(np.median(m.e2e_ms[-processed:])) if processed else None,
+            # Live only: arrival -> result, on the PC clock alone.
+            "pc_latency_ms": (float(np.median(m.pc_ms[-processed:]))
+                              if processed and m.pc_ms else None),
             "camera_speed": self.scaler.velocity if self.scaler is not None else None,
             "stopped": bool(self.est.stopped) if self.est is not None else None,
         })
