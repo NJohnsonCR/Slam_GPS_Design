@@ -149,6 +149,10 @@ class PlanarEKF:
     BIAS_RW = np.radians(0.003)     # rad/s per sqrt(s)
     ACCEL_RW = 1.0                  # m/s per sqrt(s): Doppler, from 1 to 10 s apart
     STOP_SIGMA = 0.5                # m/s: Doppler while the stop gate says stopped (p95 ~1)
+    # A held scale differs from the one the next stretch needs by ~18 % (median
+    # 16-19 % over 10 s outages): that share of the distance driven since it
+    # was held is uncertain along the way.
+    HELD_SCALE_ERR = 0.18
     GATE_2D, GATE_1D = 13.8, 10.8   # chi-square at 99.9 %
     # Physical range of s. Measured 0.3-3.3; beyond it the camera speed is a
     # failure of the depth model, not a scale.
@@ -165,6 +169,7 @@ class PlanarEKF:
         self.x = np.array(state, float)
         self.P = np.diag(np.square(sig))
         self.innovation = None          # of the last update: measured minus predicted
+        self._held_m = 0.0              # metres driven with the scale held
 
     @property
     def speed_state(self):
@@ -174,7 +179,10 @@ class PlanarEKF:
         """
         One frame: dt seconds, the yaw and its variance (from the gyroscope or
         the camera) and, without the speed state, the camera step in metres.
-        hold_scale keeps s from drifting (see update_camera_speed).
+        hold_scale keeps s from drifting (see update_camera_speed); the error
+        of the held scale then grows the uncertainty along the way, in
+        proportion to the distance driven, so the filter's sigma follows the
+        real error when the GPS comes back.
         """
         n, i = len(self.x), self.i
         th, s = self.x[2], self.x[3]
@@ -204,8 +212,15 @@ class PlanarEKF:
         g = np.zeros(n)
         g[:3] = -0.5 * d * sn, 0.5 * d * c, 1.0
         Q += yaw_var * np.outer(g, g)
-        if not (hold_scale and self.speed_state):
+        if hold_scale and self.speed_state:
+            # Variance of HELD_SCALE_ERR times the distance held, which grows
+            # by this much in this step.
+            d0, d1 = self._held_m, self._held_m + abs(d)
+            Q[:2, :2] += self.HELD_SCALE_ERR ** 2 * (d1 ** 2 - d0 ** 2) * np.outer([c, sn], [c, sn])
+            self._held_m = d1
+        else:
             Q[3, 3] += (self.SCALE_RW * s) ** 2 * dt
+            self._held_m = 0.0
 
         self.x[0] += d * c
         self.x[1] += d * sn
@@ -241,10 +256,11 @@ class PlanarEKF:
         self.P = A @ self.P @ A.T + K @ Rm @ K.T      # Joseph form, stays symmetric
         return status, nis
 
-    def update_position(self, xy, lag_s, v_cam, force=False):
+    def position_innovation(self, xy, lag_s, v_cam):
         """
-        A fix taken lag_s seconds before the current state; the car's motion
-        since then is taken back out of the prediction.
+        Fix minus prediction, for a fix taken lag_s seconds before the current
+        state: the car's motion since then is taken back out of the
+        prediction. Also returns the measurement Jacobian.
         """
         th, s = self.x[2], self.x[3]
         u = np.array([np.cos(th), np.sin(th)])
@@ -257,8 +273,11 @@ class PlanarEKF:
             H[:, 3] = -lag_s * v_cam * u
         H[:, :2] = np.eye(2)
         H[:, 2] = -back * np.array([-u[1], u[0]])
-        return self._update(np.asarray(xy) - (self.x[:2] - back * u), H,
-                            np.eye(2) * self.GPS_SIGMA_M ** 2, self.GATE_2D, force)
+        return np.asarray(xy) - (self.x[:2] - back * u), H
+
+    def update_position(self, xy, lag_s, v_cam, force=False):
+        innov, H = self.position_innovation(xy, lag_s, v_cam)
+        return self._update(innov, H, np.eye(2) * self.GPS_SIGMA_M ** 2, self.GATE_2D, force)
 
     def update_speed(self, v_gps, v_cam, force=False):
         """Doppler: the speed itself, or s times the camera speed without it."""
@@ -328,6 +347,10 @@ class GpsCameraFusion:
     INIT_METRES = 20.0
     HISTORY_S = 30.0
     MAX_REJECTED = 2        # a GPS jump is taken as such at most twice in a row
+    # ...unless it is farther than the car could have driven, at ~144 km/h,
+    # since the last fix that agreed with the prediction: then it is never
+    # forced, however long it lasts.
+    V_MAX = 40.0            # m/s
     CAMERA_PERIOD_S = 1.0   # the camera speed as a measurement, at the rate its noise was measured
     # Without a fix for this long, s is held: only the GPS sees the scale
     # change. Between the camera and Doppler it changes ~50 % within 5 s and
@@ -347,6 +370,7 @@ class GpsCameraFusion:
         self._anchor = None
         self._next_camera = None
         self._last_fix = None                     # t_ns of the last fix delivered
+        self._last_agreed = None                  # t_ns of the last fix that agreed with the prediction
         self._rejected = {"pos": 0, "speed": 0, "course": 0}
         self.n_gyro = self.n_camera_yaw = 0       # frames turned by each sensor
         self.log = []                             # (t_ns, kind, status, nis, innovation)
@@ -409,7 +433,16 @@ class GpsCameraFusion:
         if self.visual_only:
             return
 
-        self._apply("pos", self.ekf.update_position, xy, (self.t_ns - t_ns) / 1e9, self.v_cam)
+        lag = (self.t_ns - t_ns) / 1e9
+        jump = np.linalg.norm(self.ekf.position_innovation(xy, lag, self.v_cam)[0])
+        agrees = jump <= 3 * PlanarEKF.GPS_SIGMA_M
+        reach = self.V_MAX * (self.t_ns - self._last_agreed) / 1e9 + 3 * PlanarEKF.GPS_SIGMA_M
+        status = self._apply("pos", self.ekf.update_position, xy, lag, self.v_cam,
+                             may_force=jump <= reach)
+        # A fix taken with a large innovation (after an outage) may be the wrong
+        # one, so only a fix that agreed with the prediction moves the reach.
+        if status != "rejected" and agrees:
+            self._last_agreed = self.t_ns
 
         if self.speed_state:
             self._apply("speed", self.ekf.update_speed, speed, self.v_cam)
@@ -431,11 +464,13 @@ class GpsCameraFusion:
                 self._apply("course", self.ekf.update_course,
                             np.arctan2(chord[1], chord[0]), turned, dist)
 
-    def _apply(self, kind, update, *args):
-        """Run one update, forcing it after MAX_REJECTED rejections in a row."""
-        status, nis = update(*args, force=self._rejected[kind] >= self.MAX_REJECTED)
+    def _apply(self, kind, update, *args, may_force=True):
+        """Run one update, forcing it after MAX_REJECTED rejections in a row. Returns its status."""
+        force = may_force and self._rejected[kind] >= self.MAX_REJECTED
+        status, nis = update(*args, force=force)
         self._rejected[kind] = self._rejected[kind] + 1 if status == "rejected" else 0
         self.log.append((self.t_ns, kind, status, nis, self.ekf.innovation))
+        return status
 
     def _try_start(self, t_ns, xy, speed):
         if speed < self.INIT_SPEED:
@@ -454,7 +489,7 @@ class GpsCameraFusion:
             speed = self.v_cam
         self.ekf = PlanarEKF(xy[0], xy[1], wrap(heading),
                              speed=speed if self.speed_state else None, bias=self.gyro and self.bias)
-        self._next_camera = self.t_ns
+        self._next_camera = self._last_agreed = self.t_ns
 
     def _yaw_at(self, t_ns):
         ts, ys = zip(*self._yaw_hist)
