@@ -9,12 +9,14 @@ session) and the recording made by the app, and measures:
     heading   accumulated heading error, split into stopped and moving time
     shape     ATE after a rigid horizontal alignment, and drift from a common
               start anchored at the first metres of motion
-    fusion    with --fusion, the GPS + camera filter against the fixes it had
-              not seen yet, and during simulated GPS outages (--outage)
+    fusion    with --fusion, the filter (camera, gyroscope and GPS) against the
+              fixes it had not seen yet, and during simulated GPS outages
+              (--outage); --sweep compares its variants on an outage every 10 s
 
 The phone GPS is not ground truth (several metres of error), but outdoors it
-is a fair reference for shape and distance. The gyroscope is only a measuring
-instrument: it never enters the system.
+is a fair reference for shape and distance. The gyroscope measures the
+camera's rotation; in the fusion it also gives the heading, so there the
+reference is the GPS after each simulated outage.
 
 Usage:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.evaluate \
@@ -25,9 +27,15 @@ Usage:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.evaluate \
         resultados/realtime/mask_vote_14_05/frames_deterministic_metric.csv \
         --recording mobile_data/2026_09_30_14_05_19 --fusion --outage 120 30
+
+    # the variants of the filter, on outages of 10 to 120 s every 10 s
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.evaluate \
+        resultados/realtime/full_14_05_compuerta/frames_deterministic_metric.csv \
+        --recording mobile_data/2026_09_30_14_05_19 --sweep
 """
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -44,7 +52,8 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from realtime.fusion import GpsCameraFusion, PlanarEKF, run_fusion, session_inputs
+from realtime.fusion import (GpsCameraFusion, PlanarEKF, feed_frame, gyro_inputs, run_fusion,
+                             session_inputs)
 from realtime.sources import utm_zone
 from realtime.run_replay import (COLOR_ALIGNED, COLOR_CAMERA, COLOR_FUSED, COLOR_GPS,
                                  camera_positions, umeyama)
@@ -54,6 +63,18 @@ WINDOW_S = 0.5              # the gyro fit needs windows: per frame, VO noise ~ 
 SPEED_BANDS = (0, 2, 4, 6, 8, 10, 12, 14, 18, 25)
 ANCHOR_SPEED = 3.0          # m/s: anchor where the car is clearly moving
 ANCHOR_METRES = 20.0        # GPS course measured over this distance
+# The filter's variants that --sweep compares; the first is the filter as it
+# was before the gyroscope. FUSION is the one used everywhere else.
+VARIANTS = (
+    ("cámara, sin velocidad como estado", dict(gyro=False, speed_state=False, bias=False)),
+    ("cámara, con velocidad como estado", dict(gyro=False, speed_state=True, bias=False)),
+    ("giroscopio, sin velocidad como estado", dict(gyro=True, speed_state=False, bias=False)),
+    ("giroscopio + sesgo, sin velocidad como estado", dict(gyro=True, speed_state=False, bias=True)),
+    ("giroscopio, con velocidad como estado", dict(gyro=True, speed_state=True, bias=False)),
+    ("giroscopio + sesgo, con velocidad como estado", dict(gyro=True, speed_state=True, bias=True)),
+)
+FUSION = dict(gyro=True, speed_state=True, bias=False)
+SWEEP_LENGTHS = (10, 20, 30, 60, 120)
 
 
 # ------------------------------------------------------------------- loading
@@ -319,28 +340,63 @@ def before_each(t, est, t_query):
     return np.where((k >= 0)[:, None], est[np.maximum(k, 0), :2], np.nan)
 
 
-def evaluate_fusion(frames_path, rec_dir, outages=()):
+def fusion_inputs(frames_path, rec_dir):
     """
-    The fusion measured against fixes it had not used yet: the position it
-    predicts just before each one, the camera alone from the same start (the
-    GPS cut right after starting) and each simulated outage, given as (start,
-    length) in seconds from the first frame.
+    What the filter is fed: frame times, the camera inputs, the fixes as
+    (t_ns, xy, speed), the same fixes as arrays and the gyroscope's yaw per
+    frame (None if the recording has no gyro_accel.csv).
     """
     t, R, tv, s = load_frames(frames_path)
     tg, xy, _, vd = load_gps(rec_dir, t[0], t[-1])
-    ts, tgs = (t - t[0]) / 1e9, (tg - t[0]) / 1e9
-    inputs = session_inputs(R, tv, s)
+    imu = load_imu(rec_dir)
+    gyro_yaw = None if imu is None else gyro_inputs(*imu, t)
     fixes = [(int(a), b, float(c)) for a, b, c in zip(tg, xy, vd)]
-    fus, est, sig = run_fusion(t, inputs, fixes)
+    return t, session_inputs(R, tv, s), fixes, (tg, xy, vd), gyro_yaw
+
+
+def drift_from(t, est, k0, tg, xy):
+    """Distance to the GPS of a run that used it only to start, at frame k0."""
+    after = tg > t[k0]
+    drift = np.linalg.norm(before_each(t, est, tg[after]) - xy[after], axis=1)
+    t_after = (tg[after] - t[k0]) / 1e9
+    travelled = np.sum(np.linalg.norm(np.diff(xy[after], axis=0), axis=1))
+    return {"deriva_m": {f"{m}s": float(np.interp(m, t_after, drift))
+                         for m in (30, 60, 120) if t_after[-1] >= m},
+            "deriva_final_m": float(drift[-1]),
+            "deriva_final_pct": float(100 * drift[-1] / max(travelled, 1e-9))}
+
+
+def evaluate_fusion(frames_path, rec_dir, outages=(), modes=FUSION):
+    """
+    The fusion measured against fixes it had not used yet: the position it
+    predicts just before each one, the visual modes from the same start (the
+    GPS cut right after starting: camera alone, and camera with gyroscope)
+    and each simulated outage, given as (start, length) in seconds from the
+    first frame.
+    """
+    t, inputs, fixes, (tg, xy, vd), gyro_yaw = fusion_inputs(frames_path, rec_dir)
+    ts, tgs = (t - t[0]) / 1e9, (tg - t[0]) / 1e9
+
+    def run(**kw):
+        return run_fusion(t, inputs, fixes, **{"gyro_yaw": gyro_yaw, **modes, **kw})
+
+    fus, est, sig = run()
     ready = np.flatnonzero(np.isfinite(est[:, 0]))
     if not len(ready):
         return None
     k0 = ready[0]
-    out = {"inicio_s": float(ts[k0]), "s_final": float(est[-1, 3]),
-           "s_p5_p95": np.percentile(est[ready, 3], [5, 95]).tolist()}
+    out = {"modo": dict(modes, gyro=fus.gyro), "inicio_s": float(ts[k0]),
+           "s_final": float(est[-1, 3]), "s_p5_p95": np.percentile(est[ready, 3], [5, 95]).tolist()}
+    if fus.n_gyro + fus.n_camera_yaw:
+        out["frames_con_giroscopio_pct"] = 100 * fus.n_gyro / (fus.n_gyro + fus.n_camera_yaw)
+    if "b" in fus.ekf.i:
+        b = np.degrees(est[ready, 5])
+        out["sesgo_final_deg_s"] = float(b[-1])
+        out["sesgo_p5_p95_deg_s"] = np.percentile(b, [5, 95]).tolist()
 
     out["correcciones"] = {}
-    for kind, label in (("pos", "posicion"), ("speed", "velocidad"), ("course", "curso")):
+    for kind, label in (("pos", "posicion"), ("speed", "velocidad"), ("course", "curso"),
+                        ("camera", "camara"), ("stop", "alto")):
         rows = [r for r in fus.log if r[1] == kind and r[2] != "out_of_range"]
         out["correcciones"][label] = {
             "n": len(rows),
@@ -350,7 +406,7 @@ def evaluate_fusion(frames_path, rec_dir, outages=()):
             "nis_medio": float(np.mean([r[3] for r in rows])) if rows else None}
 
     # What the course between fixes adds: the same run without it.
-    _, plain, plain_sig = run_fusion(t, inputs, fixes, use_course=False)
+    _, plain, plain_sig = run(use_course=False)
     both = np.isfinite(est[:, 2]) & np.isfinite(plain[:, 2])
     diff = np.degrees(np.abs(np.angle(np.exp(1j * (est[both, 2] - plain[both, 2])))))
     out["rumbo_con_y_sin_curso"] = {
@@ -364,16 +420,13 @@ def evaluate_fusion(frames_path, rec_dir, outages=()):
     out["prediccion_p50_m"] = float(np.median(pred_err))
     out["prediccion_p95_m"] = float(np.percentile(pred_err, 95))
 
-    # The camera alone: the same start, and no GPS after it.
-    _, cam, _ = run_fusion(t, inputs, fixes, outages=[(t[k0] + 1, t[-1] + 1)])
-    after = tg > t[k0]
-    drift = np.linalg.norm(before_each(t, cam, tg[after]) - xy[after], axis=1)
-    travelled = np.sum(np.linalg.norm(np.diff(xy[after], axis=0), axis=1))
-    out["camara_sola"] = {
-        "deriva_m": {f"{m}s": float(np.interp(m, tgs[after] - ts[k0], drift))
-                     for m in (30, 60, 120) if tgs[after][-1] - ts[k0] >= m},
-        "deriva_final_m": float(drift[-1]),
-        "deriva_final_pct": float(100 * drift[-1] / max(travelled, 1e-9))}
+    # The visual-only modes: the same start, and no GPS after it.
+    _, cam, _ = run(visual_only=True, gyro_yaw=None)
+    out["camara_sola"] = drift_from(t, cam, k0, tg, xy)
+    cam_gyro = None
+    if gyro_yaw is not None:
+        _, cam_gyro, _ = run(visual_only=True, gyro=True)
+        out["camara_giroscopio"] = drift_from(t, cam_gyro, k0, tg, xy)
 
     cuts, curves = [], []
     for start, length in outages:
@@ -383,7 +436,7 @@ def evaluate_fusion(frames_path, rec_dir, outages=()):
         if t_from < t[k0] or i0 < 1 or i_end >= len(tg):
             print(f"  (corte en el segundo {start:.0f}: fuera del tramo con fusión, se omite)")
             continue
-        _, cut, _ = run_fusion(t, inputs, fixes, outages=[(t_from, t_to)])
+        _, cut, _ = run(outages=[(t_from, t_to)])
         idx = np.arange(i0 + 1, i_end + 1)
         hold, carried = gps_alone(tg, xy, vd, i0, tg[idx])
         errs = [np.linalg.norm(p - xy[idx], axis=1)
@@ -401,10 +454,73 @@ def evaluate_fusion(frames_path, rec_dir, outages=()):
     stopped = np.interp(ts, tgs, vd) < STOP_SPEED
     vcam_fix = np.interp(tg, t, np.r_[0.0, inputs[1][1:] / np.diff(ts)])
     ok = (vd >= GpsCameraFusion.MIN_SPEED) & (vcam_fix > 0)
-    out["_fus"] = {"t": ts, "est": est, "sig": sig, "gps": xy, "cam": cam, "k0": k0,
-                   "ratio": (tgs[ok], vd[ok] / vcam_fix[ok]),
+    out["_fus"] = {"t": ts, "est": est, "sig": sig, "gps": xy, "cam": cam, "cam_gyro": cam_gyro,
+                   "k0": k0, "ratio": (tgs[ok], vd[ok] / vcam_fix[ok]),
                    "pred": (np.array([(r[0] - t[0]) / 1e9 for r in pos]), pred_err),
                    "curves": curves, "stops": stopped_spans(ts, stopped)}
+    return out
+
+
+def sweep_outages(t, inputs, fixes, gyro_yaw=None, lengths=SWEEP_LENGTHS, every_s=10.0, **modes):
+    """
+    A simulated GPS outage every every_s seconds and of each length, all along
+    the session: the error when the GPS returns, and that of the GPS carried
+    at its last speed. Each outage continues a copy of the run with GPS from
+    its start: the same filter as run_fusion(outages=...), at a fraction of
+    the cost.
+    """
+    tg = np.array([f[0] for f in fixes], np.int64)
+    xy = np.array([f[1] for f in fixes])
+    vd = np.array([f[2] for f in fixes])
+    if gyro_yaw is None:
+        modes["gyro"] = False
+    fus = GpsCameraFusion(**modes)
+    found = {length: [] for length in lengths}
+    every, next_t, j = int(every_s * 1e9), None, 0
+    for k in range(len(t)):
+        if fus.ready:
+            next_t = t[k] + every if next_t is None else next_t
+            if t[k] >= next_t:
+                log, fus.log = fus.log, []          # the copies need no history
+                for length in lengths:
+                    r = _outage(copy.deepcopy(fus), k, j, next_t, length, t, inputs, gyro_yaw,
+                                fixes, tg, xy, vd)
+                    if r is not None:
+                        found[length].append(r)
+                fus.log = log
+                next_t += every
+        j = feed_frame(fus, k, t, inputs, gyro_yaw, fixes, j)
+    return found
+
+
+def _outage(fus, k, j, t_from, length, t, inputs, gyro_yaw, fixes, tg, xy, vd):
+    """One outage of sweep_outages, continued from frame k; None past the last fix."""
+    t_to = t_from + int(length * 1e9)
+    i0 = np.searchsorted(tg, t_from) - 1                # last fix before the outage
+    i_end = np.searchsorted(tg, t_to, side="right")     # first fix after it
+    if i0 < 1 or i_end >= len(tg):
+        return None
+    while k < len(t) and t[k] < tg[i_end]:
+        j = feed_frame(fus, k, t, inputs, gyro_yaw, fixes, j, [(t_from, t_to)])
+        k += 1
+    _, carried = gps_alone(tg, xy, vd, i0, tg[[i_end]])
+    return {"inicio_s": float((t_from - t[0]) / 1e9),
+            "error_m": float(np.linalg.norm(fus.ekf.x[:2] - xy[i_end])),
+            "error_gps_velocidad_constante_m": float(np.linalg.norm(carried[0] - xy[i_end])),
+            "recorrido_m": float(np.sum(np.linalg.norm(np.diff(xy[i0:i_end + 1], axis=0), axis=1)))}
+
+
+def summarize_sweep(found):
+    """Per length: p50 and p90 of both errors, and how often the filter wins."""
+    out = {}
+    for length, rows in found.items():
+        e = np.array([r["error_m"] for r in rows])
+        c = np.array([r["error_gps_velocidad_constante_m"] for r in rows])
+        out[f"{length}s"] = {"n": len(rows),
+                             "p50_m": float(np.median(e)), "p90_m": float(np.percentile(e, 90)),
+                             "gps_velocidad_constante_p50_m": float(np.median(c)),
+                             "gps_velocidad_constante_p90_m": float(np.percentile(c, 90)),
+                             "gana_pct": float(100 * np.mean(e < c))}
     return out
 
 
@@ -513,22 +629,35 @@ def plot_report(r, png, title):
 
 
 def print_fusion_report(rf):
-    print("\nFUSIÓN (filtro de Kalman con la cámara y el GPS)")
+    m = rf["modo"]
+    sensors = "la cámara, el giroscopio y el GPS" if m["gyro"] else "la cámara y el GPS"
+    print(f"\nFUSIÓN (filtro de Kalman con {sensors}; velocidad como estado: "
+          f"{'sí' if m['speed_state'] else 'no'}; sesgo del giroscopio: "
+          f"{'sí' if m['gyro'] and m['bias'] else 'no'})")
     print(f"  Arranca en el segundo {rf['inicio_s']:.0f}, con el primer rumbo del GPS "
           f"({GpsCameraFusion.INIT_METRES:.0f} m en movimiento)")
+    if m["gyro"] and "frames_con_giroscopio_pct" in rf:
+        print(f"  Frames girados con el giroscopio: {rf['frames_con_giroscopio_pct']:.1f} % "
+              f"(el resto, con la cámara)")
     lo, hi = rf["s_p5_p95"]
     print(f"  Factor de escala s: {rf['s_final']:.2f} al final; entre {lo:.2f} y {hi:.2f} (p5-p95)")
+    if "sesgo_final_deg_s" in rf:
+        lo, hi = rf["sesgo_p5_p95_deg_s"]
+        print(f"  Sesgo del giroscopio: {rf['sesgo_final_deg_s']:+.3f}°/s al final; "
+              f"entre {lo:+.3f} y {hi:+.3f} (p5-p95)")
     c = rf["correcciones"]
     print("  Correcciones aceptadas / rechazadas / forzadas tras dos rechazos")
-    print("  (NIS medio; lo esperado es 2, 1 y 1):")
+    print("  (NIS medio; lo esperado es 2 en posición y 1 en las demás):")
+    names = (("posición", "posicion"), ("velocidad", "velocidad"), ("curso", "curso"),
+             ("cámara", "camara"), ("alto", "alto"))
     print("     " + " | ".join(
-        f"{name} {v['n'] - v['rechazadas'] - v['forzadas']} / {v['rechazadas']} / {v['forzadas']}"
-        + (f" ({v['nis_medio']:.2f})" if v["nis_medio"] is not None else "")
-        for name, v in (("posición", c["posicion"]), ("velocidad", c["velocidad"]),
-                        ("curso", c["curso"]))))
-    if c["velocidad"]["fuera_de_rango"]:
+        f"{name} {c[k]['n'] - c[k]['rechazadas'] - c[k]['forzadas']} / {c[k]['rechazadas']} / "
+        f"{c[k]['forzadas']}" + (f" ({c[k]['nis_medio']:.2f})" if c[k]["nis_medio"] is not None else "")
+        for name, k in names if c[k]["n"]))
+    out_of_range = c["velocidad"]["fuera_de_rango"] + c["camara"]["fuera_de_rango"]
+    if out_of_range:
         print(f"     Velocidades de la cámara fuera de rango (implicaban s fuera de "
-              f"{PlanarEKF.S_RANGE[0]}-{PlanarEKF.S_RANGE[1]}): {c['velocidad']['fuera_de_rango']}")
+              f"{PlanarEKF.S_RANGE[0]}-{PlanarEKF.S_RANGE[1]}), sin usar: {out_of_range}")
     h = rf["rumbo_con_y_sin_curso"]
     print(f"  Rumbo con y sin el curso del GPS: difiere {h['diferencia_p50_deg']:.1f}° (p50), "
           f"{h['diferencia_p95_deg']:.1f}° (p95), {h['diferencia_max_deg']:.1f}° como máximo; "
@@ -536,16 +665,49 @@ def print_fusion_report(rf):
           f"{h['incertidumbre_p50_sin_deg']:.1f}° sin él (p50)")
     print(f"  Distancia entre la predicción y cada fix nuevo: p50 {rf['prediccion_p50_m']:.1f} m, "
           f"p95 {rf['prediccion_p95_m']:.1f} m")
-    cs = rf["camara_sola"]
-    marks = ", ".join(f"{k}: {v:.0f} m" for k, v in cs["deriva_m"].items())
-    print(f"  Cámara sola desde el mismo inicio: {marks}; al final {cs['deriva_final_m']:.0f} m "
-          f"({cs['deriva_final_pct']:.0f} % de lo recorrido)")
+    for key, name in (("camara_sola", "Cámara sola"), ("camara_giroscopio", "Cámara y giroscopio")):
+        if key in rf:
+            cs = rf[key]
+            marks = ", ".join(f"{k}: {v:.0f} m" for k, v in cs["deriva_m"].items())
+            print(f"  {name} desde el mismo inicio, sin GPS: {marks}; al final "
+                  f"{cs['deriva_final_m']:.0f} m ({cs['deriva_final_pct']:.0f} % de lo recorrido)")
     for cut in rf["cortes"]:
         print(f"  Corte de GPS en el segundo {cut['inicio_s']:.0f} ({cut['duracion_s']:.0f} s, "
               f"{cut['recorrido_m']:.0f} m recorridos). Error al volver el GPS:")
         print(f"     fusión {cut['error_fusion_m']:.1f} m | GPS a velocidad constante "
               f"{cut['error_gps_velocidad_constante_m']:.1f} m | GPS congelado "
               f"{cut['error_gps_congelado_m']:.1f} m")
+
+
+def run_sweep(frames_path, rec_dir):
+    """sweep_outages for every variant the recording allows (the gyro ones need gyro_accel.csv)."""
+    t, inputs, fixes, _, gyro_yaw = fusion_inputs(frames_path, rec_dir)
+    out = {}
+    for name, modes in VARIANTS:
+        if modes["gyro"] and gyro_yaw is None:
+            continue
+        found = sweep_outages(t, inputs, fixes, gyro_yaw if modes["gyro"] else None, **modes)
+        out[name] = summarize_sweep(found)
+    return out
+
+
+def print_sweep(sw):
+    first = next(iter(sw.values()))
+    lengths = list(first)
+    width = max(len(name) for name in sw) + 2
+    print("\nBARRIDO DE CORTES DE GPS (uno cada 10 s, en toda la grabación; "
+          "error al volver el GPS, p50 / p90)")
+    print("  " + "".ljust(width) + "".join(f"| {f'corte de {L}':>17s} " for L in lengths))
+    for name, rows in sw.items():
+        print("  " + name.ljust(width)
+              + "".join(f"| {rows[L]['p50_m']:6.1f} / {rows[L]['p90_m']:5.1f} m " for L in lengths))
+    print("  " + "GPS a velocidad constante".ljust(width)
+          + "".join(f"| {first[L]['gps_velocidad_constante_p50_m']:6.1f} / "
+                    f"{first[L]['gps_velocidad_constante_p90_m']:5.1f} m " for L in lengths))
+    print("  Cortes en que le gana a la velocidad constante:")
+    for name, rows in sw.items():
+        print("     " + name.ljust(width) + "   ".join(f"{L}: {rows[L]['gana_pct']:3.0f} %" for L in lengths))
+    print("  Cortes por duración: " + ", ".join(f"{L}: {first[L]['n']}" for L in lengths))
 
 
 def plot_fusion(rf, png, title):
@@ -566,6 +728,9 @@ def plot_fusion(rf, png, title):
     a.plot(f["gps"][:, 0], f["gps"][:, 1], "-", lw=2, color=COLOR_GPS, label="GPS del teléfono")
     a.plot(f["cam"][:, 0], f["cam"][:, 1], "--", lw=1.6, color=COLOR_CAMERA,
            label="Cámara sola, desde el mismo inicio")
+    if f["cam_gyro"] is not None:
+        a.plot(f["cam_gyro"][:, 0], f["cam_gyro"][:, 1], "-.", lw=1.6, color=COLOR_ALIGNED,
+               label="Cámara y giroscopio, desde el mismo inicio")
     a.plot(est[:, 0], est[:, 1], "-", lw=1.4, color=COLOR_FUSED, label="Fusión")
     for i, c in enumerate(f["curves"]):
         a.plot(c["track"][:, 0], c["track"][:, 1], ":", lw=3, color=COLOR_FUSED,
@@ -628,6 +793,9 @@ def main():
                     metavar=("INICIO", "DURACION"),
                     help="Simular un corte de GPS (segundos desde el primer frame); "
                          "se puede repetir. Implica --fusion")
+    ap.add_argument("--sweep", action="store_true",
+                    help="Comparar las variantes del filtro con un corte de GPS cada 10 s, "
+                         "de 10, 20, 30, 60 y 120 s, en toda la grabación")
     args = ap.parse_args()
 
     r = evaluate(args.frames, args.recording)
@@ -649,6 +817,10 @@ def main():
             plot_fusion(rf, png_f, f"Fusión — {name}")
             r["fusion"] = {k: v for k, v in rf.items() if not k.startswith("_")}
             print(f"\n  Gráfico de la fusión: {png_f}", end="")
+
+    if args.sweep:
+        r["barrido"] = run_sweep(args.frames, args.recording)
+        print_sweep(r["barrido"])
 
     with open(os.path.join(out_dir, "evaluation.json"), "w") as f:
         json.dump({k: v for k, v in r.items() if not k.startswith("_")}, f, indent=2)
