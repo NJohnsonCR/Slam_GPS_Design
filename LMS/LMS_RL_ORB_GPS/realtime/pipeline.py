@@ -3,9 +3,10 @@ Real-time pipeline: threads, queues and latency measurement.
 
     [capture thread] --queue of 1, drops oldest--> [processing thread]
     [GPS thread]     --causal circular buffer---->        |
+    [IMU samples]    --taken once, in order------>        |
     [depth thread]   --speed (m/s), ~3 Hz-------->        |
                                                           v
-                                             [metrics: latency, Hz, drops]
+                                  [fusion (EKF)] -> [metrics: latency, Hz, drops]
 
 WHY THREADS AND NOT A SINGLE LOOP
     The camera produces a frame every 33 ms whether it is being served or not.
@@ -25,6 +26,11 @@ WHY METRIC SCALE RUNS IN ITS OWN THREAD
     SPEED, and vehicle speed is smooth. Estimating it at ~3 Hz and holding it
     between updates is enough while the camera keeps supplying direction at
     30 Hz. Each frame's metric step is direction * (speed * dt).
+
+WHY THE FUSION RUNS IN THE PROCESSING THREAD
+    The filter costs a fraction of a millisecond per frame, so it runs in
+    line after the visual front-end and every result carries the fused
+    position. It reads the GPS and IMU buffers itself (fusion.OnlineFusion).
 """
 
 import queue
@@ -79,6 +85,7 @@ class Metrics:
     pc_ms: List[float] = field(default_factory=list)      # live: arrival -> result
     gps_age_ms: List[float] = field(default_factory=list)
     depth_ms: List[float] = field(default_factory=list)
+    fusion_ms: List[float] = field(default_factory=list)
     processed: int = 0
     dropped: int = 0
     no_gps: int = 0
@@ -122,6 +129,9 @@ class Metrics:
         if self.pc_ms:
             out["pc_ms_p50"] = pct(self.pc_ms, 50)
             out["pc_ms_p95"] = pct(self.pc_ms, 95)
+        if self.fusion_ms:
+            out["fusion_ms_p50"] = pct(self.fusion_ms, 50)
+            out["fusion_ms_p95"] = pct(self.fusion_ms, 95)
         return out
 
 
@@ -342,12 +352,13 @@ class RealtimePipeline:
 
     def __init__(self, front_end: VisualFrontEnd, gps_buffer: GpsBuffer,
                  strict: bool = True, on_result=None,
-                 scale_worker: Optional[DepthScaleWorker] = None):
+                 scale_worker: Optional[DepthScaleWorker] = None, fusion=None):
         self.fe = front_end
         self.gps = gps_buffer
         self.strict = strict
         self.on_result = on_result
         self.scale = scale_worker
+        self.fusion = fusion                # fusion.OnlineFusion, or None
         self.metrics = Metrics()
         self._q = queue.Queue(maxsize=1)
         self._dropped = [0]
@@ -412,6 +423,12 @@ class RealtimePipeline:
             else:
                 self.metrics.gps_age_ms.append((frame.t_ns - fix[0]) / 1e6)
 
+            gyro_yaw = fused = None
+            if self.fusion is not None:
+                t0 = time.perf_counter()
+                gyro_yaw, fused = self.fusion.step(frame.t_ns, R, t, scale)
+                self.metrics.fusion_ms.append((time.perf_counter() - t0) * 1000)
+
             # End-to-end latency: how far behind the capture instant we are.
             if frame.unix_ns is not None:
                 # Live: phone capture time against the PC clock, so it
@@ -433,7 +450,7 @@ class RealtimePipeline:
             self.metrics.t_end = time.perf_counter()
 
             if self.on_result is not None:
-                self.on_result(frame, R, t, n_m, n_i, fix, scale)
+                self.on_result(frame, R, t, n_m, n_i, fix, scale, gyro_yaw, fused)
 
         if self.metrics.processed == 0:
             self.metrics.t_end = time.perf_counter()

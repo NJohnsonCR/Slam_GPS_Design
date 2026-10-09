@@ -8,8 +8,11 @@ objects, in this order:
     prepare()   camera matrix, depth model and warm-up
     run()       blocks until the source ends or stop() is called
     summary()   metrics of the finished run
-    save(res)   the session folder: frames, fixes, metrics and figure
+    save(res)   the session folder: frames, fixes, IMU, metrics and figure
     close()     release the network
+
+Every session runs the fusion (fusion.OnlineFusion): camera, gyroscope when
+there are IMU samples, and GPS; visual_only uses the GPS only to start.
 
 stop(), status() and latest_frame can be used from any other thread: the
 window runs the session on a worker thread and polls them.
@@ -36,9 +39,10 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from realtime.sources import (HELLO_S23, GpsBuffer, LiveFrameSource, LiveGpsSource,
-                              ReplayFrameSource, ReplayGpsSource, load_mobile_session,
-                              parse_hello, read_hello)
+from realtime.fusion import OnlineFusion
+from realtime.sources import (HELLO_S23, GpsBuffer, ImuBuffer, LiveFrameSource, LiveGpsSource,
+                              ReplayFeed, ReplayFrameSource, load_mobile_imu,
+                              load_mobile_session, parse_hello, read_hello)
 from realtime.pipeline import RealtimePipeline, VisualFrontEnd
 from realtime.run_replay import (TrackRecorder, build_scale_worker, mobile_camera_matrix,
                                  plot_trajectory, save_frames_csv)
@@ -46,6 +50,8 @@ from realtime.run_replay import (TrackRecorder, build_scale_worker, mobile_camer
 # Same header as the phone's location.csv, so both files read the same way.
 LOCATION_HEADER = ("Timestamp[nanosecond],latitude[degrees],longitude[degrees],"
                    "altitude[meters],speed[meters/second],Unix time[nanosecond]")
+IMU_HEADER = ("Timestamp[nanosec],gx[rad/s],gy[rad/s],gz[rad/s],"
+              "ax[m/s^2],ay[m/s^2],az[m/s^2],Unix time[nanosec]")
 SKIP_START = 6          # frames the app's encoder writes before catching up
 
 
@@ -79,16 +85,18 @@ class PipelineSession:
     kind = ""               # prefix of the session folder
 
     def __init__(self, mask_bottom=0.25, scale=True, scale_hz=3.0, duration=None,
-                 out="resultados/realtime"):
+                 out="resultados/realtime", visual_only=False, gyro=True):
         self.mask_bottom = mask_bottom
         self.use_scale = scale
         self.scale_hz = scale_hz
+        self.visual_only = visual_only
+        self.use_gyro = gyro
         self.duration = duration
         self.out = out
         self.state = "sin iniciar"
         self.K = None
         self.est = self.scaler = None
-        self.source = self.pipe = None
+        self.source = self.pipe = self.fusion = None
         self.recorder = TrackRecorder()
         self.latest_frame = None        # last processed Frame, for the window
         self.metrics = None
@@ -100,16 +108,18 @@ class PipelineSession:
 
     # ------------------------------------------------------------ building
 
-    def _build_pipeline(self, K, width, height, gps_buffer):
+    def _build_pipeline(self, K, width, height, gps_buffer, imu_buffer=None):
         self.K = K
         if self.use_scale:
             self.state = "cargando el modelo de profundidad"
             self.est, self.scaler = build_scale_worker(K, self.scale_hz, threaded=True)
         self.state = "precalentando"
         warm_up(K, width, height, self.est)
+        self.fusion = OnlineFusion(gps_buffer, imu_buffer if self.use_gyro else None,
+                                   visual_only=self.visual_only)
         self.pipe = RealtimePipeline(VisualFrontEnd(K, mask_bottom=self.mask_bottom),
                                      gps_buffer, strict=True, on_result=self._on_result,
-                                     scale_worker=self.scaler)
+                                     scale_worker=self.scaler, fusion=self.fusion)
 
     def _on_result(self, frame, *result):
         self.recorder(frame, *result)
@@ -166,6 +176,8 @@ class PipelineSession:
                               if processed and m.pc_ms else None),
             "camera_speed": self.scaler.velocity if self.scaler is not None else None,
             "stopped": bool(self.est.stopped) if self.est is not None else None,
+            # Position uncertainty of the fusion, None until it starts.
+            "fusion_sigma_m": None if self.fusion.last is None else self.fusion.last[-1],
         })
         return st
 
@@ -173,6 +185,10 @@ class PipelineSession:
 
     def _summary(self) -> dict:
         res = self.metrics.summary()
+        res["fusion"] = self.fusion.summary()
+        if "fusion_ms_p50" in res:
+            res["fusion"]["tiempo_ms_p50"] = res["fusion_ms_p50"]
+            res["fusion"]["tiempo_ms_p95"] = res["fusion_ms_p95"]
         if self.scaler is not None:
             res["escala"] = {
                 "enviadas": self.scaler.n_submitted,
@@ -185,9 +201,10 @@ class PipelineSession:
         return res
 
     def save(self, res):
-        """frames.csv, gps.csv, metrics.json and the trajectory figure."""
+        """frames.csv, gps.csv, gyro_accel.csv (if any), metrics.json and the trajectory figure."""
         self.state = "guardando"
         gps_rows = self._gps_rows()
+        imu_rows = self._imu_rows()
         self.out_dir = os.path.join(self.out, f"{self.kind}_{self.stamp}")
         os.makedirs(self.out_dir, exist_ok=True)
         save_frames_csv(os.path.join(self.out_dir, "frames.csv"), self.recorder.track,
@@ -196,11 +213,21 @@ class PipelineSession:
             f.write(LOCATION_HEADER + "\n")
             for row in gps_rows:
                 f.write(row + "\n")
+        # The same file as the app's recordings, so evaluate.py reads it too.
+        if imu_rows:
+            with open(os.path.join(self.out_dir, "gyro_accel.csv"), "w") as f:
+                f.write(IMU_HEADER + "\n")
+                for row in imu_rows:
+                    f.write(row + "\n")
         with open(os.path.join(self.out_dir, "metrics.json"), "w") as f:
             json.dump(res, f, indent=2)
         plot_trajectory(self.recorder.track, self.out_dir, self.kind,
                         metric=self.scaler is not None)
         self.state = "terminada"
+
+    def _imu_rows(self):
+        """The IMU samples to keep with the session; the replay has them in its recording."""
+        return []
 
 
 class LiveSession(PipelineSession):
@@ -214,7 +241,7 @@ class LiveSession(PipelineSession):
         self.ip = ip
         self.video_port, self.gps_port = video_port, gps_port
         self.record = record
-        self.hello = self.gps = self.gps_buf = None
+        self.hello = self.gps = self.gps_buf = self.imu_buf = None
         self.gps_ok = False
         self.folder = None          # recording folder on the phone
         self.recording_stopped = None
@@ -223,14 +250,14 @@ class LiveSession(PipelineSession):
         """Read the camera parameters and start the GPS link. Raises OSError."""
         self.state = "conectando con el teléfono"
         self.hello = read_hello(self.ip, self.video_port)
-        self.gps_buf = GpsBuffer()
-        self.gps = LiveGpsSource(self.ip, self.gps_buf, self.gps_port)
+        self.gps_buf, self.imu_buf = GpsBuffer(), ImuBuffer()
+        self.gps = LiveGpsSource(self.ip, self.gps_buf, self.gps_port, imu_buffer=self.imu_buf)
         self.gps.start()
         self.gps_ok = self.gps.wait_reply()
 
     def prepare(self):
         h = self.hello
-        self._build_pipeline(h.camera_matrix(), h.width, h.height, self.gps_buf)
+        self._build_pipeline(h.camera_matrix(), h.width, h.height, self.gps_buf, self.imu_buf)
         # The video opens only now: frames sent while the model loaded would
         # reach the pipeline stale.
         self.source = LiveFrameSource(self.ip, h, self.video_port)
@@ -295,6 +322,7 @@ class LiveSession(PipelineSession):
             "captura_llegada_ms_p50": float(np.percentile(transit, 50)),
             "captura_llegada_ms_p95": float(np.percentile(transit, 95)),
             "fixes_gps": len(gps.fixes),
+            "muestras_imu": len(gps.imu_rows),
             "udp_invalidos": gps.n_bad,
             "utm_epsg": gps.epsg,
             "utm_origen": None if gps.origin is None else gps.origin.tolist(),
@@ -304,6 +332,9 @@ class LiveSession(PipelineSession):
 
     def _gps_rows(self):
         return [",".join(str(v) for v in fix) for fix in self.gps.fixes]
+
+    def _imu_rows(self):
+        return self.gps.imu_rows
 
 
 class ReplaySession(PipelineSession):
@@ -315,7 +346,7 @@ class ReplaySession(PipelineSession):
         super().__init__(**kw)
         self.recording = recording
         self.start_s = start_s
-        self.gps_src = None
+        self.feeds = []
 
     def connect(self):
         """Read the recording's timestamps and fixes. Raises OSError."""
@@ -333,6 +364,8 @@ class ReplaySession(PipelineSession):
         self.n_frames = max(n, 1)
         t_from, t_to = int(self.frame_t[0]), int(self.frame_t[self.n_frames - 1])
         self.fixes = [f for f in fixes if t_from - 2_000_000_000 <= f[0] <= t_to]
+        imu = load_mobile_imu(self.recording)
+        self.imu = None if imu is None else [s for s in imu if t_from - 2_000_000_000 <= s[0] <= t_to]
 
         loc = pd.read_csv(os.path.join(self.recording, "location.csv"))
         self._fix_t = loc.iloc[:, 0].to_numpy(np.int64)
@@ -355,21 +388,26 @@ class ReplaySession(PipelineSession):
         else:
             K = mobile_camera_matrix(self.width, self.height)
         gps_buf = GpsBuffer()
-        self._build_pipeline(K, self.width, self.height, gps_buf)
+        imu_buf = ImuBuffer() if self.imu else None
+        self._build_pipeline(K, self.width, self.height, gps_buf, imu_buf)
         self.state = f"buscando el segundo {self.start_s:.0f} de la grabación"
         self.source = ReplayFrameSource(os.path.join(self.recording, "movie.mp4"),
                                         self.frame_t, strict=True,
                                         max_frames=self.n_frames, skip_start=self.skip)
         self.source.__enter__()
-        self.gps_src = ReplayGpsSource(self.fixes, gps_buf, strict=True)
+        self.feeds = [ReplayFeed(self.fixes, gps_buf, strict=True)]
+        if imu_buf is not None:
+            self.feeds.append(ReplayFeed(self.imu, imu_buf, strict=True))
 
     def run(self):
         t0_data = int(self.frame_t[0])
-        self.gps_src.start(time.perf_counter(), t0_data)
+        for feed in self.feeds:
+            feed.start(time.perf_counter(), t0_data)
         try:
             self._run_pipeline(t0_data)
         finally:
-            self.gps_src.stop()
+            for feed in self.feeds:
+                feed.stop()
 
     def stop(self):
         super().stop()
@@ -402,6 +440,7 @@ class ReplaySession(PipelineSession):
             "grabacion": self.recording,
             "desde_s": self.start_s,
             "frames": self.n_frames,
+            "muestras_imu": 0 if not self.imu else len(self.imu),
             "mascara_inferior": self.mask_bottom,
             "camara": {"fx": self.K[0, 0], "fy": self.K[1, 1],
                        "cx": self.K[0, 2], "cy": self.K[1, 2]},

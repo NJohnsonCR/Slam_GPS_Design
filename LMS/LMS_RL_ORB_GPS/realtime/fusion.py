@@ -496,6 +496,87 @@ class GpsCameraFusion:
         return float(np.interp(t_ns, ts, ys))
 
 
+class OnlineFusion:
+    """
+    The fusion inside the pipeline, one processed frame at a time: it takes
+    the gyroscope samples and the fixes that have arrived up to the frame and
+    advances the filter in the same order as run_fusion (the frame predicts,
+    the fixes up to its timestamp correct). With every input there up front,
+    as in deterministic replay, it gives what run_fusion gives on the saved
+    frames. Without an IMU buffer the camera turns the heading.
+    """
+
+    def __init__(self, gps_buffer, imu_buffer=None, **modes):
+        if imu_buffer is None:
+            modes["gyro"] = False
+        self.fus = GpsCameraFusion(**modes)
+        self.gps, self.imu = gps_buffer, imu_buffer
+        self.gyro = GyroYaw() if imu_buffer is not None else None
+        self.first_t = self.start_t = None
+        self.last = None        # (t_ns, x, y, heading, s, v, position sigma), for display
+        self._last_fix_t = -1
+
+    def step(self, t_ns, R, t, step_m):
+        """
+        One frame, with its raw pose and the depth model's metres. Returns the
+        gyroscope's yaw for it (None: the camera's) and the state row of
+        STATE_ROW, None before the filter starts.
+        """
+        if self.first_t is None:
+            self.first_t = t_ns
+        gyro_yaw = None
+        if self.gyro is not None:
+            for sample in self.imu.take_until(t_ns):
+                self.gyro.add(*sample)
+            gyro_yaw = self.gyro.take(t_ns)
+        self.fus.on_frame(t_ns, *frame_inputs(R, t, step_m), gyro_yaw=gyro_yaw)
+        for t_fix, pos, speed in self.gps.between(self._last_fix_t, t_ns):
+            self.fus.on_fix(t_fix, pos, speed)
+            self._last_fix_t = t_fix
+        if not self.fus.ready:
+            return gyro_yaw, None
+        if self.start_t is None:
+            self.start_t = t_ns
+        ekf = self.fus.ekf
+        v = ekf.x[ekf.i["v"]] if ekf.speed_state else np.nan
+        row = (*ekf.x[:4], v, float(np.sqrt(np.trace(ekf.P[:2, :2]) / 2)))
+        self.last = (t_ns, *row)
+        return gyro_yaw, row
+
+    def summary(self) -> dict:
+        fus = self.fus
+        turned = fus.n_gyro + fus.n_camera_yaw
+        out = {"solo_visual": fus.visual_only, "giroscopio": fus.gyro,
+               "velocidad_como_estado": fus.speed_state, "arranco": fus.ready,
+               "correcciones": correction_counts(fus.log)}
+        if fus.ready:
+            out["arranco_s"] = (self.start_t - self.first_t) / 1e9
+            out["s_final"] = float(fus.ekf.x[3])
+        if turned:
+            out["frames_con_giroscopio_pct"] = 100.0 * fus.n_gyro / turned
+        return out
+
+
+# The state row OnlineFusion gives per frame (heading in radians, sigma in metres).
+STATE_ROW = ("x", "y", "heading", "s", "v", "sigma_m")
+CORRECTIONS = (("pos", "posicion"), ("speed", "velocidad"), ("course", "curso"),
+               ("camera", "camara"), ("stop", "alto"))
+
+
+def correction_counts(log) -> dict:
+    """Per kind of correction: how many, rejected, forced, out of range and mean NIS."""
+    out = {}
+    for kind, label in CORRECTIONS:
+        rows = [r for r in log if r[1] == kind and r[2] != "out_of_range"]
+        out[label] = {
+            "n": len(rows),
+            "rechazadas": sum(r[2] == "rejected" for r in rows),
+            "forzadas": sum(r[2] == "forced" for r in rows),
+            "fuera_de_rango": sum(r[1] == kind and r[2] == "out_of_range" for r in log),
+            "nis_medio": float(np.mean([r[3] for r in rows])) if rows else None}
+    return out
+
+
 def session_inputs(R, tv, steps):
     """frame_inputs for every frame of a session, as (yaw, step, has_pose, has_scale) arrays."""
     rows = [frame_inputs(R[k], tv[k], steps[k]) for k in range(len(R))]

@@ -6,7 +6,8 @@ the system never knows where the data came from. The data comes either from a
 recorded session (replay) or live from the Android app over the network.
 
     FrameSource  ->  Frame(t_ns, index, image)
-    GpsSource    ->  pushes (t_ns, position) into a GpsBuffer
+    GpsSource    ->  pushes (t_ns, position, speed) into a GpsBuffer
+    IMU          ->  pushes (t_ns, gyro, accel) into an ImuBuffer
 
 Replay runs in two modes, and the distinction matters for every measurement:
 
@@ -24,9 +25,12 @@ Live sources always behave like strict replay. The phone is the server:
               Unix ns) followed by the JPEG.
     UDP 5001  the PC sends SUBSCRIBE every ~2 s, and START/STOP from the same
               socket. The phone answers SUBSCRIBED, STATE,... and one line per
-              fix: GPS,<t_ns>,<lat>,<lon>,<alt>,<speed>,<unix_ns>.
+              fix: GPS,<t_ns>,<lat>,<lon>,<alt>,<speed>,<unix_ns>; and, once
+              the app sends it, one per IMU sample:
+              IMU,<t_ns>,<gx>,<gy>,<gz>,<ax>,<ay>,<az>,<unix_ns>.
 
-Frames and fixes are stamped with the same boot clock, so they align directly.
+Frames, fixes and IMU samples are stamped with the same boot clock, so they
+align directly.
 """
 
 import collections
@@ -62,6 +66,7 @@ class GpsBuffer:
     `latest_before` only returns fixes that had already arrived at the queried
     instant. This is what stops the system from using information from the
     future -- the easiest mistake to make when moving from offline to live.
+    Each fix keeps its Doppler speed (m/s), which the fusion needs.
     """
 
     def __init__(self, maxlen: int = 600):
@@ -69,22 +74,53 @@ class GpsBuffer:
         self._buf = collections.deque(maxlen=maxlen)
         self.received = 0
 
-    def push(self, t_ns: int, pos: np.ndarray):
+    def push(self, t_ns: int, pos: np.ndarray, speed: float):
         with self._lock:
-            self._buf.append((t_ns, pos))
+            self._buf.append((t_ns, pos, speed))
             self.received += 1
 
     def latest_before(self, t_ns: int) -> Optional[Tuple[int, np.ndarray]]:
         """Most recent fix that had ALREADY ARRIVED at t_ns."""
         with self._lock:
-            for ts, pos in reversed(self._buf):
+            for ts, pos, _ in reversed(self._buf):
                 if ts <= t_ns:
                     return ts, pos
         return None
 
+    def between(self, after_ns: int, up_to_ns: int) -> List[Tuple[int, np.ndarray, float]]:
+        """Fixes already arrived and stamped in (after_ns, up_to_ns], in time order."""
+        with self._lock:
+            return sorted((f for f in self._buf if after_ns < f[0] <= up_to_ns),
+                          key=lambda f: f[0])
+
     def __len__(self):
         with self._lock:
             return len(self._buf)
+
+
+class ImuBuffer:
+    """
+    Gyroscope and accelerometer samples, each taken once and in order by the
+    fusion. Bounded: if nothing takes them, the oldest go.
+    """
+
+    def __init__(self, maxlen: Optional[int] = 6000):
+        self._lock = threading.Lock()
+        self._buf = collections.deque(maxlen=maxlen)
+        self.received = 0
+
+    def push(self, t_ns: int, gyro, accel):
+        with self._lock:
+            self._buf.append((t_ns, gyro, accel))
+            self.received += 1
+
+    def take_until(self, t_ns: int):
+        """The samples stamped up to t_ns, removed from the buffer."""
+        out = []
+        with self._lock:
+            while self._buf and self._buf[0][0] <= t_ns:
+                out.append(self._buf.popleft())
+        return out
 
 
 # ------------------------------------------------------------------ frames
@@ -151,18 +187,17 @@ class ReplayFrameSource:
             yield Frame(t_ns=int(self.timestamps[i]), index=i, image=img)
 
 
-class ReplayGpsSource:
+class ReplayFeed:
     """
-    Delivers GPS fixes at their real rate.
+    Delivers recorded GPS fixes or IMU samples at their real rate, each item
+    being the arguments of buffer.push with the timestamp first.
 
-    Runs in its own thread: GPS arrives when it arrives, not when processing
-    asks for it.
+    Runs in its own thread: they arrive when they arrive, not when processing
+    asks for them.
     """
 
-    _idx = 0
-
-    def __init__(self, fixes, buffer: GpsBuffer, strict: bool = True):
-        self.fixes = fixes                  # list of (t_ns, np.array([x, y, z]))
+    def __init__(self, items, buffer, strict: bool = True):
+        self.items = items
         self.buffer = buffer
         self.strict = strict
         self._thread = None
@@ -174,22 +209,15 @@ class ReplayGpsSource:
         self._thread.start()
 
     def _run(self, t0_wall: float, t0_data_ns: int):
-        for t_ns, pos in self.fixes:
+        for item in self.items:
             if self._stop.is_set():
                 return
             if self.strict:
-                target = t0_wall + (t_ns - t0_data_ns) / 1e9
+                target = t0_wall + (item[0] - t0_data_ns) / 1e9
                 wait = target - time.perf_counter()
                 if wait > 0:
                     time.sleep(wait)
-            self.buffer.push(t_ns, pos)
-
-    def push_all_up_to(self, t_ns: int):
-        """Deterministic mode: publish every fix that would have arrived."""
-        while self._idx < len(self.fixes) and self.fixes[self._idx][0] <= t_ns:
-            t, pos = self.fixes[self._idx]
-            self.buffer.push(t, pos)
-            self._idx += 1
+            self.buffer.push(*item)
 
     def stop(self):
         self._stop.set()
@@ -349,10 +377,13 @@ class LiveGpsSource:
 
     SUBSCRIBE_EVERY_S = 2.0
 
-    def __init__(self, ip: str, buffer: GpsBuffer, port: int = 5001):
+    def __init__(self, ip: str, buffer: GpsBuffer, port: int = 5001,
+                 imu_buffer: Optional[ImuBuffer] = None):
         self.phone = (ip, port)
         self.buffer = buffer
+        self.imu_buffer = imu_buffer
         self.fixes = []             # (t_ns, lat, lon, alt, speed, unix_ns)
+        self.imu_rows = []          # the IMU lines as received, without "IMU,"
         self.n_bad = 0              # unrecognised datagrams
         self.state = None           # last "STATE,..." line
         self.last_reply = None      # monotonic time of the last SUBSCRIBED
@@ -446,7 +477,21 @@ class LiveGpsSource:
                 self.n_bad += 1
                 return
             self.fixes.append((t_ns, lat, lon, alt, speed, unix_ns))
-            self.buffer.push(t_ns, self._position(lat, lon, alt))
+            self.buffer.push(t_ns, self._position(lat, lon, alt), speed)
+        elif msg.startswith("IMU,"):
+            parts = msg.split(",")
+            try:
+                if len(parts) != 9:
+                    raise ValueError(msg)
+                t_ns = int(parts[1])
+                values = np.array([float(p) for p in parts[2:8]])
+                int(parts[8])
+            except ValueError:
+                self.n_bad += 1
+                return
+            self.imu_rows.append(msg[4:])
+            if self.imu_buffer is not None:
+                self.imu_buffer.push(t_ns, values[:3], values[3:])
         else:
             self.n_bad += 1
 
@@ -470,8 +515,9 @@ def load_mobile_session(session_dir: str):
     Returns (frame_timestamps_ns, gps_fixes), both on the phone's boot clock:
     the first column of each file. The 'Unix time' column of the camera files
     is when the frame reached the app, tens of milliseconds after capture and
-    with jitter, so it must not be used for alignment. Positions are metres
-    from the first fix, in its UTM zone, as in live mode.
+    with jitter, so it must not be used for alignment. Each fix is (t_ns,
+    position, Doppler speed), the position in metres from the first fix, in
+    its UTM zone, as in live mode.
     """
     import os
 
@@ -487,6 +533,26 @@ def load_mobile_session(session_dir: str):
     x, y = to_utm.transform(lon, lat)
     utm = np.column_stack([x, y, loc["altitude[meters]"].to_numpy(float)])
     t = loc["Timestamp[nanosecond]"].to_numpy(np.int64)
-    fixes = [(int(ti), p) for ti, p in zip(t, utm - utm[0])]
+    speed = loc["speed[meters/second]"].to_numpy(float)
+    fixes = [(int(ti), p, float(v)) for ti, p, v in zip(t, utm - utm[0], speed)]
 
     return frame_t, fixes
+
+
+def load_mobile_imu(session_dir: str):
+    """
+    The IMU samples of a recording (gyro_accel.csv), as (t_ns, gyro rad/s,
+    accel m/s^2) on the boot clock, or None if the recording has none. A live
+    session folder keeps the same file.
+    """
+    import os
+
+    import pandas as pd
+
+    path = os.path.join(session_dir, "gyro_accel.csv")
+    if not os.path.exists(path):
+        return None
+    g = pd.read_csv(path)
+    t = g.iloc[:, 0].to_numpy(np.int64)
+    w, a = g.iloc[:, 1:4].to_numpy(float), g.iloc[:, 4:7].to_numpy(float)
+    return [(int(t[k]), w[k], a[k]) for k in range(len(t))]

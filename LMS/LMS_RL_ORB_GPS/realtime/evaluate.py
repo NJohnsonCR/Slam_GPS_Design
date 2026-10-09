@@ -52,8 +52,8 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from realtime.fusion import (GpsCameraFusion, PlanarEKF, feed_frame, gyro_inputs, run_fusion,
-                             session_inputs)
+from realtime.fusion import (GpsCameraFusion, PlanarEKF, correction_counts, feed_frame,
+                             gyro_inputs, run_fusion, session_inputs)
 from realtime.sources import utm_zone
 from realtime.run_replay import (COLOR_ALIGNED, COLOR_CAMERA, COLOR_FUSED, COLOR_GPS,
                                  camera_positions, umeyama)
@@ -394,16 +394,7 @@ def evaluate_fusion(frames_path, rec_dir, outages=(), modes=FUSION):
         out["sesgo_final_deg_s"] = float(b[-1])
         out["sesgo_p5_p95_deg_s"] = np.percentile(b, [5, 95]).tolist()
 
-    out["correcciones"] = {}
-    for kind, label in (("pos", "posicion"), ("speed", "velocidad"), ("course", "curso"),
-                        ("camera", "camara"), ("stop", "alto")):
-        rows = [r for r in fus.log if r[1] == kind and r[2] != "out_of_range"]
-        out["correcciones"][label] = {
-            "n": len(rows),
-            "rechazadas": sum(r[2] == "rejected" for r in rows),
-            "forzadas": sum(r[2] == "forced" for r in rows),
-            "fuera_de_rango": sum(r[1] == kind and r[2] == "out_of_range" for r in fus.log),
-            "nis_medio": float(np.mean([r[3] for r in rows])) if rows else None}
+    out["correcciones"] = correction_counts(fus.log)
 
     # What the course between fixes adds: the same run without it.
     _, plain, plain_sig = run(use_course=False)

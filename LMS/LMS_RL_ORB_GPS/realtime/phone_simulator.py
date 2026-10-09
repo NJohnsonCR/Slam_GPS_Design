@@ -4,12 +4,14 @@ protocol, so the live client and the interface can be tested without the
 phone.
 
     TCP 5000  HELLO line, then every frame as a 20-byte header plus its JPEG
-    UDP 5001  SUBSCRIBE / START / STOP in; SUBSCRIBED, STATE and GPS lines out
+    UDP 5001  SUBSCRIBE / START / STOP in; SUBSCRIBED, STATE, GPS and IMU lines
+              out (IMU as the app will send it: each gyro_accel.csv row)
 
 It behaves like the phone where it matters to the PC: the camera runs in real
 time from the first connection, a new connection replaces the previous one,
-frames are dropped (not queued) when the PC falls behind, and fixes arrive
-when the video reaches their timestamp. Frames carry the recording's boot
+frames are dropped (not queued) when the PC falls behind, and fixes and IMU
+samples arrive when the video reaches their timestamp. --no-imu leaves the
+IMU out, as the current app does. Frames carry the recording's boot
 clock, so they pair with its location.csv; the Unix capture time is the
 current one, so the measured latency is that of the PC.
 
@@ -48,7 +50,7 @@ SKIP_START = 6          # frames the encoder writes before catching up
 
 class PhoneSimulator:
     def __init__(self, session, start_s=0.0, duration_s=None, quality=80,
-                 hello=HELLO_S23, video_port=5000, gps_port=5001):
+                 hello=HELLO_S23, video_port=5000, gps_port=5001, imu=True):
         self.session = session
         self.quality = quality
         self.hello = hello
@@ -63,8 +65,14 @@ class PhoneSimulator:
         with open(os.path.join(session, "location.csv")) as f:
             self.fix_rows = [line.strip() for line in f.readlines()[1:] if line.strip()]
         self.fix_t = np.array([int(row.split(",")[0]) for row in self.fix_rows], np.int64)
+        self.imu_rows = []
+        imu_path = os.path.join(session, "gyro_accel.csv")
+        if imu and os.path.exists(imu_path):
+            with open(imu_path) as f:
+                self.imu_rows = [line.strip() for line in f.readlines()[1:] if line.strip()]
+        self.imu_t = np.array([int(row.split(",")[0]) for row in self.imu_rows], np.int64)
 
-        self.n_sent = self.n_dropped = self.n_fixes = 0
+        self.n_sent = self.n_dropped = self.n_fixes = self.n_imu = 0
         self.done = threading.Event()
         self._client = None
         self._subscriber = None
@@ -78,6 +86,7 @@ class PhoneSimulator:
         """Plays the recording in real time; each frame replaces an unsent one."""
         t0_wall, t0_data = time.perf_counter(), int(self.frame_t[self.k0])
         i_fix = int(np.searchsorted(self.fix_t, t0_data))
+        i_imu = int(np.searchsorted(self.imu_t, t0_data))
         for k in range(self.k0, len(self.frame_t)):
             ok, img = cap.read()
             if not ok:
@@ -98,6 +107,11 @@ class PhoneSimulator:
                     udp.sendto(f"GPS,{self.fix_rows[i_fix]}".encode("ascii"), self._subscriber)
                     self.n_fixes += 1
                 i_fix += 1
+            while i_imu < len(self.imu_t) and self.imu_t[i_imu] <= t_ns:
+                if self._subscriber is not None:
+                    udp.sendto(f"IMU,{self.imu_rows[i_imu]}".encode("ascii"), self._subscriber)
+                    self.n_imu += 1
+                i_imu += 1
         self.done.set()
         with self._cv:
             self._cv.notify_all()
@@ -185,7 +199,7 @@ class PhoneSimulator:
             udp.close()
             cap.release()
         print(f"  Fin del video: {self.n_sent} frames enviados, {self.n_dropped} descartados, "
-              f"{self.n_fixes} fixes de GPS.")
+              f"{self.n_fixes} fixes de GPS, {self.n_imu} muestras de IMU.")
 
 
 def main():
@@ -198,13 +212,15 @@ def main():
     ap.add_argument("--hello", default=HELLO_S23, help="Línea HELLO con los intrínsecos de la cámara")
     ap.add_argument("--video-port", type=int, default=5000)
     ap.add_argument("--gps-port", type=int, default=5001)
+    ap.add_argument("--no-imu", action="store_true",
+                    help="No mandar la IMU, como la app actual")
     args = ap.parse_args()
 
     print("=" * 78)
     print("SIMULADOR DEL TELÉFONO")
     print("=" * 78)
     sim = PhoneSimulator(args.session, args.start, args.duration, args.quality, args.hello,
-                         args.video_port, args.gps_port)
+                         args.video_port, args.gps_port, imu=not args.no_imu)
     try:
         sim.run()
     except KeyboardInterrupt:

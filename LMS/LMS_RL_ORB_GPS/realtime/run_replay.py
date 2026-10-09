@@ -25,6 +25,9 @@ Usage:
         mobile_data/2026_09_29_13_01_19 --fx 867.81 --fy 868.55 \
         --cx 630.75 --cy 367.79 --mask-bottom 0 --skip-start 6
 
+The fusion (camera, gyroscope and GPS) always runs; --visual-only uses the GPS
+only to start, and --no-gyro turns the heading with the camera.
+
 Console output stays in Spanish: it is evidence for the thesis report.
 """
 
@@ -44,8 +47,9 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from realtime.sources import (GpsBuffer, ReplayFrameSource, ReplayGpsSource,
-                              load_mobile_session)
+from realtime.fusion import STATE_ROW, OnlineFusion
+from realtime.sources import (GpsBuffer, ImuBuffer, ReplayFeed, ReplayFrameSource,
+                              load_mobile_imu, load_mobile_session)
 from realtime.pipeline import (DepthScaleWorker, RealtimePipeline, VisualFrontEnd,
                                simulate_drops)
 
@@ -102,12 +106,13 @@ def camera_positions(rel, scales=None):
 class TrackRecorder:
     """on_result callback that keeps every processed step, for plots and CSV."""
 
-    KEYS = ("rel", "t_ns", "unix_ns", "matches", "inliers", "gps", "gps_t", "scale")
+    KEYS = ("rel", "t_ns", "unix_ns", "matches", "inliers", "gps", "gps_t", "scale",
+            "gyro_yaw", "fused")
 
     def __init__(self):
         self.track = {key: [] for key in self.KEYS}
 
-    def __call__(self, frame, R, t, n_m, n_i, fix, scale):
+    def __call__(self, frame, R, t, n_m, n_i, fix, scale, gyro_yaw=None, fused=None):
         tr = self.track
         tr["rel"].append((R.copy(), t.copy()))
         tr["t_ns"].append(frame.t_ns)
@@ -117,18 +122,23 @@ class TrackRecorder:
         tr["gps"].append(None if fix is None else fix[1].copy())
         tr["gps_t"].append(0 if fix is None else int(fix[0]))
         tr["scale"].append(scale)
+        tr["gyro_yaw"].append(gyro_yaw)
+        tr["fused"].append(fused)
 
 
 FRAME_COLUMNS = (["t_ns", "unix_ns", "matches", "inliers"]
                  + [f"r{i}{j}" for i in range(3) for j in range(3)]
                  + ["tx", "ty", "tz", "scale_m",
-                    "gps_t_ns", "gps_x", "gps_y", "gps_z", "e2e_ms", "pc_ms"])
+                    "gps_t_ns", "gps_x", "gps_y", "gps_z", "e2e_ms", "pc_ms", "gyro_yaw"]
+                 + [f"fus_{name}" for name in STATE_ROW])
 
 
 def save_frames_csv(path, track, metrics):
     """
     One row per processed frame: the raw relative pose from recoverPose (the
-    points convention, see camera_positions), its metres and the paired fix.
+    points convention, see camera_positions), its metres, the paired fix, the
+    gyroscope's yaw (radians, empty where the camera turned) and the fused
+    state after the frame (empty before the filter starts).
     """
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
@@ -136,6 +146,7 @@ def save_frames_csv(path, track, metrics):
         for k, (R, t) in enumerate(track["rel"]):
             g, s, u = track["gps"][k], track["scale"][k], track["unix_ns"][k]
             pc = metrics.pc_ms[k] if k < len(metrics.pc_ms) else None
+            gy, fu = track["gyro_yaw"][k], track["fused"][k]
             w.writerow([track["t_ns"][k], "" if u is None else u,
                         track["matches"][k], track["inliers"][k]]
                        + [f"{v:.9g}" for v in R.ravel()]
@@ -143,7 +154,10 @@ def save_frames_csv(path, track, metrics):
                        + ["" if s is None else f"{s:.6g}"]
                        + (["", "", "", ""] if g is None
                           else [track["gps_t"][k]] + [f"{v:.3f}" for v in g])
-                       + [f"{metrics.e2e_ms[k]:.2f}", "" if pc is None else f"{pc:.2f}"])
+                       + [f"{metrics.e2e_ms[k]:.2f}", "" if pc is None else f"{pc:.2f}",
+                          "" if gy is None else f"{gy:.9g}"]
+                       + ([""] * len(STATE_ROW) if fu is None
+                          else ["" if not np.isfinite(v) else f"{v:.7g}" for v in fu]))
 
 
 def umeyama(est, ref, with_scale=True):
@@ -252,6 +266,10 @@ def plot_trajectory(track, out_dir, mode, metric=False):
                label="GPS del teléfono")
     ax[0].plot(vo_al[:, 0], vo_al[:, 1], "--", lw=1.6, color=COLOR_CAMERA,
                label=vo_label)
+    # The fused track is already in the GPS frame: no alignment.
+    fused = np.array([f[:2] for f in track.get("fused", []) if f is not None])
+    if len(fused):
+        ax[0].plot(fused[:, 0], fused[:, 1], "-", lw=1.4, color=COLOR_FUSED, label="Fusión")
     ax[0].set_xlabel("X (m)"); ax[0].set_ylabel("Y (m)")
     ax[0].set_title(f"Recorrido — {dist:.0f} m")
     ax[0].axis("equal"); ax[0].grid(alpha=0.3); ax[0].legend()
@@ -308,6 +326,33 @@ def print_verdict(latency_p95_ms, hz, target_ms=150.0, target_hz=10.0,
     for line in (note or "").splitlines():
         print(f"  {line}")
     print("=" * 78)
+
+
+def print_fusion(fu):
+    """The fusion's part of the report, from OnlineFusion.summary()."""
+    print()
+    gyro = fu["giroscopio"] and fu.get("frames_con_giroscopio_pct", 0) > 0
+    sensors = "cámara, giroscopio y GPS" if gyro else "cámara y GPS"
+    print(f"  Fusión ({'solo visual: el GPS solo para arrancar' if fu['solo_visual'] else sensors}):")
+    if not fu["arranco"]:
+        print("     No arrancó: el GPS nunca vio el carro avanzar 20 m a más de 3 m/s.")
+        return
+    print(f"     Arrancó a los {fu['arranco_s']:.0f} s; factor de escala s al final {fu['s_final']:.2f}")
+    if gyro:
+        print(f"     Frames girados con el giroscopio: {fu['frames_con_giroscopio_pct']:.1f} %"
+              f" (el resto, con la cámara)")
+    elif fu["giroscopio"]:
+        print("     Sin muestras de IMU: el rumbo lo giró la cámara")
+    c = fu["correcciones"]
+    names = (("posición", "posicion"), ("velocidad", "velocidad"), ("curso", "curso"),
+             ("cámara", "camara"), ("alto", "alto"))
+    used = [(name, c[k]) for name, k in names if c[k]["n"]]
+    if used:
+        print("     Correcciones aceptadas / rechazadas / forzadas: " + " | ".join(
+            f"{name} {v['n'] - v['rechazadas'] - v['forzadas']}/{v['rechazadas']}/{v['forzadas']}"
+            for name, v in used))
+    if "tiempo_ms_p50" in fu:
+        print(f"     Tiempo por frame p50 / p95: {fu['tiempo_ms_p50']:.2f} / {fu['tiempo_ms_p95']:.2f} ms")
 
 
 def print_results(res, strict, est, worker):
@@ -386,6 +431,10 @@ def main():
                          "estimador monocular en un hilo aparte")
     ap.add_argument("--scale-hz", type=float, default=3.0,
                     help="Ritmo del estimador de escala (el modelo tarda ~100 ms)")
+    ap.add_argument("--visual-only", action="store_true",
+                    help="Fusión solo visual: el GPS solo ubica el arranque")
+    ap.add_argument("--no-gyro", action="store_true",
+                    help="Girar con la cámara aunque la grabación tenga giroscopio")
     args = ap.parse_args()
 
     print("=" * 78)
@@ -401,15 +450,21 @@ def main():
     n_total = len(frame_t) if args.frames is None else min(args.frames, len(frame_t))
     dur_s = (frame_t[n_total - 1] - frame_t[0]) / 1e9
 
-    # Keep only the fixes inside the processed window.
+    # Keep only the fixes and IMU samples inside the processed window.
     t_ini, t_fin = int(frame_t[0]), int(frame_t[n_total - 1])
     fixes = [f for f in fixes if t_ini - 2_000_000_000 <= f[0] <= t_fin]
+    imu = None if args.no_gyro else load_mobile_imu(args.session)
+    if imu is not None:
+        imu = [s for s in imu if t_ini - 2_000_000_000 <= s[0] <= t_fin]
 
     print(f"  Sesión:        {args.session}")
     print(f"  Frames:        {n_total}  ({dur_s:.1f} s, "
           f"{n_total/max(dur_s,1e-9):.1f} fps nominales)")
     print(f"  Fixes de GPS:  {len(fixes)} en la ventana  "
           f"({len(fixes)/max(dur_s,1e-9):.2f} Hz)")
+    print("  IMU:           " + (f"{len(imu)} muestras "
+                                 f"({(len(imu) - 1) / max((imu[-1][0] - imu[0][0]) / 1e9, 1e-9):.0f} Hz)"
+                                 if imu else "sin giroscopio: el rumbo lo gira la cámara"))
     print(f"  Máscara inferior (tablero o capó): {args.mask_bottom*100:.0f}%")
     if skip:
         print(f"  Frames descartados al inicio: {skip}"
@@ -427,7 +482,11 @@ def main():
     print(f"  Imagen:        {w}x{h}")
     print(f"  fx={K[0,0]:.1f}  fy={K[1,1]:.1f}  cx={K[0,2]:.1f}  cy={K[1,2]:.1f}\n")
 
-    gps_buf = GpsBuffer()
+    # Deterministic mode loads every fix and sample up front: nothing may fall
+    # out of the buffers before its frame comes.
+    gps_buf = GpsBuffer() if args.strict else GpsBuffer(maxlen=None)
+    imu_buf = None if not imu else (ImuBuffer() if args.strict else ImuBuffer(maxlen=None))
+    fusion = OnlineFusion(gps_buf, imu_buf, visual_only=args.visual_only)
     fe = VisualFrontEnd(K, mask_bottom=args.mask_bottom)
     est, scaler = (build_scale_worker(K, args.scale_hz, threaded=args.strict)
                    if args.scale == "depth" else (None, None))
@@ -438,25 +497,33 @@ def main():
     keep = args.trajectory or args.save_frames
     pipe = RealtimePipeline(fe, gps_buf, strict=args.strict,
                             on_result=recorder if keep else None,
-                            scale_worker=scaler)
+                            scale_worker=scaler, fusion=fusion)
 
     t0_data = int(frame_t[0])
 
     with ReplayFrameSource(video_path, frame_t, strict=args.strict,
                            max_frames=n_total, skip_start=skip) as src:
+        feeds = [(fixes, gps_buf)] + ([(imu, imu_buf)] if imu_buf is not None else [])
         if args.strict:
-            gps_src = ReplayGpsSource(fixes, gps_buf, strict=True)
-            gps_src.start(time.perf_counter(), t0_data)
+            for items, buf in feeds:
+                ReplayFeed(items, buf, strict=True).start(time.perf_counter(), t0_data)
         else:
-            # Deterministic: every fix is available up front, but access stays
-            # causal through GpsBuffer.latest_before().
-            for t_ns, pos in fixes:
-                gps_buf.push(t_ns, pos)
+            # Deterministic: everything is available up front, but access stays
+            # causal: GpsBuffer.latest_before() and between(), and ImuBuffer
+            # hands out samples only up to each frame.
+            for items, buf in feeds:
+                for item in items:
+                    buf.push(*item)
 
         m = pipe.run(src, t0_data)
 
     res = m.summary()
     print_results(res, args.strict, est, scaler)
+    res["fusion"] = fusion.summary()
+    if "fusion_ms_p50" in res:
+        res["fusion"]["tiempo_ms_p50"] = res["fusion_ms_p50"]
+        res["fusion"]["tiempo_ms_p95"] = res["fusion_ms_p95"]
+    print_fusion(res["fusion"])
 
     if scaler is not None:
         res["escala"] = {

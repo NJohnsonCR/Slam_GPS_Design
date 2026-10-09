@@ -33,7 +33,7 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from realtime.run_replay import print_results, print_verdict
+from realtime.run_replay import print_fusion, print_results, print_verdict
 from realtime.session import LiveSession, SessionError
 
 
@@ -90,6 +90,13 @@ def print_live_results(res, src, gps):
     span_s = (gps.fixes[-1][0] - gps.fixes[0][0]) / 1e9 if n >= 2 else 0.0
     rate = f"{(n - 1) / span_s:.2f} Hz" if span_s > 0 else "—"
     print(f"  Fixes de GPS recibidos          : {n}  ({rate})")
+    n_imu = len(gps.imu_rows)
+    if n_imu >= 2:
+        t_first, t_last = (int(gps.imu_rows[i].split(",", 1)[0]) for i in (0, -1))
+        print(f"  Muestras de IMU recibidas       : {n_imu}  "
+              f"({(n_imu - 1) / max((t_last - t_first) / 1e9, 1e-9):.0f} Hz)")
+    else:
+        print("  Muestras de IMU recibidas       : ninguna (el rumbo lo gira la cámara)")
     if gps.n_bad or src.n_bad:
         print(f"  Mensajes inválidos              : {gps.n_bad} UDP, {src.n_bad} JPEG")
 
@@ -140,6 +147,7 @@ def run(session, args):
     res = session.summary()
     print_results(res, True, session.est, session.scaler)
     print_live_results(res, session.source, session.gps)
+    print_fusion(res["fusion"])
     print_verdict(res["pc_ms_p95"], res["hz_efectivo"], what="Latencia p95 en la PC",
                   note="La latencia desde la captura no entra en el veredicto: sin medir el\n"
                        "desfase entre los relojes del teléfono y de la PC no se puede verificar.")
@@ -165,6 +173,10 @@ def main():
                          "estimador monocular en un hilo aparte")
     ap.add_argument("--scale-hz", type=float, default=3.0,
                     help="Ritmo del estimador de escala (el modelo tarda ~100 ms)")
+    ap.add_argument("--visual-only", action="store_true",
+                    help="Fusión solo visual: el GPS solo ubica el arranque")
+    ap.add_argument("--no-gyro", action="store_true",
+                    help="Girar con la cámara aunque el teléfono mande la IMU")
     ap.add_argument("--out", default="resultados/realtime")
     args = ap.parse_args()
 
@@ -174,7 +186,8 @@ def main():
 
     session = LiveSession(args.phone_ip, args.video_port, args.gps_port, args.record,
                           mask_bottom=args.mask_bottom, scale=args.scale == "depth",
-                          scale_hz=args.scale_hz, duration=args.duration, out=args.out)
+                          scale_hz=args.scale_hz, duration=args.duration, out=args.out,
+                          visual_only=args.visual_only, gyro=not args.no_gyro)
     try:
         session.connect()
     except OSError as e:
