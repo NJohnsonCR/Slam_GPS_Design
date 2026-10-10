@@ -93,6 +93,7 @@ Mensajes de la PC al teléfono:
 | `SUBSCRIBE` | Registra a la PC como destino de los datos. Hay que repetirlo cada ~2 s; si pasan 5 s sin recibirlo, el teléfono muestra a la PC como inactiva. |
 | `START` | Inicia la grabación, igual que el botón Record. |
 | `STOP` | Detiene la grabación. |
+| `TIME,<pc_ns>` | Pide la hora del teléfono. `<pc_ns>` es la hora Unix de la PC en ns. No suscribe. |
 
 Mensajes del teléfono a la PC:
 
@@ -101,6 +102,7 @@ Mensajes del teléfono a la PC:
 | `SUBSCRIBED` | En respuesta a cada `SUBSCRIBE`. |
 | `STATE,RECORDING,<carpeta>` o `STATE,IDLE` | En respuesta a cada `SUBSCRIBE`, `START` y `STOP`, y cuando la grabación se inicia o detiene con el botón del teléfono. `IDLE` significa que no graba; la transmisión sigue. |
 | `GPS,<t_ns>,<lat>,<lon>,<alt>,<speed>,<unix_ns>` | Cada posición, grabe o no. Es la misma fila de `location.csv`. |
+| `TIME,<pc_ns>,<unix_ns>,<t_ns>` | En respuesta inmediata a cada `TIME`: el `<pc_ns>` recibido, y la hora Unix y el reloj de arranque del teléfono tomados al recibir el pedido. Sale directo por el socket, sin pasar por la cola de datos. |
 | `IMU,<t_ns>,<gx>,<gy>,<gz>,<ax>,<ay>,<az>,<unix_ns>` | Cada muestra de la IMU, ~53 Hz, grabe o no. Es la misma fila de `gyro_accel.csv`: giroscopio en rad/s y acelerómetro en m/s² interpolado al instante del giroscopio, en los ejes del teléfono. |
 
 - UDP puede perder mensajes. La PC debe repetir `START` o `STOP` hasta recibir el estado esperado; repetirlos no tiene efecto si el teléfono ya está en ese estado.
