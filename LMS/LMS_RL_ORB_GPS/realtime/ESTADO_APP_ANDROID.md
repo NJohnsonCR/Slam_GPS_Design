@@ -27,13 +27,13 @@ Las fases 0 a 4 del plan están implementadas y probadas en el teléfono, salvo 
 | 0. Compilar y correr | Hecha |
 | 0.5. Medir la frecuencia de GPS | Hecha: 1.91 Hz |
 | 1. GPS a archivo | Hecha |
-| 2. Sensores por UDP | Hecha (solo GPS; la IMU no se transmite) |
+| 2. Sensores por UDP | Hecha: GPS e IMU |
 | 3. Video por TCP | Hecha |
 | 4. Control y modos | Hecha, salvo la prueba de campo en vehículo |
 
 Los requisitos imprescindibles del §7 del plan están cumplidos, incluidos la pantalla de ajustes (puertos y calidad JPEG) y la frecuencia de GPS en la pantalla del teléfono.
 
-No se hicieron los "deseables": IMU por la red y selección de la cámara gran angular.
+La IMU se transmite por UDP desde el 9/10/2026, a pedido del pipeline. No se hizo la selección de la cámara gran angular (era "deseable").
 
 ---
 
@@ -101,6 +101,7 @@ Mensajes del teléfono a la PC:
 | `SUBSCRIBED` | En respuesta a cada `SUBSCRIBE`. |
 | `STATE,RECORDING,<carpeta>` o `STATE,IDLE` | En respuesta a cada `SUBSCRIBE`, `START` y `STOP`, y cuando la grabación se inicia o detiene con el botón del teléfono. `IDLE` significa que no graba; la transmisión sigue. |
 | `GPS,<t_ns>,<lat>,<lon>,<alt>,<speed>,<unix_ns>` | Cada posición, grabe o no. Es la misma fila de `location.csv`. |
+| `IMU,<t_ns>,<gx>,<gy>,<gz>,<ax>,<ay>,<az>,<unix_ns>` | Cada muestra de la IMU, ~53 Hz, grabe o no. Es la misma fila de `gyro_accel.csv`: giroscopio en rad/s y acelerómetro en m/s² interpolado al instante del giroscopio, en los ejes del teléfono. |
 
 - UDP puede perder mensajes. La PC debe repetir `START` o `STOP` hasta recibir el estado esperado; repetirlos no tiene efecto si el teléfono ya está en ese estado.
 - La PC debe usar **el mismo socket UDP** para `SUBSCRIBE` y para las órdenes.
@@ -114,7 +115,7 @@ En el repositorio de la app, carpeta `tools/`:
 | Script | Qué hace |
 |---|---|
 | `video_receiver.py` | Recibe y muestra el video; informa fps, ancho de banda y retraso. Necesita OpenCV. |
-| `udp_gps_receiver.py` | Se suscribe y muestra las posiciones y los cambios de estado. |
+| `udp_gps_receiver.py` | Se suscribe y muestra las posiciones, la frecuencia de la IMU y los cambios de estado. |
 | `phone_control.py` | Envía `start` o `stop` y reintenta hasta la confirmación. |
 
 ---
@@ -162,7 +163,7 @@ Todos coinciden con el §6 del plan:
 |---|---|
 | GPS | 1.91 Hz caminando al aire libre, ~1.2 Hz bajo techo. No es 1 Hz como en las grabaciones viejas. |
 | Velocidad del GPS | Doppler: mucho menos ruidosa que derivar las posiciones. |
-| IMU | ~53 Hz, solo en archivo. |
+| IMU | ~53 Hz, en archivo y por UDP. |
 | Video | 30 fps. |
 
 ---
@@ -242,6 +243,5 @@ Se hace al final, con el pipeline integrado. Qué revisar:
 
 ## 10. Cuándo volver al task de la app
 
-- **Si la fusión necesita la IMU en vivo.** Hoy la IMU solo se graba en archivo, a ~53 Hz. Transmitirla seguiría el mismo esquema que el GPS, con líneas `IMU,...` como proponía el §4.3 del plan.
 - **Ante cualquier cambio** de protocolo, formato o comportamiento del teléfono.
 - **Ante problemas que se reproduzcan con los scripts de `tools/`**, sin el pipeline.
