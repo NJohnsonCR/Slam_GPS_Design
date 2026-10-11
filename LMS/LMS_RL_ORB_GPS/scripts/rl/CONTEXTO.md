@@ -116,9 +116,9 @@ el código. Lo que cada entregable le exige al código:
   del teléfono y de la PC, y ese desfase cambia de un día a otro: el teléfono iba
   56 ms atrasado el 29/9/2026 y al menos 98 ms adelantado el 6/10/2026 (§4.9). **Desde
   el 9/10/2026 el pipeline mide el desfase en cada sesión** con la consulta de hora de
-  la app (§4.20): por WiFi, captura a resultado 96/180 ms (p50/p95), no cumple el p95.
-  Por cable USB (5/10/2026) el p95 medido fue 113 ms, **sin confirmar**: falta repetirlo
-  con la consulta de hora.
+  la app (§4.20). **Por cable USB (anclaje de red, la configuración de campo) cumple:
+  captura a resultado 97/107 ms (p50/p95), medido el 11/10/2026.** Por WiFi no cumple
+  el p95 (180–224 ms): el exceso es del enlace.
 - **OE2:** la plataforma tiene que operar con visión **y** GPS a la vez. Sin el
   EKF este entregable no se cumple.
 - **OE3:** el estado observado y la recompensa tienen que quedar definidos
@@ -1754,6 +1754,24 @@ minuto, traída con `adb pull`, en `mobile_data/2026_10_09_19_08_06/`; scripts t
   jitter de 117 ms y frecuencia corregida en +59.6 ppm (arrancó a las 18:18). Para la
   latencia da igual cuál se mueva: la consulta mide la relación entre los dos relojes
   en la misma sesión, y la ventana de 60 s sigue la deriva (≤ ~3.6 ms a 60 ppm).
+- **11/10/2026: por cable, el objetivo de latencia se cumple** (anclaje USB, WiFi del
+  teléfono apagado, IP 10.174.238.48, 60 s con escala por profundidad,
+  `resultados/realtime/live_20261011_122734/`; la configuración de la prueba de campo):
+
+  | | Cable USB (11/10) | WiFi de la casa (11/10, 30 s) |
+  |---|---|---|
+  | Frames | 1800 recibidos, 0 no enviados; 1799 procesados (0.1 % descartados), 30.0 Hz | 690, 22.8 % no enviados |
+  | Captura → llegada p50/p95 | 70 / 76 ms | 81 / 186 ms |
+  | **Captura → resultado p50/p95** | **97 / 107 ms: cumple (< 150)** | 112 / 224 ms: no cumple |
+  | En la PC p50/p95 | 27 / 32 ms | 31 / 45 ms |
+  | Consulta de hora | 126; ida y vuelta mínima 1.0 ms (error ≤ 0.5 ms), mediana 2 ms | 66; mínima 2.3 ms, mediana 7 ms |
+  | GPS / IMU | 75 fixes (1.17 Hz) / 3398 muestras (53 Hz) | 13 (0.37 Hz) / 1801 (53 Hz) |
+
+  Giroscopio en el 99.9 % de los frames en las dos. Hora Unix del teléfono −10 ms
+  respecto de la PC (el 9/10 iba +58). `phone_check` por cable: 29.9 fps, IMU 52.9/s,
+  frames 71 ms y IMU 35 ms después de su marca. **Confirma el OE1 por cable**: el
+  p95 de 113 ms del 5/10, sin confirmar, queda en 107 ms medido. Por WiFi el exceso
+  es del enlace (captura a llegada p95 186 ms), no de la PC.
 - Usar la mediana de todas las consultas en vez de la más rápida habría dado +0.2 ms
   en esta sesión (consultas lentas simétricas); con la mediana de ida y vuelta de 53 ms
   que vio el task de la app, el error posible sube a ±27 ms.
@@ -2044,8 +2062,8 @@ de salir: descarga el modelo (95 MB).
    **Paréntesis (8/10/2026): el estudiante pasa al task de la app antes del paso 3.**
    **Cerrado el 9/10/2026:** la app manda la IMU y responde a la consulta de hora; las
    dos pruebas con el teléfono real salieron bien (§4.20). La consulta de hora ya está
-   en el pipeline. Pendiente de esas pruebas: la latencia por cable con la consulta de
-   hora, y que el filtro arranque y gire con el giroscopio (pide manejar). El orden era:
+   en el pipeline. La latencia por cable quedó confirmada el 11/10 (p95 107 ms).
+   Pendiente: que el filtro arranque y gire con el giroscopio (pide manejar). El orden era:
    - **Task de la app:** implementar el envío de la IMU (pedido 1 en "Pedidos pendientes
      para el task de la app", completo para pasarlo tal cual) y, si da tiempo, la
      consulta de hora (pedido 2).
@@ -2641,6 +2659,10 @@ de `pip` ~4 GB durante la instalación) más los datos que se copien, y acceso a
   todo bien, la consulta de hora con `reloj.csv` en las sesiones en vivo.
 - `phone_check.py` con el simulador, con una IP sin teléfono y con el teléfono sin la
   app abierta: cada caso da su mensaje y su código de salida.
+- **El teléfono real** (§4.20): por WiFi, los tres sensores llegan en el mismo reloj
+  (`phone_check`: todo bien; `run_live` 30 s: IMU 53 Hz, giroscopio en el 99.9 % de los
+  frames). Por cable con anclaje USB, 60 s: 0 frames perdidos, captura a resultado p95
+  107 ms, cumple.
 
 ---
 
