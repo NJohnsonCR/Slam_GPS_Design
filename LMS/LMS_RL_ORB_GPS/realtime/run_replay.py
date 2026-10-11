@@ -47,7 +47,7 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from realtime.fusion import STATE_ROW, OnlineFusion
+from realtime.fusion import STATE_ROW, OnlineFusion, run_fusion, session_inputs
 from realtime.sources import (GpsBuffer, ImuBuffer, ReplayFeed, ReplayFrameSource,
                               load_mobile_imu, load_mobile_session)
 from realtime.pipeline import (DepthScaleWorker, RealtimePipeline, VisualFrontEnd,
@@ -186,12 +186,63 @@ def umeyama(est, ref, with_scale=True):
     return s * (ec @ R.T) + ref.mean(0), s
 
 
-def plot_trajectory(track, out_dir, mode, metric=False):
+def camera_gyro_track(track, fixes):
+    """
+    The camera and gyroscope without the GPS: run_fusion in visual_only mode
+    over the session (the GPS only places the start and its heading; then the
+    gyroscope turns and the camera's metres advance), as evaluate.py --fusion
+    draws it. Positions per frame in the GPS frame, NaN before the start, or
+    None without fixes, gyroscope or metres.
+    """
+    gyro = np.array([np.nan if g is None else g for g in track["gyro_yaw"]], float)
+    if not fixes or not np.isfinite(gyro).any():
+        return None
+    rel = track["rel"]
+    inputs = session_inputs([R for R, _ in rel], [t for _, t in rel], track["scale"])
+    if not inputs[3].any():
+        return None
+    _, est, _ = run_fusion(np.asarray(track["t_ns"], np.int64), inputs, fixes,
+                           gyro_yaw=gyro, visual_only=True)
+    return est[:, :2]
+
+
+def direction_arrows(ax, xy, color, n=12):
+    """n arrowheads spread by distance along a track, pointing the way it was driven."""
+    xy = xy[np.all(np.isfinite(xy), axis=1)]
+    if len(xy) < 3:
+        return
+    along = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))])
+    if along[-1] <= 0:
+        return
+    half = along[-1] / 150
+    for d in np.linspace(0, along[-1], n + 2)[1:-1]:
+        a = min(np.searchsorted(along, d - half), len(xy) - 1)
+        b = min(np.searchsorted(along, d + half), len(xy) - 1)
+        if b > a:
+            ax.annotate("", xy=xy[b], xytext=xy[a],
+                        arrowprops=dict(arrowstyle="-|>", color=color, lw=1.2,
+                                        mutation_scale=16, shrinkA=0, shrinkB=0))
+
+
+def time_marks(ax, t_s, xy, every_s):
+    """m:ss next to the track every every_s seconds, to tell going from coming back."""
+    for mark in np.arange(every_s, t_s[-1], every_s):
+        k = int(np.searchsorted(t_s, mark))
+        if k < len(xy):
+            ax.annotate(f"{int(mark) // 60}:{int(mark) % 60:02d}", xy[k], fontsize=7,
+                        xytext=(4, 4), textcoords="offset points", color="#0b0b0b",
+                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.8))
+
+
+def plot_trajectory(track, out_dir, mode, metric=False, fixes=None):
     """
     Rebuild the route from the accumulated relative poses.
 
     With metric=True each step is multiplied by the metres estimated by the
-    depth model and the alignment becomes RIGID.
+    depth model and the alignment becomes RIGID. With the fixes the fusion was
+    fed (OnlineFusion.fixes) it also draws the camera with the gyroscope from
+    the fusion's start, without the GPS after it. Arrows give the direction of
+    travel and the marks the time, since a route can come back along a street.
 
     Interpretation warning: the mobile data has NO ground truth. The phone GPS
     is off by several metres, so comparing against it says whether the SHAPE is
@@ -259,27 +310,58 @@ def plot_trajectory(track, out_dir, mode, metric=False):
     print("  NOTA: el GPS del teléfono NO es ground truth (error de varios metros).")
     print("        Esto mide parecido de forma, no exactitud.")
 
-    vo_label = ("Cámara con escala propia (rígida)" if metric
+    # Camera and gyroscope, already in the GPS frame from the fusion's start.
+    cam_gyro = camera_gyro_track(track, fixes) if metric else None
+    err_cg = None
+    if cam_gyro is not None:
+        err_cg = np.linalg.norm(cam_gyro[:n][has_gps] - gps[:, :2], axis=1)
+        ok = np.isfinite(err_cg)
+        if ok.any():
+            k0 = int(np.flatnonzero(ok)[0])
+            after = float(np.sum(np.linalg.norm(np.diff(gps[k0:, :2], axis=0), axis=1)))
+            print(f"  Cámara + giroscopio, sin GPS desde el arranque de la fusión:")
+            print(f"     separación al GPS mediana {np.median(err_cg[ok]):.1f} m, al final "
+                  f"{err_cg[-1]:.1f} m ({100 * err_cg[-1] / max(after, 1e-9):.0f} % de lo recorrido)")
+        else:
+            cam_gyro = err_cg = None
+
+    vo_label = ("Cámara sola, escala propia (alineación rígida)" if metric
                 else "Odometría visual (alineada)")
-    fig, ax = plt.subplots(1, 2, figsize=(13, 5.5))
-    ax[0].plot(gps[:, 0], gps[:, 1], "-", lw=2, color=COLOR_GPS,
-               label="GPS del teléfono")
-    ax[0].plot(vo_al[:, 0], vo_al[:, 1], "--", lw=1.6, color=COLOR_CAMERA,
-               label=vo_label)
+    fig, ax = plt.subplots(1, 2, figsize=(14, 6.5))
+    a = ax[0]
+    a.plot(gps[:, 0], gps[:, 1], "-", lw=2, color=COLOR_GPS, label="GPS del teléfono")
+    direction_arrows(a, gps[:, :2], COLOR_GPS)
+    a.plot(vo_al[:, 0], vo_al[:, 1], "--", lw=1.4, color=COLOR_CAMERA, label=vo_label)
+    direction_arrows(a, vo_al[:, :2], COLOR_CAMERA, n=8)
+    if cam_gyro is not None:
+        a.plot(cam_gyro[:, 0], cam_gyro[:, 1], "-.", lw=1.5, color=COLOR_ALIGNED,
+               label="Cámara + giroscopio, sin GPS desde el arranque")
+        direction_arrows(a, cam_gyro, COLOR_ALIGNED, n=8)
     # The fused track is already in the GPS frame: no alignment.
     fused = np.array([f[:2] for f in track.get("fused", []) if f is not None])
     if len(fused):
-        ax[0].plot(fused[:, 0], fused[:, 1], "-", lw=1.4, color=COLOR_FUSED, label="Fusión")
-    ax[0].set_xlabel("X (m)"); ax[0].set_ylabel("Y (m)")
-    ax[0].set_title(f"Recorrido — {dist:.0f} m")
-    ax[0].axis("equal"); ax[0].grid(alpha=0.3); ax[0].legend()
+        a.plot(fused[:, 0], fused[:, 1], "-", lw=1.2, color=COLOR_FUSED, label="Fusión")
+        direction_arrows(a, fused, COLOR_FUSED, n=8)
+    t_gps = (np.asarray(track["t_ns"][:n], np.int64)[has_gps] - track["t_ns"][0]) / 1e9
+    time_marks(a, t_gps, gps[:, :2], 60.0 if t_gps[-1] > 180 else 30.0)
+    a.plot(*gps[0, :2], "o", ms=9, color="#0b0b0b", label="Inicio")
+    a.plot(*gps[-1, :2], "s", ms=8, mfc="white", mec="#0b0b0b", mew=2, label="Fin")
+    a.set_xlabel("Este (m)"); a.set_ylabel("Norte (m)")
+    a.set_title(f"Recorrido — {dist:.0f} m (flechas: sentido; m:ss: tiempo)")
+    # Below the map: anywhere inside it covers part of some route.
+    a.axis("equal"); a.grid(alpha=0.3)
+    a.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.11), ncol=3)
 
-    ax[1].plot(err, lw=1.2, color=COLOR_CAMERA)
-    ax[1].axhline(np.median(err), ls="--", color="gray",
+    ax[1].plot(err, lw=1.2, color=COLOR_CAMERA, label="Cámara sola (rígida)")
+    ax[1].axhline(np.median(err), ls="--", color=COLOR_CAMERA, alpha=0.6,
                   label=f"mediana {np.median(err):.1f} m")
+    if err_cg is not None:
+        ax[1].plot(err_cg, lw=1.2, color=COLOR_ALIGNED, label="Cámara + giroscopio")
+        ax[1].axhline(np.nanmedian(err_cg), ls="--", color=COLOR_ALIGNED, alpha=0.6,
+                      label=f"mediana {np.nanmedian(err_cg):.1f} m")
     ax[1].set_xlabel("keyframe"); ax[1].set_ylabel("desviación (m)")
-    ax[1].set_title("Desviación entre VO y GPS")
-    ax[1].grid(alpha=0.3); ax[1].legend()
+    ax[1].set_title("Desviación respecto del GPS")
+    ax[1].grid(alpha=0.3); ax[1].legend(fontsize=8)
 
     suffix = "_metric" if metric else ""
     fig.suptitle(("En vivo" if mode == "live" else f"Modo replay ({mode})")
@@ -288,6 +370,7 @@ def plot_trajectory(track, out_dir, mode, metric=False):
     fig.tight_layout()
     png = os.path.join(out_dir, f"trajectory_{mode}{suffix}.png")
     fig.savefig(png, dpi=130)
+    plt.close(fig)
     print(f"  Gráfico: {png}")
 
 
@@ -559,7 +642,8 @@ def main():
     suffix = "_metric" if scaler is not None else ""
 
     if args.trajectory:
-        plot_trajectory(recorder.track, args.out, mode, metric=scaler is not None)
+        plot_trajectory(recorder.track, args.out, mode, metric=scaler is not None,
+                        fixes=fusion.fixes)
     if args.save_frames:
         path = os.path.join(args.out, f"frames_{mode}{suffix}.csv")
         save_frames_csv(path, recorder.track, m)

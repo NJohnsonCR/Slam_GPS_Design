@@ -518,6 +518,9 @@ class OnlineFusion:
         # before the start it already turns the heading the filter starts with.
         self.n_frames = self.n_imu_frames = 0
         self.last_from_imu = None       # for the last frame; None without an IMU
+        # Every fix fed to the filter, (t_ns, position, speed): the camera and
+        # gyroscope track of the session plot is run_fusion over them.
+        self.fixes = []
         self._last_fix_t = -1
 
     def step(self, t_ns, R, t, step_m):
@@ -539,6 +542,7 @@ class OnlineFusion:
         self.fus.on_frame(t_ns, *frame_inputs(R, t, step_m), gyro_yaw=gyro_yaw)
         for t_fix, pos, speed in self.gps.between(self._last_fix_t, t_ns):
             self.fus.on_fix(t_fix, pos, speed)
+            self.fixes.append((t_fix, pos, speed))
             self._last_fix_t = t_fix
         if not self.fus.ready:
             return gyro_yaw, None

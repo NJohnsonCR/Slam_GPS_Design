@@ -1,6 +1,8 @@
 # Contexto del proyecto — TFG SLAM + GPS + RL
 
-**Última actualización:** 11 de octubre de 2026 (la laptop de campo: torch con CUDA 12.6
+**Última actualización:** 11 de octubre de 2026 (primera prueba de campo: sensores
+completos, el EKF los usó en las cuatro sesiones; la cámara sola falla con lluvia en el
+parabrisas; la rotonda la sigue el GPS, no la cámara, §4.21. Antes, la laptop de campo: torch con CUDA 12.6
 para la GTX 1050 Ti, §14 y §15; con el teléfono por cable la latencia p95 no cumple en
 la laptop, §4.20; antes, 9/10: la IMU y la consulta de hora del teléfono real, §4.20)
 **Actualización anterior:** 7 de octubre de 2026 (sesión 4: conexión en vivo con la app, grabaciones en carro,
@@ -1840,6 +1842,208 @@ minuto, traída con `adb pull`, en `mobile_data/2026_10_09_19_08_06/`; scripts t
   --trajectory` en la laptop (contra 255 m y RMSE 17.45 m del determinista), o con la
   grabación de la prueba de campo.
 
+
+### 4.21 Prueba de campo con la laptop (11/10/2026)
+
+Primera prueba de campo: la laptop (§9) en el carro, el teléfono por cable (anclaje USB)
+en el tablero, la ventana en vivo con escala y "Grabar también en el teléfono". Cuatro
+sesiones en ciudad, de día, con lluvia intermitente. Todo medido con scripts temporales
+(fuera del repo); los gráficos se pierden, los números quedan aquí.
+
+| Sesión (`resultados/realtime/`) | Grabación (`mobile_data/`) | Duración | GPS recorrido | v máx | Procesados (descarte) | Hz | Captura → resultado p50/p95 |
+|---|---|---|---|---|---|---|---|
+| `live_20261011_145250` | `2026_10_11_14_52_51` | 136 s | 983 m | 11.2 m/s | 1531 (62.5 %) | 11.2 | 169 / 219 ms |
+| `live_20261011_145514` | `2026_10_11_14_55_15` | 353 s | 1865 m | 12.8 m/s | 4073 (61.5 %) | 11.5 | 167 / 205 ms |
+| `live_20261011_150517` | `2026_10_11_15_05_17` | 254 s | 2342 m | 16.7 m/s | 3030 (60.1 %) | 11.9 | 165 / 206 ms |
+| `live_20261011_151614` | `2026_10_11_15_16_15` | 506 s | 3349 m | 17.9 m/s | 6116 (59.7 %) | 12.1 | 164 / 201 ms |
+
+Por frame 78–84 ms (p50): el ritmo de la laptop con batería (§4.20: 75 ms con batería,
+50 ms conectada). Antes, a las 14:43, una prueba corta a 5–8 km/h no arrancó el filtro:
+solo 3 de 90 fixes a ≥ 3 m/s, y el arranque pide 20 m seguidos a esa velocidad
+(`GpsCameraFusion._try_start`); funcionó como está diseñado.
+
+**1. Los tres sensores llegaron completos** (lo recibido en vivo contra lo grabado por
+el teléfono, en el tramo común):
+
+| | 145250 | 145514 | 150517 | 151614 |
+|---|---|---|---|---|
+| Frames grabados / recibidos (no enviados por el teléfono) | 4085 / 4086 (0) | 10575 / 10573 (3) | 7606 / 7596 (11) | 15184 / 15168 (17) |
+| Procesados con un frame grabado a ≤ 1 µs | 99.93 % | 99.98 % | 99.97 % | 99.98 % |
+| Fixes grabados / recibidos, misma marca y posición | 136 / 136 | 352 / 352 | 254 / 254 | 507 / 507 |
+| Muestras IMU grabadas / recibidas, mismos valores | 7204 / 7204 | 18647 / 18647 | 13411 / 13411 | 26771 / 26771 |
+
+El único frame sin par por sesión es el primero, anterior al inicio de la grabación.
+Fixes cada 1.0 s sin huecos; IMU cada 18.9 ms (máximo 19 ms); 0 JPEG ni UDP inválidos;
+todas las consultas de hora respondidas.
+
+**2. El EKF usó los tres** (`evaluate.py --fusion` sobre cada sesión):
+
+| | 145250 | 145514 | 150517 | 151614 |
+|---|---|---|---|---|
+| Arranque | 13.7 s | 2.6 s | 14.0 s | 25.4 s |
+| Frames girados con el giroscopio | 99.9 % | 100 % | 100 % | 100 % |
+| Correcciones de posición (rechazadas) | 122 (0) | 349 (0) | 239 (0) | 481 (0) |
+| Velocidad / curso / cámara | 122 / 118 / 116 | 348 / 212 / 254 | 236 / 219 / 214 | 474 / 355 / 301 |
+| Alto aceptadas (rechazadas) | 0 | 80 (0) | 5 (0) | 99 (38) |
+| Predicción contra cada fix nuevo p50 / p95 | 1.3 / 3.2 m | 1.4 / 3.4 m | 2.0 / 4.3 m | 2.0 / 5.3 m |
+| NIS medio de posición (esperado 2) | 0.17 | 0.18 | 0.37 | 0.49 |
+
+La fusión sigue al GPS con ±1.4–3 m. El NIS de posición muy por debajo de 2 dice que la
+varianza del GPS en el filtro es conservadora (sin cambiar; anotar para el RL, que
+ajusta esos pesos). Los 38 altos rechazados de 151614 son la lluvia (punto 3): la cámara
+decía detenido con el carro andando y la compuerta lo rechazó.
+
+**3. Por qué el trazo de la cámara rígida salió mal en 151614: lluvia en el
+parabrisas.** El trazo "Cámara con escala propia (rígida)" de
+`trajectory_live_metric.png` es la cámara sola (su giro y su escala), alineada al GPS con
+una sola rotación y traslación. Comparada con el giroscopio (`evaluate.py`):
+
+| | 145250 | 145514 | 150517 | 151614 |
+|---|---|---|---|---|
+| Rumbo cámara − giroscopio, final (máximo) | +24° (30°) | +71° (74°) | +106° (123°) | **−452° (470°)** |
+| Giro de la cámara / giroscopio en frames que giran > 2° | 1.16* | 1.16 | 1.20 | **−0.04** |
+| Cámara detenida con el carro a > 1 m/s | 0.3 % | 0.9 % | 1.1 % | **13.4 % (410 m perdidos)** |
+| Distancia cámara / GPS | 1564 / 983 m | 2817 / 1865 m | 2322 / 2342 m | 2708 / 3349 m |
+| ATE rígido, mediana | 154 m | 130 m | 230 m | 443 m |
+
+(*145250: solo 30 frames con giro > 2°; el error por frame en ellos es −0.24°.)
+
+- **En 151614 la cámara no ve los giros.** Las ventanas de 3 s con más error son giros
+  que la cámara se salta: a los 21 s el giroscopio gira +75° y la cámara −9°; a los
+  18 s, +68° contra +10°; a los 3 s, +72° contra +25°; a los 249–252 s, +81° contra
+  +14°. Doce ventanas suman −303° de los −452°. En el video hay gotas en el parabrisas
+  en esos tramos (el limpiador lo deja limpio a ratos): ORB empareja las gotas, que se
+  mueven con la cámara. Medido entre dos frames a 100 ms, con el mismo ORB y máscara:
+  a los 21 s el giroscopio gira 4.33° (~66 px de desplazamiento esperado) y los
+  emparejamientos se mueven 6 px (p50), giro estimado 0.64°; a los 251 s, 1.80°
+  (~27 px) contra 4 px y 1.26°; en un giro limpio a los 181 s, 3.31° contra 68 px y
+  3.23°. Las mismas gotas explican las paradas falsas (13.4 %) y los altos rechazados.
+  **Es de esa sesión** (la que más llovió); en las otras tres la cámara gira 1.16–1.20
+  veces el giroscopio en los giros, la ganancia de siempre (§4.16).
+- **Lo general: la cámara sola nunca dio un buen trazo** (§4.12, §4.16), y en campo
+  tampoco. En las tres sesiones secas el rumbo deriva +24 a +106° (sobre todo en rectas
+  rápidas: en 150517, +12 a +77° en 30 s a 10–16 m/s después de la rotonda) y la escala
+  de la cámara es errática: cámara/Doppler 1.2–1.8 en las primeras dos y 0.57 a
+  14–18 m/s en 150517; el filtro la ve moverse de 0.4 a 2.5. Con una sola alineación
+  rígida, cualquier error de rumbo gira todo lo que sigue. Por eso el rumbo sale del
+  giroscopio (decisión del 7/10).
+- **El descarte (~60 %) no explica lo de 151614.** Replay determinista de la
+  grabación en la laptop (los 15203 frames, 0 % de descarte, mismos intrínsecos y
+  máscara del 25 %, con escala; 22 min):
+
+  | 151614 | En vivo (59.7 % descartado) | Replay determinista (0 %) |
+  |---|---|---|
+  | Giro de la cámara a los 21 s (giroscopio +74–75°) | −9° | −0.8° |
+  | Rumbo cámara − giroscopio, final (máximo) | −452° (470°) | −501° (531°) |
+  | Cámara detenida a > 1 m/s | 13.4 % (410 m) | 12.1 % (413 m) |
+  | Error de giro por frame p50 / p90 (giro real p50) | 0.58 / 1.85° (0.62°) | 0.33 / 1.04° (0.32°) |
+  | ATE rígido, mediana | 443 m | 200 m |
+  | Cámara sola / cámara + giroscopio, separación final | 70 % / 34 % | 33 % / 34 % |
+  | Fusión: predicción contra cada fix p50 / p95 | 2.0 / 5.3 m | 1.8 / 4.1 m |
+  | Fusión: altos rechazados | 38 | 41 |
+
+  Las mismas ventanas encabezan el error en los dos (21, 18, 249–252, 285 s): la lluvia
+  falla igual con todos los frames. El descarte sí empeora la cámara sola en el resto
+  (la separación final de la cámara sola pasa de 33 a 70 %, el ATE de 200 a 443 m),
+  pero no la fusión ni la cámara + giroscopio, que no toman el giro de la cámara.
+
+**4. El trazo cámara + giroscopio (sin GPS) ya existe.** Es el modo `visual_only` de
+`GpsCameraFusion`: el GPS solo da el punto y el rumbo de arranque; después, giro del
+giroscopio y metros de la cámara. Se activa:
+- En la evaluación: `evaluate.py <frames.csv> --recording <carpeta> --fusion` dibuja en
+  `fusion.png` "Cámara sola" y "Cámara y giroscopio, desde el mismo inicio" junto al GPS
+  y la fusión, e imprime su deriva. `--recording` puede ser la grabación del teléfono o
+  la propia carpeta de la sesión en vivo (trae `gps.csv` y `gyro_accel.csv`; en 150517
+  da 474 m de separación final contra 478 m con la grabación). `--out` para no escribir
+  junto al `frames.csv`.
+- Como la fusión de la corrida: `run_replay --visual-only` o `run_live --visual-only`
+  (reemplaza al EKF completo en esa corrida; la ventana no tiene la opción).
+- **No** está en `trajectory_live_metric.png` (ese gráfico solo tiene GPS, cámara rígida
+  y fusión).
+
+| Separación al GPS desde el mismo inicio, al final (% de lo recorrido) | 145250 | 145514 | 150517 | 151614 |
+|---|---|---|---|---|
+| Cámara sola | 516 m (55 %) | 796 m (44 %) | 1010 m (44 %) | 2297 m (70 %) |
+| Cámara + giroscopio | 388 m (41 %) | 549 m (30 %) | 478 m (21 %) | 1122 m (34 %) |
+
+Con el giroscopio la forma de los giros sale bien; lo que queda es la escala de la
+cámara (el largo de los tramos).
+
+**5. La "rotonda" de 150517: la cámara no la captó mejor.** El lazo que dibuja la cámara
+rígida cerca de (0–50, 1050–1150) m son los segundos 140–210 de la cámara. La rotonda
+está en los segundos 139–151: el giroscopio marca −20° a la derecha al entrar y +75° a
+la izquierda al rodearla (+55° netos, a 3–8 m/s). Rumbo acumulado desde el segundo 125,
+contra el giroscopio (referencia):
+
+| | Diferencia p50 / máx (125–185 s) | En la rotonda (139–151 s) |
+|---|---|---|
+| Curso del GPS (entre fixes) | 5.4° / 8.8° | +4 a +8° |
+| Fusión | 1.7° / 3.5° | +0.6 a +3.5° |
+| Cámara | 16.4° / 77.6° | −6 a +12° |
+
+Desde la misma posición y rumbo en el segundo 132 (giroscopio + Doppler como
+referencia), en 132–156 s: GPS a 2.7 m (mediana; 5.1 m máximo), fusión a 2.0 m (8.1 m),
+cámara sola a 5.1 m (45 m), giro de la cámara + Doppler a 3.1 m (30 m). **Las
+coordenadas del GPS siguen la rotonda dentro de ~3 m**, y la fusión también (con el
+giroscopio). El lazo de la cámara es error suyo: cierra la curva de más (+12° a la
+salida) y en la recta rápida que sigue (10–16 m/s) deriva hasta +77° sin girar; además
+se salta casi todo el giro a la derecha de 171–177 s (−15° contra −40°). Con la escala de
+la cámara a 0.57 en esa recta, el tramo se acorta y la forma parece un lazo. A la escala
+del gráfico completo (1.7 km de alto), una rotonda de ~15 m de radio es un quiebre
+pequeño en el GPS: se ve suave, pero está.
+
+**6. El "giro de 180°" del GPS en 151614 es real: el carro dio la vuelta a una cuadra y
+volvió por la misma calle.** Recorrido (GPS y giroscopio coinciden en cada giro):
+0–40 s sale del parqueo (+146° a los 17–23 s); 50–80 s al oeste; 85–90 s derecha, al
+norte; 90–180 s al norte (alto en 120–137 s); **180–190 s derecha (−83°), al este;
+190–200 s izquierda (+88°), al norte; 210–237 s detenido; 250–260 s izquierda (+86°),
+al oeste; 280 s alto frente a un muro (intersección en T); 283–292 s izquierda (+86°),
+al sur**; 290–506 s de vuelta al sur por la misma calle, pasa junto a la salida (430 s)
+y sigue.
+- **No es el GPS:** un fix cada 1.00 s sin huecos, velocidad entre fixes contra la
+  Doppler 0.22 m/s (p50, máximo 1.8), 0 saltos; el curso del GPS contra el giroscopio,
+  0° (p50), −8 a +7° (p5–p95).
+- **No es el EKF:** sin cortes de GPS no hubo extrapolación (predicción ≤ 1 s, 0
+  correcciones de posición rechazadas); la fusión sigue al GPS.
+- **No es el gráfico:** ejes este/norte de UTM 16; los giros del GPS tienen el mismo
+  signo que los del giroscopio (con ejes espejados saldrían al revés).
+- **Medido sin las posiciones del GPS** (giroscopio + Doppler): la vuelta a la cuadra
+  (170–290 s) deja al carro 33 m al este de la calle de ida (el GPS: 15 m); el tramo al
+  este mide +150 m y el del oeste −142 m (GPS: +148 y −146). Una calle paralela estaría
+  a una cuadra (~100 m). A la ida y a la vuelta, en y = 175, 420 y 600 m, el GPS separa
+  las dos pasadas 7 m.
+- **En el video:** giro a la derecha a los 183–187 s (hacia el muro con murales), a la
+  izquierda a los 196 s y a los 250–256 s, alto frente a un muro con semáforo a los
+  280 s y giro a la izquierda a los 284–292 s.
+
+**7. Todas las sesiones son coherentes** (incluida la prueba lenta de las 14:43):
+
+| Sesión | Coordenadas | Fixes: intervalo máx / saltos | Curso GPS − giroscopio p5–p95 (máx) | Giro neto en marcha |
+|---|---|---|---|---|
+| 144332 | 9.8801–9.8804, −84.0646–−84.0641 | 1.00 s / 0 | ±2° (2°), solo 3 pares > 3 m/s | −2° |
+| 145250 | 9.8856–9.8914, −84.0721–−84.0664 | 1.00 s / 0 | −3.4 a +2.5° (8°) | −174° |
+| 145514 | 9.8917–9.9025, −84.0769–−84.0704 | 1.00 s / 0 | −5.8 a +4.8° (10°) | +93° |
+| 150517 | 9.9025–9.9182, −84.0760–−84.0722 | 1.00 s / 0 | −4.3 a +5.3° (11°) | −255° |
+| 151614 | 9.9100–9.9258, −84.0754–−84.0721 | 1.00 s / 0 | −8.1 a +7.4° (27°, a los 357–358 s) | +144° |
+
+Todas en Costa Rica (Valle Central, altitud 1145–1205 m), zona UTM 16 (EPSG 32616,
+la correcta al oeste de −84°; el límite con la 17 está a ~7 km al este), la misma en la
+sesión en vivo. Velocidad entre fixes contra Doppler ≤ 1.8 m/s en todas. Las sesiones
+se encadenan: 145250 → 145514 a 56 m en 8 s (en marcha), 145514 → 150517 a 4 m, 150517
+→ 151614 a 14 m (detenido entre medio). El video gira con el giroscopio (en los frames
+limpios, la cámara 1.16–1.20 veces en los giros, punto 3), y en el giro más grande de
+cada sesión los frames antes y después muestran el giro.
+
+**Resumen de confiabilidad:**
+- **GPS, IMU y fusión: confiables en las cinco sesiones.** Sin huecos, sin saltos,
+  coordenadas y zona correctas, y el curso del GPS coincide con el giroscopio.
+- **Cámara sola (trazo rígido): no confiable en ninguna**, por la deriva de rumbo y la
+  escala errática (punto 3). En 151614 además falla por la lluvia (no ve los giros, se
+  cree detenida); 150517 tiene gotas en partes.
+- **Escala de la cámara: no confiable en campo** (cámara/Doppler de 0.6 a 1.8 según la
+  sesión y la velocidad).
+- 144332 sirve solo para verificar los sensores: no arrancó el filtro (5–8 km/h).
+
 ---
 
 ## 5. BUGS IDENTIFICADOS EN `main.py` (SIN CORREGIR)
@@ -2081,6 +2285,14 @@ por cable** (§4.20).
 ## 10. SIGUIENTES PASOS (plan vigente al 7/10/2026)
 
 ### Dónde quedamos (9/10/2026)
+
+**11/10/2026, prueba de campo (§4.21):** cuatro sesiones en ciudad (1–3.3 km), las
+grabaciones en `mobile_data/2026_10_11_*`. Cámara, GPS e IMU llegaron completos (lo
+recibido es idéntico a lo grabado); el EKF arrancó en todas, giró con el giroscopio en el
+~100 % de los frames y aceptó todas las correcciones de posición. La cámara sola sigue
+sin servir como trazo (deriva de rumbo y escala errática) y con lluvia en el parabrisas
+no ve los giros. Pendiente: la escala de la cámara (cámara/Doppler 0.6–1.8 en campo) y
+la varianza del GPS en el filtro (NIS 0.17–0.49, esperado 2).
 
 **11/10/2026, la laptop de campo (§4.20, §14 "Verificación en la laptop"):** lista,
 con torch `+cu126`. Por cable funciona, pero la latencia p95 no cumple en ella (167–189

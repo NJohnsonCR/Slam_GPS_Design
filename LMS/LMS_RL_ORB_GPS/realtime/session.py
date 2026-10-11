@@ -241,7 +241,7 @@ class PipelineSession:
         with open(os.path.join(self.out_dir, "metrics.json"), "w") as f:
             json.dump(res, f, indent=2)
         plot_trajectory(self.recorder.track, self.out_dir, self.kind,
-                        metric=self.scaler is not None)
+                        metric=self.scaler is not None, fixes=self.fusion.fixes)
         self.state = "terminada"
 
     def _imu_rows(self):
