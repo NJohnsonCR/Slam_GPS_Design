@@ -29,9 +29,9 @@ El proyecto fue creado con fines educativos e investigativos, como parte de un t
 
 ## Requisitos del sistema
 
-- Ubuntu 22.04 o superior.
-- Python 3.12 (con soporte para venv y tkinter).
-- Acceso a internet para instalación de dependencias.
+- Ubuntu 24.04 o Linux Mint 22 (traen Python 3.12, que `setup.sh` instala con venv y tkinter).
+- GPU NVIDIA con driver 570 o más nuevo, opcional: sin ella el modelo de profundidad corre en la CPU.
+- ~12 GB libres y acceso a internet para la instalación; después funciona sin internet.
 - Video de entrada en formato `.mp4`.
 - Archivo de datos GPS (formato compatible con el sistema).
 
@@ -50,6 +50,8 @@ cd Slam_GPS_Design
 chmod +x setup.sh
 ./setup.sh
 ```
+
+Las versiones de Python están fijas en `requirements.txt`. Los pasos completos para una computadora nueva, y qué revisar si algo falla, están en `LMS/LMS_RL_ORB_GPS/scripts/rl/CONTEXTO.md`, secciones 14 y 15.
 
 ## Ejecución
 
