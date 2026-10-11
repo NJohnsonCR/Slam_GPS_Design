@@ -1,7 +1,8 @@
 # Contexto del proyecto — TFG SLAM + GPS + RL
 
-**Última actualización:** 11 de octubre de 2026 (repo listo para la laptop de campo: §14
-y §15; antes, 9/10: la IMU y la consulta de hora del teléfono real, §4.20)
+**Última actualización:** 11 de octubre de 2026 (la laptop de campo: torch con CUDA 12.6
+para la GTX 1050 Ti, §14 y §15; con el teléfono por cable la latencia p95 no cumple en
+la laptop, §4.20; antes, 9/10: la IMU y la consulta de hora del teléfono real, §4.20)
 **Actualización anterior:** 7 de octubre de 2026 (sesión 4: conexión en vivo con la app, grabaciones en carro,
 línea base solo visual, corrección del encadenamiento de poses, máscara en vez de recorte,
 causa de los saltos de rumbo, red de seguridad en 10°, verificación en KITTI, EKF partes 1
@@ -118,7 +119,10 @@ el código. Lo que cada entregable le exige al código:
   el 9/10/2026 el pipeline mide el desfase en cada sesión** con la consulta de hora de
   la app (§4.20). **Por cable USB (anclaje de red, la configuración de campo) cumple:
   captura a resultado 97/107 ms (p50/p95), medido el 11/10/2026.** Por WiFi no cumple
-  el p95 (180–224 ms): el exceso es del enlace.
+  el p95 (180–224 ms): el exceso es del enlace. **En la laptop de campo (i5-8300H) por
+  cable tampoco cumple el p95: 132–138 / 167–189 ms**, por el cómputo por frame (~50
+  ms contra 24–27 en la de escritorio), no por el enlace; la frecuencia sí (~19 Hz).
+  Decisión del 11/10: la prueba de campo va así (§4.20).
 - **OE2:** la plataforma tiene que operar con visión **y** GPS a la vez. Sin el
   EKF este entregable no se cumple.
 - **OE3:** el estado observado y la recompensa tienen que quedar definidos
@@ -1775,6 +1779,66 @@ minuto, traída con `adb pull`, en `mobile_data/2026_10_09_19_08_06/`; scripts t
 - Usar la mediana de todas las consultas en vez de la más rápida habría dado +0.2 ms
   en esta sesión (consultas lentas simétricas); con la mediana de ida y vuelta de 53 ms
   que vio el task de la app, el error posible sube a ±27 ms.
+- **11/10/2026: la laptop de campo, por cable, no cumple el p95.** Laptop: Intel
+  i5-8300H (4 núcleos, 8 hilos, 2018), GTX 1050 Ti 4 GB (sm_61), driver 580, Linux
+  Mint 22, `torch 2.8.0+cu126` (§15). Teléfono por anclaje USB en 10.174.238.48, bajo
+  techo, en la mano, sin avanzar. `phone_check`: todo bien (30 fps, IMU 53/s con hueco
+  máximo de 19 ms, ida y vuelta 2 ms; un primer intento sin la app en la pantalla de
+  video dio "sin HELLO" e IMU a ráfagas). Dos sesiones desde la ventana, con escala:
+
+  | | Sin grabar (`live_20261011_133826`, 54 s) | Grabando (`live_20261011_134001`, 52 s) | Escritorio, cable (`122734`) |
+  |---|---|---|---|
+  | Frames | 1606 recibidos, 0 no enviados; 1034 procesados (35.6 % descartados), 19.3 Hz | 1551; 978 (36.9 %), 18.9 Hz | 0.1 %, 30 Hz |
+  | Captura → llegada p50/p95 | 67 / 73 ms | 66 / 73 ms | 70 / 76 ms |
+  | **Captura → resultado p50/p95** | **138 / 167 ms: no cumple** | **132 / 189 ms: no cumple** | 97 / 107 ms |
+  | En la PC p50/p95 | 70 / 99 ms | 66 / 122 ms | 27 / 32 ms |
+  | Por frame p50 (ORB / emparejamiento / pose) | 52 ms (20 / 15 / 15) | 50 ms (19 / 14 / 15) | 24–27 ms |
+  | Profundidad (GPU) p50/p95 | 291 / 401 ms, 154 estimaciones (~2.9 Hz) | 291 / 448 ms, 145 | 66–150 ms |
+
+  Giroscopio en el 99.9 % de los frames; 73–74 fixes; 0 JPEG ni UDP inválidos; 113 y
+  104 consultas de hora, todas respondidas. **El filtro no arrancó**, como se esperaba:
+  el GPS se movió a lo sumo 1.0 y 1.9 m (velocidad máxima 0.26 y 0.49 m/s). Poses
+  descartadas por giro > 10°: 15 y 22, e inliers p50 16–21: lo normal bajo techo sin
+  avanzar (como el 6/10). La grabación del teléfono es `mobile_data/2026_10_11_13_40_02`
+  (52 s, quieta; no sirve para medir el trazo).
+  **El enlace es el mismo que en la de escritorio; el exceso es del cómputo.**
+  Replay de esa grabación en la laptop (1561 frames; la latencia del replay equivale a
+  la "en la PC" en vivo):
+
+  | Replay | Por frame p50 | Latencia p50 / p95 | Descarte |
+  |---|---|---|---|
+  | Determinista, sin escala | 48.2 ms (p95 65) | — | (predice 26.9 %) |
+  | Estricto, sin escala | 48.5 ms | 62 / 92 ms | 31.5 % |
+  | Estricto, con escala | 51.8 ms | 66 / 100 ms | 37.6 % |
+  | En vivo con la ventana (sesión 2) | 50 ms | 66 / 122 ms | 36.9 % |
+
+  Por frame (~48 ms) es más que el intervalo entre frames (33 ms): siempre hay uno
+  esperando. En vivo ≈ enlace (~70) + PC (~100) + ventana y decodificación (~20).
+  Lo que **no** ayuda: hilos de OpenCV (8, 4, 2, 1: 48.5 / 49.4 / 54.9 / 80.3 ms por
+  frame; ya usa 8); el CPU no se frena (~3.5 GHz medio, 73 °C, perfil `balanced`), así
+  que "performance" ganaría poco; sin escala, el p95 en la PC solo baja de 100 a 92 ms.
+  Lo único que lo mueve es el ORB (medido con un envoltorio, sin tocar el código;
+  estricto con escala):
+
+  | Puntos ORB | Por frame p50 (ORB / emparejamiento / pose) | En la PC p95 | En vivo p95 estimado |
+  |---|---|---|---|
+  | 2000 (actual) | 51.8 ms (19.4 / 16.0 / 14.8) | 100 ms | ~190 ms |
+  | 1500 | 40.5 ms (18.0 / 9.2 / 12.1) | 88 ms | ~175 ms |
+  | 1000 | 34.3 ms (18.2 / 4.7 / 10.5) | 76 ms | ~165 ms |
+
+  La detección no baja con menos puntos (la pirámide y FAST dominan): para cumplir
+  con holgura habría que bajar también la resolución. Las dos cosas separan el
+  pipeline del de fuera de línea (invariante T6) y piden validarlas con grabaciones
+  de manejo en la de escritorio.
+  **Decisión del estudiante (11/10): la prueba de campo va con la configuración
+  actual** (opción 1: frecuencia ~19 Hz, mediana ~135 ms, p95 ~170–190 ms en esta
+  laptop; en la de escritorio cumple). **Sin medir:** el trazo y el EKF con ~37 % de
+  frames descartados. Todo lo de §4 sobre datos de manejo se midió con ~1 %. El
+  giroscopio cubre igual todos los frames (integra las muestras, no los frames) y el
+  GPS corrige igual, pero el paso de la cámara entre frames procesados se duplica a
+  veces. Se mide con `run_replay mobile_data/2025_03_11 --strict --scale depth
+  --trajectory` en la laptop (contra 255 m y RMSE 17.45 m del determinista), o con la
+  grabación de la prueba de campo.
 
 ---
 
@@ -2005,18 +2069,25 @@ venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay mobile_data/<carpeta> 
 | torch | 2.8.0+cu128, CUDA disponible |
 | Modelo de profundidad | 66–150 ms por frame en GPU (optimizable con fp16) |
 
-Las pruebas de campo se harán con una laptop; **el cómputo hay que volver a
-medirlo ahí**. La laptop tiene GPU NVIDIA (3050 o 1050, por confirmar). Las
-versiones recientes de `torch` podrían no soportar una 1050: `setup.sh` avisa y el
-estimador de profundidad cae solo a la CPU, donde una inferencia tarda ~615 ms en
-este escritorio (contra ~100 ms en GPU). Correr `setup.sh` una vez con internet antes
-de salir: descarga el modelo (95 MB).
+**Laptop de campo (confirmado el 11/10/2026):** Intel i5-8300H (4 núcleos, 8 hilos),
+GTX 1050 Ti 4 GB (sm_61, driver 580), Linux Mint 22, `torch 2.8.0+cu126` (la de PyPI,
+`+cu128`, no trae código para sm_61; `requirements.txt` ya fija la de CUDA 12.6, §15).
+Modelo de profundidad 291 ms p50 en su GPU. **Por frame ~50 ms (el doble que el
+escritorio): ~19 Hz efectivos, 36 % de descarte y captura a resultado p95 167–189 ms
+por cable** (§4.20).
 
 ---
 
 ## 10. SIGUIENTES PASOS (plan vigente al 7/10/2026)
 
 ### Dónde quedamos (9/10/2026)
+
+**11/10/2026, la laptop de campo (§4.20, §14 "Verificación en la laptop"):** lista,
+con torch `+cu126`. Por cable funciona, pero la latencia p95 no cumple en ella (167–189
+ms; el cómputo por frame es el doble que en la de escritorio). Decisión: la prueba de
+campo va con la configuración actual. Antes o durante la prueba, medir el trazo y el
+EKF con el descarte real (~37 %), que nunca se midió: `--strict --trajectory` sobre
+`2025_03_11` en la laptop, o la grabación de la prueba.
 
 0. **9/10/2026, sin commitear:** las líneas de la IMU y la fusión en la ventana y la
    consola, y la consulta de hora en el pipeline (§4.20): `fusion.py`, `session.py`,
@@ -2584,13 +2655,13 @@ Para la laptop de las pruebas de campo (Linux Mint 22 con GPU NVIDIA). Se hace e
 con internet; en campo el sistema no necesita internet.
 
 **Lo que hace falta:** Linux Mint 22 o Ubuntu 24.04 (traen Python 3.12; Mint 21 no),
-driver NVIDIA 570 o más nuevo, ~12 GB libres (el entorno virtual ocupa 7.2 GB y la caché
+driver NVIDIA 560 o más nuevo, ~12 GB libres (el entorno virtual ocupa 7.2 GB y la caché
 de `pip` ~4 GB durante la instalación) más los datos que se copien, y acceso a GitHub.
 
 ### Pasos
 
 1. **Driver de la GPU.** `nvidia-smi` tiene que mostrar la tarjeta y una versión de
-   driver ≥ 570. Si no, instalarlo desde el Administrador de controladores de Mint
+   driver ≥ 560. Si no, instalarlo desde el Administrador de controladores de Mint
    (el recomendado) y reiniciar. Con Secure Boot activo, Mint pide registrar la clave
    del módulo al reiniciar; si no se hace, el driver no carga.
 2. **Clonar el repositorio** en la misma ruta que en la PC de escritorio (las rutas no
@@ -2666,6 +2737,24 @@ de `pip` ~4 GB durante la instalación) más los datos que se copien, y acceso a
 
 ---
 
+### Verificación en la laptop (11/10/2026)
+
+- `setup.sh` instaló `torch 2.8.0+cu128`, que ve la GTX 1050 Ti pero no corre en ella
+  (sm_61). Cambiado a `+cu126` (los mismos 2.8.0, con sm_50–sm_90); `requirements.txt`
+  lo fija desde entonces. `torch.cuda.is_available()` True, `Modelo listo, en la GPU
+  NVIDIA GeForce GTX 1050 Ti`, `pip check` limpio.
+- Invariantes 6/6.
+- Sin `mobile_data/` en la laptop: la ventana se probó con el simulador sirviendo una
+  grabación sintética (calle con textura a 8 m/s, GPS 1 Hz, IMU 53 Hz; generada fuera
+  del repo), 30 s: `IMU: 53 muestras/s; el giro lo da el giroscopio` y `Fusión: en
+  marcha` desde el segundo 9; al final el giroscopio giró el 100 % de los frames.
+- Con el teléfono por cable: `phone_check` bien y dos sesiones en vivo; la latencia
+  p95 no cumple en esta laptop (§4.20).
+- **Pendiente:** los números del paso 5 con `mobile_data/2025_03_11`, y el trazo con
+  descarte real (`--strict`, §4.20).
+
+---
+
 ## 15. SI ALGO FALLA EN LA LAPTOP
 
 Cada comando, desde la raíz del repositorio.
@@ -2675,12 +2764,12 @@ Cada comando, desde la raíz del repositorio.
 - `nvidia-smi`: si no responde, el driver no está cargado (instalarlo o, con Secure
   Boot, registrar la clave; §14 paso 1).
 - `venv/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))"`:
-  - `False`: driver ausente o más viejo que lo que pide CUDA 12.8 (≥ 570).
-  - Capacidad menor que (7, 0) (GTX 10xx o anterior): `torch 2.8.0` de PyPI no trae
-    código para esa tarjeta (`setup.sh` avisa "hay GPU, pero esta versión de torch no
-    corre en ella"). Instalar la variante con CUDA 12.6:
-    `venv/bin/pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu126`
-    y repetir la prueba.
+  - `False`: driver ausente o más viejo que lo que pide CUDA 12.6 (≥ 560).
+  - La versión tiene que terminar en `+cu126`. `requirements.txt` la fija así desde el
+    11/10/2026: la de PyPI (`+cu128`) no trae código para tarjetas anteriores a
+    (7, 0), como la GTX 1050 Ti de la laptop (6, 1), y `setup.sh` avisaba "hay GPU,
+    pero esta versión de torch no corre en ella". Si un entorno viejo todavía tiene
+    `+cu128`, `./setup.sh --sin-apt` lo cambia.
 - Sin GPU el sistema funciona igual, más lento en la escala: en la CPU de escritorio
   una inferencia tardó ~615 ms (§4.9), así que la escala se actualiza a ~1.5 Hz en vez
   de 3 Hz y le quita CPU al resto. El procesamiento por frame no usa la GPU.
