@@ -431,10 +431,12 @@ class RealtimePipeline:
 
             # End-to-end latency: how far behind the capture instant we are.
             if frame.unix_ns is not None:
-                # Live: phone capture time against the PC clock, so it
-                # includes whatever offset separates the two clocks.
+                # Live: the capture time on the PC clock when the phone's
+                # clock offset is measured; otherwise its own Unix time,
+                # which carries whatever offset separates the two clocks.
                 now_ns = time.time_ns()
-                self.metrics.e2e_ms.append((now_ns - frame.unix_ns) / 1e6)
+                capture_ns = frame.unix_ns if frame.capture_ns is None else frame.capture_ns
+                self.metrics.e2e_ms.append((now_ns - capture_ns) / 1e6)
                 self.metrics.pc_ms.append((now_ns - frame.arrival_ns) / 1e6)
             elif self.strict:
                 elapsed_wall = time.perf_counter() - t0_wall

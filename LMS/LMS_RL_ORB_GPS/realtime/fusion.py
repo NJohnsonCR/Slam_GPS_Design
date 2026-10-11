@@ -514,6 +514,10 @@ class OnlineFusion:
         self.gyro = GyroYaw() if imu_buffer is not None else None
         self.first_t = self.start_t = None
         self.last = None        # (t_ns, x, y, heading, s, v, position sigma), for display
+        # Frames whose yaw came from the gyroscope, counted from the first one:
+        # before the start it already turns the heading the filter starts with.
+        self.n_frames = self.n_imu_frames = 0
+        self.last_from_imu = None       # for the last frame; None without an IMU
         self._last_fix_t = -1
 
     def step(self, t_ns, R, t, step_m):
@@ -524,11 +528,14 @@ class OnlineFusion:
         """
         if self.first_t is None:
             self.first_t = t_ns
+        self.n_frames += 1
         gyro_yaw = None
         if self.gyro is not None:
             for sample in self.imu.take_until(t_ns):
                 self.gyro.add(*sample)
             gyro_yaw = self.gyro.take(t_ns)
+            self.last_from_imu = gyro_yaw is not None
+            self.n_imu_frames += self.last_from_imu
         self.fus.on_frame(t_ns, *frame_inputs(R, t, step_m), gyro_yaw=gyro_yaw)
         for t_fix, pos, speed in self.gps.between(self._last_fix_t, t_ns):
             self.fus.on_fix(t_fix, pos, speed)
@@ -554,6 +561,8 @@ class OnlineFusion:
             out["s_final"] = float(fus.ekf.x[3])
         if turned:
             out["frames_con_giroscopio_pct"] = 100.0 * fus.n_gyro / turned
+        if self.gyro is not None and self.n_frames:
+            out["frames_con_imu_pct"] = 100.0 * self.n_imu_frames / self.n_frames
         return out
 
 

@@ -25,12 +25,13 @@ Live sources always behave like strict replay. The phone is the server:
               Unix ns) followed by the JPEG.
     UDP 5001  the PC sends SUBSCRIBE every ~2 s, and START/STOP from the same
               socket. The phone answers SUBSCRIBED, STATE,... and one line per
-              fix: GPS,<t_ns>,<lat>,<lon>,<alt>,<speed>,<unix_ns>; and, once
-              the app sends it, one per IMU sample:
-              IMU,<t_ns>,<gx>,<gy>,<gz>,<ax>,<ay>,<az>,<unix_ns>.
+              fix: GPS,<t_ns>,<lat>,<lon>,<alt>,<speed>,<unix_ns>; and one per
+              IMU sample: IMU,<t_ns>,<gx>,<gy>,<gz>,<ax>,<ay>,<az>,<unix_ns>.
+              TIME,<pc_ns> asks for the phone's clocks; the answer is
+              TIME,<pc_ns>,<unix_ns>,<t_ns>, read when the query arrived.
 
 Frames, fixes and IMU samples are stamped with the same boot clock, so they
-align directly.
+align directly. The TIME queries put that clock on the PC's (PhoneClock).
 """
 
 import collections
@@ -132,6 +133,7 @@ class Frame:
     image: np.ndarray
     unix_ns: Optional[int] = None       # live only: capture time, phone wall clock
     arrival_ns: Optional[int] = None    # live only: arrival time, PC wall clock
+    capture_ns: Optional[int] = None    # live only: capture time on the PC wall clock, if measured
 
 
 class ReplayFrameSource:
@@ -279,26 +281,107 @@ def read_hello(ip: str, port: int = 5000, timeout: float = 5.0) -> Hello:
     return hello
 
 
+class PhoneClock:
+    """
+    The phone's boot clock on the PC's wall clock, from TIME queries.
+
+    The PC stamps each query when it leaves and when the answer comes back;
+    the phone read its clock somewhere in between. Taking the midpoint is off
+    by at most half the round trip, so only the quickest query counts: a slow
+    one waited somewhere (WiFi power saving, a queue), and not necessarily
+    the same each way. The quickest of the last WINDOW_S follows the slow
+    drift between the two clocks.
+    """
+
+    WINDOW_S = 60.0
+    MAX_ROUND_TRIP_S = 1.0          # anything slower is a stale answer
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.rows = []              # (pc sent, pc back, phone Unix, phone boot), ns
+        self.n_sent = 0
+        self._recent = collections.deque()      # (pc back, round trip, boot - PC, Unix - PC)
+        self._best = None
+
+    def add(self, sent_ns: int, back_ns: int, unix_ns: int, boot_ns: int):
+        trip = back_ns - sent_ns
+        if not 0 < trip <= self.MAX_ROUND_TRIP_S * 1e9:
+            return
+        mid = (sent_ns + back_ns) // 2
+        with self._lock:
+            self.rows.append((sent_ns, back_ns, unix_ns, boot_ns))
+            self._recent.append((back_ns, trip, boot_ns - mid, unix_ns - mid))
+            while back_ns - self._recent[0][0] > self.WINDOW_S * 1e9:
+                self._recent.popleft()
+            self._best = min(self._recent, key=lambda r: r[1])
+
+    @property
+    def ready(self) -> bool:
+        return self._best is not None
+
+    def to_pc(self, boot_ns: int) -> Optional[int]:
+        """A boot-clock instant of the phone on the PC's wall clock; None before any answer."""
+        best = self._best
+        return None if best is None else boot_ns - best[2]
+
+    def summary(self) -> dict:
+        """The queries of the session: how many, how quick, and what they found."""
+        with self._lock:
+            rows = np.array(self.rows, dtype=np.int64).reshape(-1, 4)
+        out = {"consultas": self.n_sent, "respondidas": len(rows)}
+        if not len(rows):
+            return out
+        trip = (rows[:, 1] - rows[:, 0]) / 1e6
+        mid = (rows[:, 0] + rows[:, 1]) // 2
+        k = int(np.argmin(trip))
+        out.update({
+            "ida_y_vuelta_ms_min": float(trip[k]),
+            "ida_y_vuelta_ms_p50": float(np.median(trip)),
+            "ida_y_vuelta_ms_p95": float(np.percentile(trip, 95)),
+            # The phone's own Unix time, against the PC's: what the latency
+            # carried before the offset was measured.
+            "hora_unix_telefono_menos_pc_ms": float((rows[k, 2] - mid[k]) / 1e6),
+        })
+        # How far the offset moved: the quickest query of the first and of
+        # the last 20 s.
+        span = (rows[-1, 1] - rows[0, 1]) / 1e9
+        if span >= 40:
+            first = rows[:, 1] <= rows[0, 1] + 20e9
+            last = rows[:, 1] >= rows[-1, 1] - 20e9
+            off = rows[:, 3] - mid
+            a = np.flatnonzero(first)[np.argmin(trip[first])]
+            b = np.flatnonzero(last)[np.argmin(trip[last])]
+            out["deriva_ms"] = float((off[b] - off[a]) / 1e6)
+            out["deriva_en_s"] = float((rows[b, 1] - rows[a, 1]) / 1e9)
+        return out
+
+
 class LiveFrameSource:
     """
     Video streamed by the phone over TCP.
 
     JPEGs are decoded here, on the capture thread, outside the per-frame
     budget. The phone never queues frames: when the network is busy it skips
-    them, and those gaps are counted from the timestamps.
+    them, and those gaps are counted from the timestamps. With a PhoneClock,
+    each frame's capture time goes onto the PC's clock.
     """
 
     IDLE_TIMEOUT_S = 5.0
     MAX_JPEG_BYTES = 20_000_000     # anything larger means a corrupt header
 
-    def __init__(self, ip: str, hello: Hello, port: int = 5000):
+    def __init__(self, ip: str, hello: Hello, port: int = 5000,
+                 clock: Optional[PhoneClock] = None):
         self.ip = ip
         self.port = port
         self.hello = hello
+        self.clock = clock
         self.n_received = 0
         self.n_missing = 0                  # captured by the phone, never sent
         self.n_bad = 0                      # JPEGs that failed to decode
-        self.transit_ms: List[float] = []   # capture -> arrival
+        self.n_synced = 0                   # with the capture time on the PC's clock
+        # Capture -> arrival: on the PC's clock when measured, else from the
+        # phone's Unix time, offset by however far apart the two clocks are.
+        self.transit_ms: List[float] = []
         self.last_t_ns = None
         self.end_reason = None
         self._sock = None
@@ -337,15 +420,18 @@ class LiveFrameSource:
                         gap = round((t_ns - self.last_t_ns) / interval_ns)
                         self.n_missing += max(gap - 1, 0)
                     self.last_t_ns = t_ns
-                    self.transit_ms.append((arrival_ns - unix_ns) / 1e6)
+                    capture_ns = self.clock.to_pc(t_ns) if self.clock is not None else None
+                    self.transit_ms.append((arrival_ns - (unix_ns if capture_ns is None
+                                                          else capture_ns)) / 1e6)
 
                     img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
                     if img is None:
                         self.n_bad += 1
                         continue
                     self.n_received += 1
+                    self.n_synced += capture_ns is not None
                     yield Frame(t_ns=t_ns, index=self.n_received - 1, image=img,
-                                unix_ns=unix_ns, arrival_ns=arrival_ns)
+                                unix_ns=unix_ns, arrival_ns=arrival_ns, capture_ns=capture_ns)
             self.end_reason = ("sesión detenida" if self._stopped
                                else "el teléfono cerró la conexión de video")
         except socket.timeout:
@@ -369,13 +455,15 @@ class LiveFrameSource:
 
 class LiveGpsSource:
     """
-    GPS fixes and recording control from the phone over UDP.
+    GPS fixes, IMU samples, clock queries and recording control from the
+    phone over UDP.
 
     One socket does everything: the phone sends to the address that last
     subscribed, so commands must leave from that same socket.
     """
 
     SUBSCRIBE_EVERY_S = 2.0
+    TIME_EVERY_S = 0.5
 
     def __init__(self, ip: str, buffer: GpsBuffer, port: int = 5001,
                  imu_buffer: Optional[ImuBuffer] = None):
@@ -387,6 +475,7 @@ class LiveGpsSource:
         self.n_bad = 0              # unrecognised datagrams
         self.state = None           # last "STATE,..." line
         self.last_reply = None      # monotonic time of the last SUBSCRIBED
+        self.clock = PhoneClock()
         self.epsg = None            # UTM zone, fixed by the first fix
         self.origin = None          # UTM of the first fix
         self._to_utm = None
@@ -445,21 +534,25 @@ class LiveGpsSource:
             pass        # network down: the next SUBSCRIBE tries again
 
     def _run(self):
-        last_subscribe = 0.0
+        last_subscribe = last_time = 0.0
         while not self._stop.is_set():
             now = time.monotonic()
             if now - last_subscribe >= self.SUBSCRIBE_EVERY_S:
                 self._send("SUBSCRIBE")
                 last_subscribe = now
+            if now - last_time >= self.TIME_EVERY_S:
+                self._send(f"TIME,{time.time_ns()}")
+                self.clock.n_sent += 1
+                last_time = now
             try:
                 data, _ = self._sock.recvfrom(2048)
             except socket.timeout:
                 continue
             except OSError:
                 return
-            self._handle(data.decode("ascii", errors="replace").strip())
+            self._handle(data.decode("ascii", errors="replace").strip(), time.time_ns())
 
-    def _handle(self, msg: str):
+    def _handle(self, msg: str, arrival_ns: int):
         if msg == "SUBSCRIBED":
             self.last_reply = time.monotonic()
         elif msg.startswith("STATE,"):
@@ -492,6 +585,13 @@ class LiveGpsSource:
             self.imu_rows.append(msg[4:])
             if self.imu_buffer is not None:
                 self.imu_buffer.push(t_ns, values[:3], values[3:])
+        elif msg.startswith("TIME,"):
+            try:
+                sent_ns, unix_ns, boot_ns = (int(p) for p in msg.split(",")[1:])
+            except ValueError:
+                self.n_bad += 1
+                return
+            self.clock.add(sent_ns, arrival_ns, unix_ns, boot_ns)
         else:
             self.n_bad += 1
 

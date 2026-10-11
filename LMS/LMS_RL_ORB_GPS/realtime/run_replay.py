@@ -331,16 +331,18 @@ def print_verdict(latency_p95_ms, hz, target_ms=150.0, target_hz=10.0,
 def print_fusion(fu):
     """The fusion's part of the report, from OnlineFusion.summary()."""
     print()
-    gyro = fu["giroscopio"] and fu.get("frames_con_giroscopio_pct", 0) > 0
+    gyro = fu.get("frames_con_imu_pct", 0) > 0
     sensors = "cámara, giroscopio y GPS" if gyro else "cámara y GPS"
     print(f"  Fusión ({'solo visual: el GPS solo para arrancar' if fu['solo_visual'] else sensors}):")
+    if gyro:
+        print(f"     Frames con el giro del giroscopio, desde el primero: {fu['frames_con_imu_pct']:.1f} %")
     if not fu["arranco"]:
         print("     No arrancó: el GPS nunca vio el carro avanzar 20 m a más de 3 m/s.")
         return
     print(f"     Arrancó a los {fu['arranco_s']:.0f} s; factor de escala s al final {fu['s_final']:.2f}")
     if gyro:
-        print(f"     Frames girados con el giroscopio: {fu['frames_con_giroscopio_pct']:.1f} %"
-              f" (el resto, con la cámara)")
+        print(f"     Frames girados con el giroscopio, desde el arranque: "
+              f"{fu.get('frames_con_giroscopio_pct', 0):.1f} % (el resto, con la cámara)")
     elif fu["giroscopio"]:
         print("     Sin muestras de IMU: el rumbo lo giró la cámara")
     c = fu["correcciones"]

@@ -41,8 +41,11 @@ def status_line(st):
     """One console line from LiveSession.status()."""
     line = (f"  {st['elapsed_s']:4.0f} s | video {st['video_fps']:2.0f} fps, "
             f"faltan {st['missing']:2d} | procesados {st['processed_fps']:2.0f}")
-    # Only the PC's share: the capture time comes from the phone's clock.
-    if st["pc_latency_ms"] is not None:
+    # From the capture once the phone's clock is on the PC's; until then only
+    # the PC's share is real.
+    if st.get("clock_synced") and st["latency_ms"] is not None:
+        line += f", latencia {st['latency_ms']:3.0f} ms (PC {st['pc_latency_ms']:2.0f})"
+    elif st["pc_latency_ms"] is not None:
         line += f", latencia en la PC {st['pc_latency_ms']:3.0f} ms"
     line += f" | GPS {st.get('gps_fixes', 0)} fix"
     if "fix_age_s" in st:
@@ -51,6 +54,14 @@ def status_line(st):
         line += f" | cámara {st['camera_speed']:.1f} m/s"
     if st["stopped"]:
         line += " (detenido)"
+    # Which sensor turned the last frame, and the filter once it has started.
+    if st["gyro"]:
+        line += f" | giro: giroscopio ({st['imu_hz']:.0f} Hz)"
+    else:
+        line += " | giro: cámara" + (f" (IMU {st['imu_hz']:.0f} Hz)" if st["imu_hz"] >= 1
+                                     else " (sin IMU)")
+    line += (" | fusión: esperando" if st["fusion_sigma_m"] is None
+             else f" | fusión σ {st['fusion_sigma_m']:.1f} m")
     if st.get("recording"):
         line += " | grabando"
     if st.get("udp_silent"):
@@ -66,6 +77,12 @@ def status_loop(stop, session):
             print(status_line(st), flush=True)
 
 
+def clock_synced(res) -> bool:
+    """Whether every frame's capture time went onto the PC's clock."""
+    live = res["en_vivo"]
+    return live["frames_recibidos"] > 0 and live["frames_con_reloj_medido"] == live["frames_recibidos"]
+
+
 def print_live_results(res, src, gps):
     """The phone's side of the link, which only exists live."""
     sent = src.n_received + src.n_missing
@@ -73,14 +90,31 @@ def print_live_results(res, src, gps):
     print(f"  Frames recibidos del teléfono   : {src.n_received}"
           f"  ({src.n_missing} no enviados por el teléfono, "
           f"{100 * src.n_missing / max(sent, 1):.1f}%)")
+    clock = res["en_vivo"]["reloj"]
+    if clock_synced(res):
+        p50, p95 = np.percentile(src.transit_ms, [50, 95])
+        print(f"  Captura → llegada   p50 / p95   : {p50:.0f} / {p95:.0f} ms")
+        print(f"  Captura → resultado p50 / p95   : "
+              f"{res['e2e_ms_p50']:.0f} / {res['e2e_ms_p95']:.0f} ms")
     if "pc_ms_p50" in res:
         print(f"  Latencia en la PC   p50 / p95   : "
               f"{res['pc_ms_p50']:.0f} / {res['pc_ms_p95']:.0f} ms   (llegada → resultado)")
-    if src.transit_ms:
-        # The capture time comes from the phone's clock, whose offset from the
-        # PC's is not measured: a reference, not the real latency.
+    if clock_synced(res):
+        trip = clock["ida_y_vuelta_ms_min"]
+        print(f"  Reloj del teléfono              : desfase medido con {clock['respondidas']} "
+              f"consultas de hora;")
+        print(f"     la más rápida, {trip:.1f} ms de ida y vuelta (error ≤ {trip / 2:.1f} ms; "
+              f"mediana {clock['ida_y_vuelta_ms_p50']:.0f} ms)")
+        if "deriva_ms" in clock:
+            print(f"     el desfase se movió {clock['deriva_ms']:+.1f} ms en "
+                  f"{clock['deriva_en_s']:.0f} s")
+        print(f"     la hora Unix del teléfono va {clock['hora_unix_telefono_menos_pc_ms']:+.0f} ms "
+              f"respecto de la PC")
+    elif src.transit_ms:
+        # The phone did not answer the clock queries: the capture time is its
+        # own Unix time, a reference, not the real latency.
         p50, p95 = np.percentile(src.transit_ms, [50, 95])
-        print("  Referencia, desde la captura (reloj del teléfono):")
+        print("  Referencia, desde la captura (reloj del teléfono, sin respuesta a la consulta de hora):")
         print(f"     Captura → llegada   p50 / p95 : {p50:.0f} / {p95:.0f} ms")
         print(f"     Captura → resultado p50 / p95 : "
               f"{res['e2e_ms_p50']:.0f} / {res['e2e_ms_p95']:.0f} ms")
@@ -148,9 +182,12 @@ def run(session, args):
     print_results(res, True, session.est, session.scaler)
     print_live_results(res, session.source, session.gps)
     print_fusion(res["fusion"])
-    print_verdict(res["pc_ms_p95"], res["hz_efectivo"], what="Latencia p95 en la PC",
-                  note="La latencia desde la captura no entra en el veredicto: sin medir el\n"
-                       "desfase entre los relojes del teléfono y de la PC no se puede verificar.")
+    if clock_synced(res):
+        print_verdict(res["e2e_ms_p95"], res["hz_efectivo"], what="Latencia p95 desde la captura")
+    else:
+        print_verdict(res["pc_ms_p95"], res["hz_efectivo"], what="Latencia p95 en la PC",
+                      note="La latencia desde la captura no entra en el veredicto: el teléfono\n"
+                           "no respondió a la consulta de hora, y sin ella no se puede verificar.")
     session.save(res)
     print(f"\n  Sesión guardada en: {session.out_dir}")
     return 0

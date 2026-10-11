@@ -8,7 +8,7 @@ objects, in this order:
     prepare()   camera matrix, depth model and warm-up
     run()       blocks until the source ends or stop() is called
     summary()   metrics of the finished run
-    save(res)   the session folder: frames, fixes, IMU, metrics and figure
+    save(res)   the session folder: frames, fixes, IMU, clock queries, metrics and figure
     close()     release the network
 
 Every session runs the fusion (fusion.OnlineFusion): camera, gyroscope when
@@ -52,6 +52,9 @@ LOCATION_HEADER = ("Timestamp[nanosecond],latitude[degrees],longitude[degrees],"
                    "altitude[meters],speed[meters/second],Unix time[nanosecond]")
 IMU_HEADER = ("Timestamp[nanosec],gx[rad/s],gy[rad/s],gz[rad/s],"
               "ax[m/s^2],ay[m/s^2],az[m/s^2],Unix time[nanosec]")
+# One TIME query per row: the PC's clock when it left and when the answer came
+# back, and the phone's two clocks in between.
+CLOCK_HEADER = "pc_sent_ns,pc_back_ns,phone_unix_ns,phone_boot_ns"
 SKIP_START = 6          # frames the app's encoder writes before catching up
 
 
@@ -96,7 +99,7 @@ class PipelineSession:
         self.state = "sin iniciar"
         self.K = None
         self.est = self.scaler = None
-        self.source = self.pipe = self.fusion = None
+        self.source = self.pipe = self.fusion = self.imu_buffer = None
         self.recorder = TrackRecorder()
         self.latest_frame = None        # last processed Frame, for the window
         self.metrics = None
@@ -115,6 +118,7 @@ class PipelineSession:
             self.est, self.scaler = build_scale_worker(K, self.scale_hz, threaded=True)
         self.state = "precalentando"
         warm_up(K, width, height, self.est)
+        self.imu_buffer = imu_buffer
         self.fusion = OnlineFusion(gps_buffer, imu_buffer if self.use_gyro else None,
                                    visual_only=self.visual_only)
         self.pipe = RealtimePipeline(VisualFrontEnd(K, mask_bottom=self.mask_bottom),
@@ -136,7 +140,11 @@ class PipelineSession:
             raise SessionError("Sesión cancelada antes de empezar.")
         timer = threading.Timer(self.duration, self.stop) if self.duration else None
         self.state = "en marcha"
-        self._t0 = time.monotonic()
+        # The counters status() starts from; samples that came in during the
+        # warm-up are not this second's. Set before _t0, which status() checks.
+        t0 = time.monotonic()
+        self._prev = (t0, 0, 0, 0, self._imu_received())
+        self._t0 = t0
         if timer is not None:
             timer.start()
         try:
@@ -150,6 +158,9 @@ class PipelineSession:
         """Frames delivered by the source and not sent by the phone, so far."""
         return self.pipe.metrics.processed + self.pipe.n_dropped, 0
 
+    def _imu_received(self):
+        return self.imu_buffer.received if self.imu_buffer is not None else 0
+
     def status(self) -> dict:
         """
         Snapshot for a status line. Rates are per second since the previous
@@ -160,9 +171,8 @@ class PipelineSession:
             return st
         m = self.pipe.metrics
         received, missing = self._counters()
-        now = (time.monotonic(), received, missing, m.processed)
-        prev = self._prev or (self._t0, 0, 0, 0)
-        self._prev = now
+        now = (time.monotonic(), received, missing, m.processed, self._imu_received())
+        prev, self._prev = self._prev, now
         span = max(now[0] - prev[0], 1e-3)
         processed = now[3] - prev[3]
         st.update({
@@ -176,6 +186,9 @@ class PipelineSession:
                               if processed and m.pc_ms else None),
             "camera_speed": self.scaler.velocity if self.scaler is not None else None,
             "stopped": bool(self.est.stopped) if self.est is not None else None,
+            "imu_hz": (now[4] - prev[4]) / span,
+            # Whether the gyroscope turned the last frame; None when it is off.
+            "gyro": self.fusion.last_from_imu,
             # Position uncertainty of the fusion, None until it starts.
             "fusion_sigma_m": None if self.fusion.last is None else self.fusion.last[-1],
         })
@@ -201,10 +214,11 @@ class PipelineSession:
         return res
 
     def save(self, res):
-        """frames.csv, gps.csv, gyro_accel.csv (if any), metrics.json and the trajectory figure."""
+        """frames.csv, gps.csv, gyro_accel.csv and reloj.csv (if any), metrics.json and the figure."""
         self.state = "guardando"
         gps_rows = self._gps_rows()
         imu_rows = self._imu_rows()
+        clock_rows = self._clock_rows()
         self.out_dir = os.path.join(self.out, f"{self.kind}_{self.stamp}")
         os.makedirs(self.out_dir, exist_ok=True)
         save_frames_csv(os.path.join(self.out_dir, "frames.csv"), self.recorder.track,
@@ -219,6 +233,11 @@ class PipelineSession:
                 f.write(IMU_HEADER + "\n")
                 for row in imu_rows:
                     f.write(row + "\n")
+        if clock_rows:
+            with open(os.path.join(self.out_dir, "reloj.csv"), "w") as f:
+                f.write(CLOCK_HEADER + "\n")
+                for row in clock_rows:
+                    f.write(",".join(str(v) for v in row) + "\n")
         with open(os.path.join(self.out_dir, "metrics.json"), "w") as f:
             json.dump(res, f, indent=2)
         plot_trajectory(self.recorder.track, self.out_dir, self.kind,
@@ -227,6 +246,9 @@ class PipelineSession:
 
     def _imu_rows(self):
         """The IMU samples to keep with the session; the replay has them in its recording."""
+        return []
+
+    def _clock_rows(self):
         return []
 
 
@@ -260,7 +282,7 @@ class LiveSession(PipelineSession):
         self._build_pipeline(h.camera_matrix(), h.width, h.height, self.gps_buf, self.imu_buf)
         # The video opens only now: frames sent while the model loaded would
         # reach the pipeline stale.
-        self.source = LiveFrameSource(self.ip, h, self.video_port)
+        self.source = LiveFrameSource(self.ip, h, self.video_port, clock=self.gps.clock)
 
     def run(self):
         recording = False
@@ -302,6 +324,8 @@ class LiveSession(PipelineSession):
             st["fix_age_s"] = (self.source.last_t_ns - fixes[-1][0]) / 1e9
             st["gps_speed"] = fixes[-1][4]
         st["recording"] = self.gps.recording_folder
+        # The capture time is on the PC's clock: the latency from it is real.
+        st["clock_synced"] = self.source is not None and self.source.n_synced > 0
         st["udp_silent"] = (self.gps.last_reply is not None
                             and time.monotonic() - self.gps.last_reply > self.IDLE_REPLY_S)
         return st
@@ -321,6 +345,10 @@ class LiveSession(PipelineSession):
             "jpeg_invalidos": src.n_bad,
             "captura_llegada_ms_p50": float(np.percentile(transit, 50)),
             "captura_llegada_ms_p95": float(np.percentile(transit, 95)),
+            # Frames whose capture time went onto the PC's clock; the rest
+            # took the phone's Unix time.
+            "frames_con_reloj_medido": src.n_synced,
+            "reloj": gps.clock.summary(),
             "fixes_gps": len(gps.fixes),
             "muestras_imu": len(gps.imu_rows),
             "udp_invalidos": gps.n_bad,
@@ -335,6 +363,9 @@ class LiveSession(PipelineSession):
 
     def _imu_rows(self):
         return self.gps.imu_rows
+
+    def _clock_rows(self):
+        return self.gps.clock.rows
 
 
 class ReplaySession(PipelineSession):

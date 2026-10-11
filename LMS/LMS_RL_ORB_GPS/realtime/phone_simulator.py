@@ -4,16 +4,18 @@ protocol, so the live client and the interface can be tested without the
 phone.
 
     TCP 5000  HELLO line, then every frame as a 20-byte header plus its JPEG
-    UDP 5001  SUBSCRIBE / START / STOP in; SUBSCRIBED, STATE, GPS and IMU lines
-              out (IMU as the app will send it: each gyro_accel.csv row)
+    UDP 5001  SUBSCRIBE / START / STOP / TIME in; SUBSCRIBED, STATE, GPS, IMU
+              and TIME lines out (IMU as the app sends it: each gyro_accel.csv
+              row)
 
 It behaves like the phone where it matters to the PC: the camera runs in real
 time from the first connection, a new connection replaces the previous one,
 frames are dropped (not queued) when the PC falls behind, and fixes and IMU
 samples arrive when the video reaches their timestamp. --no-imu leaves the
-IMU out, as the current app does. Frames carry the recording's boot
+IMU out, as the app did before it sent it. Frames carry the recording's boot
 clock, so they pair with its location.csv; the Unix capture time is the
-current one, so the measured latency is that of the PC.
+current one, so the measured latency is that of the PC. TIME answers with
+that boot clock as it runs while playing, and the current Unix time.
 
 Usage:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.phone_simulator \\
@@ -78,6 +80,7 @@ class PhoneSimulator:
         self._subscriber = None
         self._recording = None
         self._latest = None                 # (header + JPEG) waiting to be sent
+        self._boot = None                   # (wall, boot-clock ns) when the camera started
         self._cv = threading.Condition()
 
     # ------------------------------------------------------------- camera
@@ -85,6 +88,7 @@ class PhoneSimulator:
     def _camera(self, cap, udp):
         """Plays the recording in real time; each frame replaces an unsent one."""
         t0_wall, t0_data = time.perf_counter(), int(self.frame_t[self.k0])
+        self._boot = (t0_wall, t0_data)
         i_fix = int(np.searchsorted(self.fix_t, t0_data))
         i_imu = int(np.searchsorted(self.imu_t, t0_data))
         for k in range(self.k0, len(self.frame_t)):
@@ -146,6 +150,14 @@ class PhoneSimulator:
             except OSError:
                 return
             word = data.decode("ascii", errors="replace").strip()
+            if word.startswith("TIME,"):
+                # Like the app: no state line, and nothing before the camera
+                # runs (its boot clock is the recording's from then on).
+                if self._boot is not None:
+                    t0_wall, t0_data = self._boot
+                    boot = t0_data + int((time.perf_counter() - t0_wall) * 1e9)
+                    udp.sendto(f"{word},{time.time_ns()},{boot}".encode("ascii"), addr)
+                continue
             if word == "SUBSCRIBE":
                 self._subscriber = addr
                 udp.sendto(b"SUBSCRIBED", addr)

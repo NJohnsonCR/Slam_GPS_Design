@@ -132,7 +132,7 @@ class PipelineWindow:
         status = ttk.LabelFrame(left, text="Estado", padding=8)
         status.grid(row=3, column=0, sticky="ew")
         self.lines = {}
-        for row, key in enumerate(("state", "video", "gps", "camera", "source")):
+        for row, key in enumerate(("state", "video", "gps", "imu", "camera", "fusion", "source")):
             self.lines[key] = ttk.Label(status, style=LABEL, text="", width=60)
             self.lines[key].grid(row=row, column=0, sticky="w")
         self.lines["state"].configure(text="Sin iniciar")
@@ -285,12 +285,15 @@ class PipelineWindow:
         if isinstance(self.session, LiveSession):
             video += f", faltan {st['missing']}"
         video += f" | procesados {st['processed_fps']:.0f}"
-        # Live, the capture time comes from the phone's clock, which is not in
-        # sync with the PC's: only the PC's share of the latency is reliable.
-        if st["pc_latency_ms"] is not None:
+        # Live, the latency from the capture is real only once the phone's
+        # clock is on the PC's; until then, only the PC's share is.
+        live = isinstance(self.session, LiveSession)
+        if live and not st.get("clock_synced") and st["pc_latency_ms"] is not None:
             video += f" | latencia en la PC {st['pc_latency_ms']:.0f} ms"
         elif st["latency_ms"] is not None:
             video += f" | latencia {st['latency_ms']:.0f} ms"
+            if live:
+                video += f" (en la PC {st['pc_latency_ms']:.0f})"
         self.lines["video"].configure(text=video)
         if "fix_age_s" in st:
             gps = (f"GPS: {st['gps_fixes']} fixes; el último hace {st['fix_age_s']:.1f} s, "
@@ -308,6 +311,20 @@ class PipelineWindow:
             if st["stopped"]:
                 camera += " (detenido)"
         self.lines["camera"].configure(text=camera)
+        # The gyroscope only turns a frame its samples cover: on another clock
+        # than the frames', they would arrive and the camera would still turn.
+        hz = st["imu_hz"]
+        if st["gyro"]:
+            imu = f"IMU: {hz:.0f} muestras/s; el giro lo da el giroscopio"
+        elif hz >= 1:
+            imu = f"IMU: {hz:.0f} muestras/s, pero el giro lo da la cámara"
+        else:
+            imu = "IMU: no llega; el giro lo da la cámara"
+        self.lines["imu"].configure(text=imu)
+        sigma = st["fusion_sigma_m"]
+        self.lines["fusion"].configure(
+            text="Fusión: espera ver el carro avanzar 20 m a más de 3 m/s" if sigma is None
+            else f"Fusión: en marcha, posición ± {sigma:.1f} m")
         if isinstance(self.session, LiveSession):
             folder = st.get("recording")
             source = f"Grabando en el teléfono: {folder}" if folder else "Sin grabar en el teléfono"
@@ -323,13 +340,23 @@ class PipelineWindow:
             self.result.configure(text=error, foreground="#c0392b")
             return
         self.lines["state"].configure(text=f"Terminada: {self.session.end_reason}")
-        if "pc_ms_p95" in res:
+        live = res.get("en_vivo")
+        if live and live["frames_con_reloj_medido"] < live["frames_recibidos"]:
             latency = f"latencia en la PC p95 {res['pc_ms_p95']:.0f} ms"
+        elif live:
+            latency = f"latencia p95 {res['e2e_ms_p95']:.0f} ms (PC {res['pc_ms_p95']:.0f})"
         else:
             latency = f"latencia p95 {res['e2e_ms_p95']:.0f} ms"
         self.lines["video"].configure(
             text=f"{res['frames_procesados']} procesados "
                  f"({res['tasa_descarte_%']:.1f} % descartados), {latency}")
+        fu = res["fusion"]
+        pct = fu.get("frames_con_imu_pct", 0)
+        self.lines["imu"].configure(text=f"IMU: el giroscopio giró el {pct:.0f} % de los frames"
+                                    if pct > 0 else "IMU: no llegó; el giro lo dio la cámara")
+        self.lines["fusion"].configure(text=f"Fusión: arrancó a los {fu['arranco_s']:.0f} s"
+                                       if fu["arranco"] else "Fusión: no arrancó (el GPS no vio "
+                                                             "el carro avanzar)")
         if isinstance(self.session, LiveSession):
             phone = self.session.folder
             self.lines["source"].configure(text=f"Grabó en el teléfono: {phone}" if phone
