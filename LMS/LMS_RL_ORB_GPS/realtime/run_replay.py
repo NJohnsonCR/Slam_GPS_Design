@@ -325,22 +325,24 @@ def plot_trajectory(track, out_dir, mode, metric=False, fixes=None):
         else:
             cam_gyro = err_cg = None
 
-    vo_label = ("Cámara sola, escala propia (alineación rígida)" if metric
-                else "Odometría visual (alineada)")
+    # The fusion is the official track; the camera alone and the camera with
+    # the gyroscope are diagnostics, to see what each sensor adds.
+    vo_label = ("Cámara sola (diagnóstico; sin GPS, deriva)" if metric
+                else "Odometría visual (diagnóstico; alineada)")
     fig, ax = plt.subplots(1, 2, figsize=(14, 6.5))
     a = ax[0]
-    a.plot(gps[:, 0], gps[:, 1], "-", lw=2, color=COLOR_GPS, label="GPS del teléfono")
+    a.plot(gps[:, 0], gps[:, 1], "-", lw=2, color=COLOR_GPS, label="GPS del teléfono (referencia)")
     direction_arrows(a, gps[:, :2], COLOR_GPS)
     a.plot(vo_al[:, 0], vo_al[:, 1], "--", lw=1.4, color=COLOR_CAMERA, label=vo_label)
     direction_arrows(a, vo_al[:, :2], COLOR_CAMERA, n=8)
     if cam_gyro is not None:
         a.plot(cam_gyro[:, 0], cam_gyro[:, 1], "-.", lw=1.5, color=COLOR_ALIGNED,
-               label="Cámara + giroscopio, sin GPS desde el arranque")
+               label="Cámara + giroscopio (diagnóstico; sin GPS, deriva)")
         direction_arrows(a, cam_gyro, COLOR_ALIGNED, n=8)
     # The fused track is already in the GPS frame: no alignment.
     fused = np.array([f[:2] for f in track.get("fused", []) if f is not None])
     if len(fused):
-        a.plot(fused[:, 0], fused[:, 1], "-", lw=1.2, color=COLOR_FUSED, label="Fusión")
+        a.plot(fused[:, 0], fused[:, 1], "-", lw=1.2, color=COLOR_FUSED, label="Fusión (trazo oficial)")
         direction_arrows(a, fused, COLOR_FUSED, n=8)
     t_gps = (np.asarray(track["t_ns"][:n], np.int64)[has_gps] - track["t_ns"][0]) / 1e9
     time_marks(a, t_gps, gps[:, :2], 60.0 if t_gps[-1] > 180 else 30.0)

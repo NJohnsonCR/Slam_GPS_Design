@@ -194,6 +194,21 @@ class PipelineSession:
         })
         return st
 
+    def track_since(self, n_fixes, n_frames):
+        """
+        For the window's map: the GPS fixes fed to the fusion after the first
+        n_fixes, as (east, north) metres from the first one, and the fused
+        (east, north) of each processed frame after the first n_frames, None
+        before the filter starts. The worker only appends to both lists, so
+        reading them from the window's thread is safe.
+        """
+        if self.fusion is None:
+            return [], []
+        gps = [(float(p[0]), float(p[1])) for _, p, _ in self.fusion.fixes[n_fixes:]]
+        fused = [None if f is None else (float(f[0]), float(f[1]))
+                 for f in self.recorder.track["fused"][n_frames:]]
+        return gps, fused
+
     # ------------------------------------------------------------- results
 
     def _summary(self) -> dict:

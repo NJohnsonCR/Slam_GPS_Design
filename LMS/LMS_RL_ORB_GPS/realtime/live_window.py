@@ -1,11 +1,17 @@
 """
 Window of the real-time pipeline: the video, live from the phone or from a
-recording, with the session's status, started and stopped with buttons
-instead of commands.
+recording, with the session's status and a map of the GPS and the fusion,
+started and stopped with buttons instead of commands.
 
 The session (session.py) runs on a worker thread. tkinter is only touched
 from the main thread, which polls the session: the newest frame about 15
-times per second and the status once per second.
+times per second, the map twice and the status once per second.
+
+The map draws the two tracks that matter while driving: the fusion (the
+official track) and the GPS (its reference), in metres east and north of the
+first fix, without a street background (decided on 5/10/2026). The camera
+alone and the camera with the gyroscope are diagnostics: they are in the
+plot saved at the end (run_replay.plot_trajectory).
 
 Usage:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.live_window
@@ -31,10 +37,13 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from realtime.run_replay import COLOR_FUSED, COLOR_GPS
 from realtime.session import LiveSession, ReplaySession, SessionError
 
 VIDEO_W, VIDEO_H = 640, 360
 VIDEO_MS = 66                   # ~15 frames per second on screen; processing stays at 30
+MAP_H = 300
+MAP_MS = 500
 MASK_COLOR = "#f0b429"
 LABEL = "Pipeline.TLabel"
 STATUS_MS = 1000
@@ -42,6 +51,105 @@ OUT_DIR = os.path.join(_ROOT, "resultados", "realtime")
 SETTINGS = os.path.join(OUT_DIR, "interfaz.json")      # last values typed, per user
 DEFAULTS = {"mode": "live", "ip": "", "record": False, "recording": "",
             "start": 0.0, "scale": True, "mask": 25}
+
+
+class TrackMap:
+    """
+    The GPS and the fusion on a canvas, in metres (east right, north up, the
+    same scale on both axes), fitted to what has been driven so far.
+    """
+
+    PAD = 26
+    MIN_SPAN_M = 60.0       # before the car moves, a fix's noise would fill the map
+    MIN_STEP_M = 0.5        # fused points closer than this to the last kept one are skipped
+    SCALE_BARS = (10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
+
+    def __init__(self, parent, width, height):
+        self.w, self.h = width, height
+        self.canvas = tk.Canvas(parent, width=width, height=height, bg="white",
+                                highlightthickness=1, highlightbackground="#d0d0cc")
+        self.reset()
+
+    def reset(self):
+        c = self.canvas
+        c.delete("all")
+        self.gps, self.fused = [], []
+        self.n_fixes = self.n_frames = 0
+        self._last_fused = None     # last fused point kept for the line
+        self._now = None            # newest fused position, kept or not
+        self._idle = c.create_text(self.w / 2, self.h / 2, fill="#9a9a96",
+                                   text="Mapa: el GPS y la fusión, en metros")
+        self._gps_line = c.create_line(0, 0, 0, 0, fill=COLOR_GPS, width=3, state="hidden")
+        self._fused_line = c.create_line(0, 0, 0, 0, fill=COLOR_FUSED, width=2, state="hidden")
+        self._start = c.create_oval(0, 0, 0, 0, fill="#0b0b0b", outline="", state="hidden")
+        self._gps_now = c.create_oval(0, 0, 0, 0, fill=COLOR_GPS, outline="white", state="hidden")
+        self._fused_now = c.create_oval(0, 0, 0, 0, fill=COLOR_FUSED, outline="white",
+                                        state="hidden")
+        self._bar = c.create_line(0, 0, 0, 0, width=2, fill="#0b0b0b", state="hidden")
+        self._bar_text = c.create_text(0, 0, anchor="sw", font=("TkDefaultFont", 8),
+                                       state="hidden")
+        c.create_text(self.w - 10, 8, anchor="ne", text="N ↑", font=("TkDefaultFont", 9, "bold"))
+        for row, (color, label) in enumerate(((COLOR_GPS, "GPS (referencia)"),
+                                              (COLOR_FUSED, "Fusión (trazo oficial)"))):
+            y = 12 + 16 * row
+            c.create_line(8, y, 28, y, fill=color, width=3)
+            c.create_text(34, y, anchor="w", text=label, font=("TkDefaultFont", 8))
+
+    def add(self, gps, fused):
+        """New fixes and fused rows from PipelineSession.track_since."""
+        self.n_fixes += len(gps)
+        self.n_frames += len(fused)
+        self.gps.extend(gps)
+        for p in fused:
+            if p is None:
+                continue
+            self._now = p
+            last = self._last_fused
+            if last is None or (p[0] - last[0]) ** 2 + (p[1] - last[1]) ** 2 >= self.MIN_STEP_M ** 2:
+                self.fused.append(p)
+                self._last_fused = p
+        return bool(gps or fused)
+
+    def draw(self):
+        if not self.gps:
+            return
+        c = self.canvas
+        pts = self.gps + self.fused
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        span_x = max(max(xs) - min(xs), self.MIN_SPAN_M)
+        span_y = max(max(ys) - min(ys), self.MIN_SPAN_M)
+        k = min((self.w - 2 * self.PAD) / span_x, (self.h - 2 * self.PAD - 30) / span_y)
+        mx, my = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+        cx, cy = self.w / 2, self.h / 2 + 15
+
+        def px(p):
+            return cx + (p[0] - mx) * k, cy - (p[1] - my) * k
+
+        def place(line, track):
+            if len(track) >= 2:
+                c.coords(line, *[v for p in track for v in px(p)])
+                c.itemconfigure(line, state="normal")
+
+        def dot(item, p, r):
+            x, y = px(p)
+            c.coords(item, x - r, y - r, x + r, y + r)
+            c.itemconfigure(item, state="normal")
+
+        c.itemconfigure(self._idle, state="hidden")
+        place(self._gps_line, self.gps)
+        place(self._fused_line, self.fused)
+        dot(self._start, self.gps[0], 4)
+        dot(self._gps_now, self.gps[-1], 5)
+        if self._now is not None:
+            dot(self._fused_now, self._now, 5)
+        # Scale bar: the largest round length that fits in a quarter of the width.
+        metres = max([b for b in self.SCALE_BARS if b * k <= self.w / 4] or [self.SCALE_BARS[0]])
+        y = self.h - 10
+        c.coords(self._bar, 10, y, 10 + metres * k, y)
+        c.coords(self._bar_text, 10, y - 3)
+        c.itemconfigure(self._bar_text, text=f"{metres} m", state="normal")
+        c.itemconfigure(self._bar, state="normal")
+        c.tag_raise(self._fused_now)
 
 
 class PipelineWindow:
@@ -74,7 +182,8 @@ class PipelineWindow:
         self._show_mode()
         self.top.protocol("WM_DELETE_WINDOW", self.close)
         self._timers = {"video": self.top.after(VIDEO_MS, self._tick_video),
-                        "status": self.top.after(STATUS_MS, self._tick_status)}
+                        "status": self.top.after(STATUS_MS, self._tick_status),
+                        "map": self.top.after(MAP_MS, self._tick_map)}
 
     # -------------------------------------------------------------- layout
 
@@ -83,7 +192,7 @@ class PipelineWindow:
         style = ttk.Style(self.top)
         style.configure(LABEL, background=style.lookup("TFrame", "background"))
         left = ttk.Frame(self.top, padding=10)
-        left.grid(row=0, column=0, sticky="ns")
+        left.grid(row=0, column=0, rowspan=2, sticky="ns")
 
         source = ttk.LabelFrame(left, text="Fuente", padding=8)
         source.grid(row=0, column=0, sticky="ew")
@@ -142,6 +251,8 @@ class PipelineWindow:
         self.video = tk.Canvas(self.top, width=VIDEO_W, height=VIDEO_H, bg="#0b0b0b",
                                highlightthickness=0)
         self.video.grid(row=0, column=1, padx=(0, 10), pady=10, sticky="n")
+        self.map = TrackMap(self.top, VIDEO_W, MAP_H)
+        self.map.canvas.grid(row=1, column=1, padx=(0, 10), pady=(0, 10), sticky="n")
         self._image_item = self.video.create_image(0, 0, anchor="nw")
         self._idle_text = self.video.create_text(VIDEO_W // 2, VIDEO_H // 2, text="Sin video",
                                                  fill="#9a9a96", font=("TkDefaultFont", 14))
@@ -204,6 +315,7 @@ class PipelineWindow:
         self._save_settings()
         self.outcome = None
         self.result.configure(text="", foreground="")
+        self.map.reset()
         self._set_running(True)
         self.worker = threading.Thread(target=self._work, args=(self.session,), daemon=True)
         self.worker.start()
@@ -262,6 +374,13 @@ class PipelineWindow:
             self.video.itemconfigure(self._image_item, image=self._photo)
             self.video.itemconfigure(self._idle_text, state="hidden")
             self.frames_shown += 1
+
+    def _tick_map(self):
+        self._timers["map"] = self.top.after(MAP_MS, self._tick_map)
+        if self.session is not None:
+            new = self.session.track_since(self.map.n_fixes, self.map.n_frames)
+            if self.map.add(*new):
+                self.map.draw()
 
     def _tick_status(self):
         self._timers["status"] = self.top.after(STATUS_MS, self._tick_status)

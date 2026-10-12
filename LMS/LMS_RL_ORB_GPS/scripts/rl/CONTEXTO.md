@@ -1993,7 +1993,8 @@ del gráfico completo (1.7 km de alto), una rotonda de ~15 m de radio es un quie
 pequeño en el GPS: se ve suave, pero está.
 
 **6. El "giro de 180°" del GPS en 151614 es real: el carro dio la vuelta a una cuadra y
-volvió por la misma calle.** Recorrido (GPS y giroscopio coinciden en cada giro):
+volvió por la misma calle.** **Confirmado por el estudiante con el video (11/10): los
+giros de 183, 196, 250 y 284 s coinciden con lo que se ve; caso cerrado.** Recorrido (GPS y giroscopio coinciden en cada giro):
 0–40 s sale del parqueo (+146° a los 17–23 s); 50–80 s al oeste; 85–90 s derecha, al
 norte; 90–180 s al norte (alto en 120–137 s); **180–190 s derecha (−83°), al este;
 190–200 s izquierda (+88°), al norte; 210–237 s detenido; 250–260 s izquierda (+86°),
@@ -2043,6 +2044,152 @@ cada sesión los frames antes y después muestran el giro.
 - **Escala de la cámara: no confiable en campo** (cámara/Doppler de 0.6 a 1.8 según la
   sesión y la velocidad).
 - 144332 sirve solo para verificar los sensores: no arrancó el filtro (5–8 km/h).
+
+**8. El gráfico de cada sesión, ampliado (11/10/2026).** `plot_trajectory`
+(`run_replay.py`), que hace `trajectory_<modo>_metric.png` al terminar una sesión en
+vivo o un replay con `--trajectory`:
+- **Sentido y tiempo:** flechas a lo largo de cada trazo (`direction_arrows`, 12 en el
+  GPS y 8 en los demás, repartidas por distancia), la marca m:ss sobre el GPS cada
+  minuto (cada 30 s si la sesión dura menos de 3 min; `time_marks`), Inicio (círculo)
+  y Fin (cuadrado). Ejes "Este"/"Norte". La leyenda va debajo del mapa para no tapar
+  el recorrido. Con eso se distingue la ida de la vuelta por la misma calle (151614).
+- **El cuarto trazo, "Cámara + giroscopio, sin GPS desde el arranque"**
+  (`camera_gyro_track`): `run_fusion(..., visual_only=True)` sobre los frames de la
+  sesión, el mismo que dibuja `evaluate.py --fusion`. Para eso `OnlineFusion` guarda
+  en `fixes` cada fix que le entrega al filtro (tiempo, posición, Doppler) y
+  `session.py` y `run_replay.py` se los pasan a `plot_trajectory`. Solo con escala
+  métrica y giroscopio. El panel de la derecha suma su separación al GPS y la consola
+  imprime la mediana y la final. La cámara sola sigue con su alineación rígida (sin
+  cambios: mismas medianas, 159.6 / 152.7 / 233.6 / 446.5 m).
+- Verificado: rehecho el gráfico de las cuatro sesiones desde `frames.csv` y
+  `gps.csv`: separación final de cámara + giroscopio 41 / 30 / 21 / 34 %, lo mismo
+  que `evaluate.py --fusion`. Replay de 1500 frames de `14_52_51` con `--trajectory`,
+  y sesión en vivo de 45 s con el simulador sirviendo esa grabación (`run_live`, sin
+  escala: el gráfico no métrico no lleva el cuarto trazo). Invariantes 6/6.
+
+**9. El trazo cámara + giroscopio de 151614 cubre toda la sesión, pero no llega al
+final.** Arranca a los 25.4 s (cuando arranca la fusión: es el mismo arranque) y sigue
+hasta el último frame (506.1 s); no se congela. En el gráfico parece cubrir solo el
+inicio porque:
+- **Se pasa al norte en el alto de 209–237 s.** El modo solo visual tiene la velocidad
+  como estado: llegó al alto con v = 15 m/s y rechazó los altos de la cámara 18 s
+  seguidos (diferencia demasiado grande para la compuerta, y sin GPS que la
+  corrija). Avanzó 600 m en 200–240 s con el carro casi quieto (GPS: 82 m) y, al
+  aceptar un alto a los 227.6 s con la incertidumbre de posición en 281 m, retrocedió
+  157 m en un frame (el salto del panel de la derecha, keyframe ~2770). En las demás
+  sesiones: 145250 y 150517 sin saltos > 20 m; 145514 tres de 21–33 m (66, 154 y
+  165 s); 151614 otro de 33 m a los 404 s. Es del modo solo visual: la fusión con GPS
+  no lo tiene. Sin cambiar (decisión pendiente del estudiante).
+- **Se queda corto de vuelta.** Desde los 240 s avanza con los metros de la cámara,
+  y con la lluvia esos metros son la mitad: 1128 m del trazo verde (cámara 1033 m)
+  contra 2035 m del GPS (Doppler) entre 240 y 506 s; los peores tramos, 240–260 s
+  (9 m contra 165 m), 300–320 s (27 contra 123) y 440–480 s (142 contra 599). El rumbo
+  del giroscopio es correcto (al sur desde los 280 s), así que vuelve sobre su propio
+  trazo de subida y termina en (−319, 261) m, a mitad de la calle de ida; el carro
+  terminó en (−210, −850).
+
+**10. Diseño de los trazos (decidido por el estudiante el 11/10/2026).**
+- **En tiempo real (la ventana): dos líneas, la fusión (trazo oficial) y el GPS (la
+  referencia).** Hasta el 11/10 la ventana no tenía mapa (era el paso 3 del plan); ahora
+  lo tiene, debajo del video (`TrackMap` en `live_window.py`, 640 × 300): metros al
+  este y al norte del primer fix con la misma escala en los dos ejes, ajustado a lo
+  recorrido (mínimo 60 m), barra de escala, norte, punto de inicio y la posición
+  actual de cada uno; sin fondo de calles (decisión del 5/10). Se actualiza dos veces
+  por segundo con `PipelineSession.track_since` (los fixes que recibió la fusión y su
+  estado por frame; la fusión se dibuja cada 0.5 m). Probado en replay con la ventana
+  real (15_05_17 desde el segundo 130, 45 s): 32 fixes y 177 puntos de fusión; el punto
+  de la fusión va adelante del de GPS, que llega hasta 1 s viejo.
+- **Al terminar (el análisis, `trajectory_<modo>_metric.png`): las cuatro líneas** y el
+  gráfico de desviación (punto 8). La leyenda dice qué es cada una: "GPS del teléfono
+  (referencia)", "Cámara sola (diagnóstico; sin GPS, deriva)", "Cámara + giroscopio
+  (diagnóstico; sin GPS, deriva)" y "Fusión (trazo oficial)".
+- El trazo cámara + giroscopio queda como diagnóstico con su limitación documentada
+  (punto 9: se adelanta en los altos cuando la compuerta rechaza los de la cámara; con
+  lluvia se queda corto).
+
+### 4.22 Robustez de la fusión con el GPS degradado (11/10/2026)
+
+Pregunta: cuando el GPS es malo (ruidoso, con saltos o con pérdidas, no ausente), ¿cuánto
+empeora la fusión, le da menos peso al GPS, y compensan la cámara y el giroscopio?
+Banco temporal (fuera del repo): `run_fusion` sobre los frames de las sesiones en vivo
+150517 (sin lluvia, 254 fixes, hasta 16.7 m/s) y 145514 (353 fixes), con el GPS de la
+grabación degradado; la Doppler queda intacta salvo en los fixes perdidos. **La
+referencia es el GPS bueno** (no hay ground truth). Error en cada instante de fix
+después del arranque, media de 5 semillas. "GPS solo" es el fix degradado, o, si se
+perdió, el último entregado llevado a su Doppler en la dirección de los dos últimos.
+
+**150517** (p50 / p95 / máximo, m):
+
+| GPS | GPS solo | Fusión | Fusión sin giroscopio | Posición ok / rechazada / forzada |
+|---|---|---|---|---|
+| Bueno (referencia) | 0 | 1.8 / 4.1 / 6 | 1.9 / 4.5 / 6 | 239 / 0 / 0 |
+| Ruido σ 5 m | 5.8 / 11.8 / 17 | **7.1 / 35.3 / 77** | 7.6 / 30.8 / 62 | 192 / 36 / 10 |
+| Ruido σ 10 m | 11.5 / 23.7 / 34 | **14.5 / 47.3 / 100** | 15.0 / 51.2 / 92 | 135 / 90 / 16 |
+| Ruido σ 20 m | 22.9 / 47.3 / 68 | 26.0 / 64.9 / 115 | 26.6 / 70.8 / 107 | 99 / 128 / 15 |
+| Multitrayecto (correlado) σ 10 m, τ 10 s | 11.9 / 23.0 / 29 | 12.7 / 26.3 / 50 | 11.9 / 25.7 / 32 | 214 / 19 / 6 |
+| Saltos sueltos de 30–100 m, 5 % de los fixes | 0 / 17.0 / 95 | **2.1 / 7.4 / 57** | 2.0 / 5.9 / 47 | 226 / 14 / 0 |
+| Saltos sueltos, 15 % | 0 / 76.9 / 99 | **2.8 / 35.3 / 86** | 2.4 / 23.8 / 80 | 192 / 45 / 3 |
+| Ráfagas de 5 s a 30–100 m (3 % de inicio) | 0 / 66.4 / 83 | 2.3 / 51.5 / 79 | 2.6 / 51.8 / 79 | 202 / 25 / 12 |
+| Pérdida del 50 % de los fixes | 0.1 / 9.1 / 30 | 2.3 / 10.9 / 32 | 2.5 / 12.6 / 36 | 115 / 1 / 0 |
+| Pérdida del 80 % | 3.0 / 77.0 / 142 | 8.0 / 100.9 / 138 | 10.4 / 128.7 / 195 | 35 / 6 / 2 |
+| Un fix cada 5 s | 1.5 / 16.2 / 33 | 4.5 / 50.4 / 85 | 5.1 / 50.5 / 86 | 40 / 5 / 2 |
+| Un fix cada 10 s | 6.3 / 55.1 / 79 | 18.4 / 190.5 / 202 | 20.6 / 195.9 / 231 | 13 / 7 / 3 |
+| Combinado: σ 10 m + saltos 5 % + pérdida 50 % | 14.4 / 52.4 / 100 | 20.1 / 117.7 / 222 | 20.8 / 99.7 / 206 | 44 / 53 / 16 |
+
+**145514**, lo distinto: ruido σ 5 m 5.8 / 29.1 (GPS solo 5.8 / 12.0); saltos 5 %
+1.6 / 12.1 (GPS 0 / 15.1); ráfagas 2.0 / 52.3 (GPS 0 / 65.4); **pérdida del 80 % 3.6 /
+25.6 (GPS 1.6 / 42.6) y un fix cada 5 s 2.7 / 12.1 (GPS 0.9 / 12.1)**: ahí la cámara y
+el giroscopio sí cubren los huecos.
+
+**Lo que aguanta:**
+- **Saltos sueltos:** la compuerta los rechaza. Con 5 % de fixes saltados el p95 queda
+  en 7–12 m contra 15–17 del GPS solo; con 15 %, 24–35 contra 75–77.
+- **Pérdidas moderadas** (50 %): igual que con todos los fixes (p95 6.5–10.9 m).
+- **Pérdidas grandes, si la escala de la cámara está bien** (145514): mejor que el GPS
+  solo.
+
+**Lo que no aguanta, y por qué** (variantes medidas en el banco, sin cambiar el código;
+p50 / p95 en m, 150517 y 145514):
+
+| | Como está | Sin el curso del GPS | Varianza del GPS ajustada al ruido | Sin la velocidad como estado |
+|---|---|---|---|---|
+| Ruido σ 5 m | 7.1 / 35.3 · 5.8 / 29.1 | **3.0 / 6.1 · 2.2 / 4.9** | **3.4 / 6.3 · 2.3 / 5.1** | 7.8 / 34.7 · 6.3 / 29.4 |
+| Ruido σ 10 m | 14.5 / 47.3 · 11.6 / 40.4 | 6.4 / 15.4 · 4.9 / 11.6 | **5.1 / 11.0 · 3.2 / 10.1** | 14.5 / 46.2 · 11.9 / 39.9 |
+| Multitrayecto σ 10 m | 12.7 / 26.3 · 10.9 / 24.1 | 11.0 / 21.3 · 9.6 / 20.7 | 10.6 / 21.2 · 8.5 / 19.0 | 13.3 / 28.2 · 11.8 / 25.2 |
+| Ráfagas de 5 s | 2.3 / 51.5 · 2.0 / 52.3 | 3.1 / 57.5 · 2.3 / 50.8 | igual | 2.5 / 58.1 · 2.0 / 54.8 |
+| Un fix cada 5 s | 4.5 / 50.4 · 2.7 / 12.1 | igual | igual | 4.7 / 52.5 · 2.9 / 17.3 |
+
+- **El EKF no le da menos peso al GPS degradado.** La posición entra siempre con
+  σ = 4 m (`GPS_SIGMA_M`) y el curso entre fixes con σ = 0.5 m (`COURSE_SIGMA_M`); su
+  única defensa es la compuerta (y forzar tras dos rechazos). Con ruido, el NIS medio
+  de posición sube de 0.37 a 3.8–5.0 y rechaza hasta la mitad de los fixes, pero los
+  cursos ruidosos que pasan la compuerta tuercen el rumbo y la predicción se va: con
+  σ 5–10 m la fusión queda **peor** que el GPS solo (p95 29–47 contra 12–24 m).
+- **Si el peso fuera el correcto, compensa:** con la varianza ajustada al ruido real,
+  la fusión filtra el GPS a la mitad (σ 5 m: p95 5–6 m contra 12; σ 10 m: 10–11 contra
+  24). Sin el curso pasa casi lo mismo: el curso es el que hace daño con ruido. Es
+  exactamente lo que el RL tiene que aprender (darle más o menos peso a un sensor según
+  la situación, OE3): aquí está medido cuánto se gana.
+- **Error correlado (multitrayecto):** ninguna variante lo quita (p95 19–26 m contra
+  23 del GPS solo). Un error lento y coherente parece movimiento; sin otra referencia
+  absoluta no se distingue.
+- **Ráfagas de varios segundos:** tras dos rechazos el filtro fuerza el tercer fix
+  si el carro pudo llegar ahí (`MAX_REJECTED`, `V_MAX`), y sigue el salto (p95 ~52 m).
+  El diseño elige no quedarse ciego si el error era de la predicción; el costo es este.
+- **Fixes escasos:** el error es a lo largo del camino (un fix cada 5 s en 150517: p95
+  50 m a lo largo, 18 m de costado). Entre fixes la velocidad del filtro va de 0.38 a
+  1.81 veces la Doppler: la escala de la cámara, errática en campo (§4.21). El
+  giroscopio sostiene el rumbo; los metros de la cámara no.
+- **El giroscopio casi no cambia estos números** (con GPS, el curso y la posición ya
+  corrigen el rumbo); su aporte está en los cortes y sin GPS (§4.17, §4.21 punto 4).
+
+**Para la tesis:** la fusión es robusta a saltos sueltos y pérdidas moderadas, pero no a
+GPS ruidoso con los pesos fijos; con el peso del GPS adaptado al ruido sí lo es (mide la
+mitad del error del GPS solo). Cambios posibles, ninguno hecho (decisión del
+estudiante): (a) que el curso entre fixes exija que la cuerda coincida con la Doppler
+por el tiempo transcurrido, o subir su σ; (b) adaptar `GPS_SIGMA_M` con el NIS reciente
+(o dejarlo al RL); (c) no forzar un fix que llega tras una ráfaga hasta que dos
+seguidos coincidan entre sí.
 
 ---
 
@@ -2291,7 +2438,14 @@ grabaciones en `mobile_data/2026_10_11_*`. Cámara, GPS e IMU llegaron completos
 recibido es idéntico a lo grabado); el EKF arrancó en todas, giró con el giroscopio en el
 ~100 % de los frames y aceptó todas las correcciones de posición. La cámara sola sigue
 sin servir como trazo (deriva de rumbo y escala errática) y con lluvia en el parabrisas
-no ve los giros. Pendiente: la escala de la cámara (cámara/Doppler 0.6–1.8 en campo) y
+no ve los giros. El giro de 180° de 151614 es real (vuelta a la cuadra, confirmado
+con el video). El gráfico de cada sesión ya trae flechas de sentido, tiempo y el
+trazo cámara + giroscopio (§4.21, punto 8); la ventana tiene el mapa con la fusión y el
+GPS (paso 3, punto 10). Con el GPS degradado (§4.22) la fusión aguanta saltos sueltos y
+pérdidas moderadas, pero con ruido queda peor que el GPS solo porque el peso del GPS es
+fijo y el curso entre fixes confía en cada par; con el peso ajustado filtra el ruido a
+la mitad (motivación medida para el RL). Pendiente: el modo solo visual se pasa en
+los altos cuando la compuerta rechaza los de la cámara (punto 9); la escala de la cámara (cámara/Doppler 0.6–1.8 en campo) y
 la varianza del GPS en el filtro (NIS 0.17–0.49, esperado 2).
 
 **11/10/2026, la laptop de campo (§4.20, §14 "Verificación en la laptop"):** lista,
