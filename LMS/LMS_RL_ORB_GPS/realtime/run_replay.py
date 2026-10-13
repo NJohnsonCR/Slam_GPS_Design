@@ -28,6 +28,11 @@ Usage:
 The fusion (camera, gyroscope and GPS) always runs; --visual-only uses the GPS
 only to start, and --no-gyro turns the heading with the camera.
 
+A deterministic replay is cached (cache.py): run again on the same recording,
+options and code, it copies the saved results to --out instead of processing;
+--no-cache reprocesses. The cache keeps the per-frame results, the metrics and
+the plot, in resultados/cache/, which goes into git.
+
 Console output stays in Spanish: it is evidence for the thesis report.
 """
 
@@ -522,11 +527,31 @@ def main():
                     help="Fusión solo visual: el GPS solo ubica el arranque")
     ap.add_argument("--no-gyro", action="store_true",
                     help="Girar con la cámara aunque la grabación tenga giroscopio")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="Procesar aunque la grabación esté en la caché (y no guardarla)")
     args = ap.parse_args()
 
     print("=" * 78)
     print(f"MODO REPLAY — {'ESTRICTO' if args.strict else 'DETERMINISTA'}")
     print("=" * 78)
+
+    # Only deterministic replays are cached: a strict one differs on every run.
+    entry = None
+    if not args.strict and not args.no_cache:
+        from realtime.cache import Entry
+        entry = Entry(args.session, args)
+        if entry.complete:
+            res = entry.restore(args.out)
+            with open(os.path.join(entry.dir, "cache.json")) as f:
+                meta = json.load(f)
+            print(f"  Desde la caché: {os.path.relpath(entry.dir)}")
+            print(f"  (procesada el {meta['procesado']} en {meta['equipo']}; "
+                  f"--no-cache para reprocesar)")
+            print(f"  Frames procesados: {res['frames_procesados']}; por frame p50 "
+                  f"{res['proc_ms_p50']:.1f} ms en ese equipo")
+            print_fusion(res["fusion"])
+            print(f"\n  Copiados a {args.out}: frames, métricas y trayectoria")
+            return 0
 
     frame_t, fixes = load_mobile_session(args.session)
     # Frames left out at the start: the encoder warm-up, or everything before
@@ -581,7 +606,7 @@ def main():
     # The pipeline only measures times; the recorder also keeps every step,
     # to rebuild the route and to save it.
     recorder = TrackRecorder()
-    keep = args.trajectory or args.save_frames
+    keep = args.trajectory or args.save_frames or entry is not None
     pipe = RealtimePipeline(fe, gps_buf, strict=args.strict,
                             on_result=recorder if keep else None,
                             scale_worker=scaler, fusion=fusion)
@@ -655,6 +680,22 @@ def main():
     with open(path, "w") as f:
         json.dump(res, f, indent=2)
     print(f"\nMétricas guardadas: {path}")
+
+    if entry is not None:
+        # The cache always keeps the three files, also those not asked for.
+        os.makedirs(entry.dir, exist_ok=True)
+        files = {"replay": path}
+        if args.save_frames:
+            files["frames"] = os.path.join(args.out, f"frames_{mode}{suffix}.csv")
+        else:
+            save_frames_csv(entry.path("frames"), recorder.track, m)
+        if args.trajectory:
+            files["trajectory"] = os.path.join(args.out, f"trajectory_{mode}{suffix}.png")
+        else:
+            plot_trajectory(recorder.track, entry.dir, mode, metric=scaler is not None,
+                            fixes=fusion.fixes)
+        entry.store(files)
+        print(f"Guardada en la caché: {os.path.relpath(entry.dir)}")
     return 0
 
 

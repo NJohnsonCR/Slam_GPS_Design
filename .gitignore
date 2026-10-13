@@ -7,6 +7,9 @@ resultados/*
 !resultados/rl_cache/
 resultados/rl_cache/*
 !resultados/rl_cache/*_cache.npz
+# Y la caché de replays deterministas (realtime/cache.py): los resultados de
+# grabaciones largas, para no reprocesarlas en cada computadora.
+!resultados/cache/
 
 # Ignorar archivos de caché de Python
 __pycache__/

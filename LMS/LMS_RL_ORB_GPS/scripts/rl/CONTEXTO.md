@@ -2191,6 +2191,301 @@ por el tiempo transcurrido, o subir su σ; (b) adaptar `GPS_SIGMA_M` con el NIS 
 (o dejarlo al RL); (c) no forzar un fix que llega tras una ráfaga hasta que dos
 seguidos coincidan entre sí.
 
+
+### 4.23 Curso condicionado a la Doppler y ráfagas del GPS (12/10/2026)
+
+Decisiones del estudiante sobre §4.22: (a) sí, (b) no (el peso del GPS es el OE3, queda
+para el RL), (c) sí. Implementado en `GpsCameraFusion` (`fusion.py`):
+
+- **(a) El curso entre dos fixes solo se usa si la cuerda coincide con la Doppler:**
+  |cuerda − v̄·Δt| ≤ `COURSE_DOPPLER_M` = 1.5 m. En las cuatro grabaciones de campo
+  limpias la diferencia es 0.24 m (p50), 1.17 m (p99) y 1.8 m como máximo: se pierde 1
+  curso de 355 en 151614 y ninguno en las demás. Con ruido σ 5 m pasa ~20 % de las
+  cuerdas; con σ 10 m, ~10 %.
+  **Más, decidido al medir (no estaba en la propuesta): con el giroscopio girando el
+  rumbo, el curso nunca se fuerza** (`may_force=not self._from_gyro`); sin
+  giroscopio se fuerza como antes, porque ahí es lo único que recupera el rumbo de la
+  cámara. El largo de la cuerda no ve el error de costado de un fix ruidoso: con solo
+  la condición de la Doppler, el ruido σ 5 m quedaba en p95 25.7 m (antes 35.3); con
+  el curso sin forzar, 6.5 m.
+- **(c) Ráfagas: no se fuerza un fix mientras el GPS siga desplazado por el mismo
+  vector.** Una ráfaga empieza con un fix cuya cuerda falla la Doppler por más de
+  `GPS_JUMP_M` = 10 m (nunca con fixes limpios; máximo 1.8 m) y que se aleja de una
+  predicción con la que el fix anterior coincidía. Mientras los fixes rechazados
+  queden desplazados por el mismo vector (± `BURST_MATCH_M` = 8 m), ninguno se fuerza,
+  hasta `JUMP_HOLD_S` = 10 s desde el primer salto; un nuevo salto dentro de la ráfaga
+  actualiza el vector. El forzado tras un corte de GPS no cambia (no hay salto entre
+  fixes seguidos).
+  **La regla literal ("forzar cuando dos seguidos coinciden") no sirve:** los fixes de
+  una ráfaga se mueven juntos, así que dos seguidos coinciden. Y la primera versión
+  (no forzar nada durante 10 s tras cualquier salto de la cuerda) rompía el GPS
+  ruidoso: con σ 10 m el ~45 % de las cuerdas pasa de 10 m, el filtro no podía forzar
+  nunca y se iba (p95 793 m). Por eso la condición es el mismo vector de
+  desplazamiento, que el ruido no repite.
+- Contadores nuevos en `metrics.json` → `fusion`: `saltos_del_gps`,
+  `forzados_retenidos_tras_salto`, `cursos_descartados_por_doppler`.
+
+**Antes y después** (banco de §4.22, 5 semillas, contra el GPS bueno; p95 en m;
+"sin gyro" es la fusión con el rumbo de la cámara):
+
+| GPS | 150517 antes → después | 145514 antes → después | GPS solo | Sin gyro, después (150517 · 145514) |
+|---|---|---|---|---|
+| Bueno | 4.1 → 4.1 | 3.1 → 3.1 | — | 4.5 · 3.1 |
+| Ruido σ 5 m | 35.3 → **6.5** | 29.1 → **5.3** | 11.8 · 12.0 | 21.9 · 21.4 |
+| Ruido σ 10 m | 47.3 → **15.8** | 40.4 → **11.6** | 23.7 · 24.0 | 35.4 · 31.3 |
+| Ruido σ 20 m | 64.9 → **39.7** | 55.7 → **36.8** | 47.3 · 48.0 | 60.9 · 51.4 |
+| Multitrayecto σ 10 m, τ 10 s | 26.3 → 21.0 | 24.1 → 20.4 | 23.0 · 23.1 | 24.0 · 23.8 |
+| Saltos sueltos 5 % | 7.4 → 7.9 | 12.1 → **6.1** | 17.0 · 15.1 | 5.1 · 3.2 |
+| Saltos sueltos 15 % | 35.3 → **4.7** | 24.2 → **6.4** | 76.9 · 74.9 | 6.3 · 3.5 |
+| Ráfagas de 5 s a 30–100 m | 51.5 → **4.4** | 52.3 → **3.7** | 66.4 · 65.4 | 5.0 · 3.8 |
+| Pérdida 50 % / 80 % | 10.9 / 100.9 → igual | 6.5 / 25.6 → igual | 9.1 / 77.0 · 6.2 / 42.6 | 12.6 / 128.7 · 6.8 / 26.9 |
+| Un fix cada 5 s / 10 s | 50.4 / 190.5 → igual | 12.1 / 38.6 → igual | 16.2 / 55.1 · 12.1 / 40.3 | 50.5 / 195.9 · 12.4 / 44.1 |
+| Combinado | 117.7 → **27.8** | 88.4 → **19.2** | 52.4 · 55.6 | 46.1 · 50.9 |
+
+- **Con GPS bueno nada cambia** (mismas correcciones aceptadas en las cuatro sesiones;
+  predicción contra cada fix 1.3–2.0 m p50 como en §4.21). Barrido de cortes de 10–120
+  s: idéntico al de antes en 150517 y 145514. Invariantes 6/6.
+- **Ahora la fusión filtra el GPS ruidoso** (σ 5 m: p95 5–6.5 m contra 12 del GPS
+  solo; σ 10 m: 12–16 contra 24) y **ya no sigue las ráfagas** (4 m contra 52).
+- Lo que no cambió: el multitrayecto (error lento y coherente: parece movimiento) y los
+  fixes escasos (escala de la cámara, §4.22).
+- **Sin giroscopio la mejora con ruido es menor** (σ 5 m: p95 21–22 m): ahí el curso se
+  sigue forzando, como corresponde sin otra fuente de rumbo.
+
+**Arreglo de paso:** `evaluate.py --sweep` fallaba en sesiones cortas (`summarize_sweep`
+con una duración sin cortes: 145250 dura 136 s y no le cabe uno de 120 s). Ahora omite
+esa duración.
+
+### 4.24 Mapa en replay y caché de resultados (12/10/2026)
+
+- **El mapa de la ventana también funciona en replay**: la ventana usa la misma
+  `PipelineSession.track_since` en vivo y con una grabación; probado con la ventana real
+  sobre 15_05_17 (§4.21, punto 10). El replay guarda frames.csv, gps.csv, metrics.json
+  y la trayectoria con las cuatro líneas, como en vivo; no guarda gyro_accel.csv (la IMU
+  ya está en la grabación) ni reloj.csv (en replay no hay consulta de hora).
+- **Caché de replays deterministas** (`realtime/cache.py`, usada por `run_replay.py`):
+  `resultados/cache/<grabación>/<clave>/` con frames, métricas, trayectoria y
+  `cache.json` (qué entró en la clave, cuándo y en qué equipo, versiones de OpenCV,
+  numpy y torch). La clave hashea (1) el contenido de la grabación (video, tiempos, GPS
+  e IMU; ~1 s para 430 MB), (2) las opciones que cambian el resultado y (3) el código
+  que lo produce (`pipeline.py`, `depth_scale.py`, `fusion.py`, `sources.py`, más
+  `CODE_VERSION` para el bucle de `run_replay.py`). Si algo cambia, no acierta y
+  reprocesa; `--no-cache` fuerza. `python -m LMS.LMS_RL_ORB_GPS.realtime.cache` la
+  lista. **No cachea** el modo estricto ni la ventana (no son reproducibles). Va en git
+  (`.gitignore`: `!resultados/cache/`). Probado: 600 frames procesados en 56 s y
+  restaurados en 0.5 s con el JSON idéntico; otra máscara crea otra entrada.
+  **Ojo:** el modelo de profundidad en otra GPU o con otro torch puede dar resultados
+  algo distintos; `cache.json` dice dónde se procesó cada entrada.
+
+
+### 4.25 Diagnóstico general del sistema (12/10/2026)
+
+Con el código del 12/10 ((a) y (c) de §4.23). Fuentes: las cuatro sesiones de campo en
+vivo (§4.21), sus replays deterministas completos en la laptop (conectada, sin otra
+carga salvo en 145250; en la caché, §4.24), los barridos de cortes de GPS, el banco de
+GPS degradado (§4.22–4.23) y lo medido antes en la de escritorio (§4.3, §4.16, §4.20).
+**No hay ground truth:** la referencia es el GPS del teléfono (al aire libre, sin saltos
+en las cuatro sesiones, curso igual al del giroscopio ±3–8°, §4.21).
+
+#### 1. Rendimiento
+
+| | Escritorio (Ryzen 5600X, RTX 3070) | Laptop conectada (i5-8300H, GTX 1050 Ti) | Laptop con batería |
+|---|---|---|---|
+| Por frame p50 (ORB / emparejamiento / pose) | 23–27 ms (9 / 6 / 7) | 48–54 ms (19–23 / 14–16 / 14) | 75–84 ms (32 / 22 / 20) |
+| Frecuencia efectiva en vivo | 30 Hz | ~19 Hz | 11–13 Hz |
+| Descarte en vivo | 0.1–1 % | 37 % | 56–62 % |
+| Captura → resultado p50/p95, por cable | 97 / 107 ms: cumple | 132–138 / 167–189 ms: **no cumple** | 164–169 / 201–219 ms: **no cumple** |
+| Modelo de profundidad por estimación | 88–97 ms | 291 ms (hilo, en vivo); 423–427 ms (en línea, replay) | 442 ms |
+| EKF por frame p50 / p95 | 0.14 ms | 0.15–0.23 / 0.36–0.46 ms | 0.36–0.40 / 0.93–1.04 ms |
+
+- **30 Hz con la fusión: sí en la de escritorio; no en la laptop** (frecuencia ≥ 10 Hz
+  sí, p95 < 150 ms no). La fusión no es el cuello: 0.2–0.4 ms de 50–84. El cuello es el
+  front-end ORB (fijo por el invariante T6, §4.20).
+- **Costos:** EKF 0.2 ms por frame (incluye integrar el giroscopio; la IMU llega a 53 Hz
+  por el socket del GPS, sin costo medible aparte). Escala: +2.3 ms de latencia en la de
+  escritorio (§4.3); en la laptop el p95 en la PC sube de 92 a 100 ms (§4.20).
+- **En vivo y en replay, la fusión da lo mismo:** predicción contra cada fix p50 / p95
+  1.3 / 3.2 contra 1.2 / 3.1 m (145250), 2.0 / 4.3 contra 1.8 / 4.0 (150517), 1.4 /
+  3.4 contra 1.3 / 3.0 (145514), 2.0 / 5.3 contra 1.8 / 4.1 (151614). El replay
+  determinista reproduce `run_fusion` a 0.5 mm (§4.19). **La cámara no da lo mismo:**
+  procesando todos los frames su rumbo deriva **más** (+48 contra +24°, +194 contra
+  +106°, +140 contra +71°): entre frames más separados gira con menos deriva (§4.16),
+  y el descarte de la laptop hace de esa separación.
+
+#### 2. Odometría visual
+
+| Replay determinista (30 Hz) | 145250 | 145514 | 150517 | 151614 (lluvia) |
+|---|---|---|---|---|
+| Error de giro por frame p50 / p90 (giro real p50) | 0.33 / 0.83° (0.38°) | 0.29 / 0.90° (0.32°) | 0.37 / 0.97° (0.39°) | 0.33 / 1.04° (0.32°) |
+| Rumbo cámara − giroscopio al final (máximo) | +48° (68°) | +140° (142°) | +194° (200°) | −502° (532°) |
+| Distancia cámara / GPS | 1605 / 987 m | 2814 / 1867 m | 2267 / 2342 m | 2662 / 3351 m |
+| Cámara/Doppler por banda (p50) | 1.47–1.83 | 1.3–1.8 (en vivo) | 1.28 a 10–12 m/s; **0.54–0.58 a 12–18** | **0.16** a 14–18 m/s |
+| Cámara "detenida" con el carro a > 1 m/s | 0.0 % | 0.7 % | 0.6 % | **11.4 % (400 m)** |
+| Cámara sola / cámara + giroscopio, separación final | 73 % / 39 % | 69 % / 31 % | 97 % / 21 % | 33 % / 34 % |
+
+- **La VO no sirve como trazo por sí sola.** El error de giro por frame es del tamaño
+  del giro típico; en los giros (> 2°) la cámara gira 1.16–1.20 veces el giroscopio, y
+  en recta suma un sesgo: +48 a +194° de deriva en 2–8 min (~10–25°/min; en la autopista
+  de la de escritorio, +55°/min, §4.16). **La escala es errática:** de 0.16 a 1.8 veces
+  la Doppler según la sesión y la velocidad; a más de 12 m/s colapsa.
+- **Dónde falla:** lluvia en el parabrisas (no ve los giros: −0.04 veces el giroscopio;
+  se cree detenida en el 11–13 % de la marcha, §4.21); velocidad alta (escala 0.16–0.6
+  a más de 12 m/s); poca textura (bajo techo sin avanzar, inliers p50 16–21 y 15–22
+  poses descartadas por giro imposible, §4.20). **No medido en campo:** noche, túneles,
+  autopista con el código nuevo (lo más rápido fue 17.9 m/s).
+- **Lo que sí aporta:** la velocidad entre fixes (1 s) y los altos (la compuerta ve el
+  84–93 % de los altos del GPS, con 0–1.1 % de altos falsos en seco).
+- **El giroscopio:** baja la separación de la cámara sola de 33–97 % a 21–39 %, y
+  sostiene el rumbo de la fusión: en cortes de 120 s de 151614, p50 413 → 187 m; de 60 s
+  en 145250, 108 → 71 m (barridos, filas "cámara" contra "giroscopio").
+
+#### 3. El filtro
+
+**a) Con los sensores bien** (cuatro sesiones, en vivo):
+- **Arranca** cuando el GPS ve 20 m seguidos a ≥ 3 m/s: a los 2.6, 13.7, 14.0 y 25.4 s
+  (este último, salida lenta de un parqueo). A 5–8 km/h no arranca (14:43).
+- **Sigue al GPS:** predicción de 1 s contra cada fix nuevo p50 1.3–2.0 m, p95 3.2–5.3
+  m; 0 correcciones de posición rechazadas; giroscopio en el 99.9–100 % de los frames.
+- **El NIS de posición es 0.17–0.49** (esperado 2): la varianza del GPS (4 m) es
+  conservadora con este GPS. No se toca: es el peso que le toca al RL.
+
+**b) Cuando un sensor falla** (p50 / p90 o p95 en m, según se indica):
+
+| Falla | Cómo se comporta | Error |
+|---|---|---|
+| **GPS cortado** 10 / 20 / 30 / 60 / 120 s (al volver, p50 / p90; 3–4 sesiones) | Sigue con giroscopio + velocidad (estado) + cámara; le gana al GPS a velocidad constante en el 55–100 % de los cortes | 10–22 / 20–61; 17–54 / 62–163; 34–161 / 80–255; 71–242 / 144–597; 156–434 / 427–680 |
+| **GPS ruidoso** σ 5 / 10 / 20 m (p95) | Filtra el ruido (curso solo si cuadra con la Doppler, §4.23) | 5.3–6.5 / 11.6–15.8 / 36.8–39.7 (GPS solo 12 / 24 / 47) |
+| **GPS con saltos** sueltos 5–15 % / ráfagas de 5 s (p95) | Los rechaza; no sigue las ráfagas | 4.7–7.9 / 3.7–4.4 (GPS solo 15–77 / 65) |
+| **GPS con multitrayecto** (error correlado, σ 10 m, p95) | No lo distingue de movimiento | 20–21 (GPS solo 23) |
+| **GPS escaso** (1 fix cada 5 / 10 s, p95) | Depende de la escala de la cámara | 12–50 / 39–191 (GPS solo extrapolado 12–16 / 40–55) |
+| **Cámara con lluvia** (151614) | El rumbo no se afecta (giroscopio); la compuerta de altos rechaza 38–42 altos falsos | predicción 2.0 / 5.3 en vivo (seco 1.3–2.0 / 3.2–4.3); cortes de 30 s 74 / 186 |
+| **Sin IMU** (rumbo de la cámara) | Con GPS bueno, igual; con GPS malo o cortado, peor | GPS bueno p95 3.1–4.5; ruido σ 5 m p95 21–22 (con IMU 5–6.5); cortes de 120 s en 151614 p50 413 (con IMU 187) |
+| **Dos a la vez: GPS cortado + lluvia** (151614) | El giroscopio sostiene el rumbo; la escala de la cámara empeora | 10 / 30 / 60 s: 17 / 74 / 150 p50 (seco 10–22 / 34–161 / 71–242) |
+| **GPS cortado + sin IMU** | Rumbo de la cámara: deriva | 151614: 30 s 92 / 230, 60 s 167 / 441 (con IMU 74 / 186, 150 / 323) |
+| **GPS ruidoso + sin IMU** (σ 10 m, p95) | El curso se fuerza (sin otra fuente de rumbo) | 31–35 (con IMU 12–16) |
+| **GPS combinado (ruido + saltos + pérdidas) + sin IMU** (p95) | | 46–51 (con IMU 19–28) |
+| **Solo cámara + giroscopio, sin GPS desde el arranque** | Rumbo bien, largo mal | separación final 21–41 % de lo recorrido |
+
+**c) Qué hace el EKF fijo y qué le queda al RL**
+
+**Lo hace el EKF fijo (medido):** arranca solo; sigue al GPS a 1.3–2.0 m (p50);
+rechaza saltos sueltos y ráfagas (p95 4–8 m contra 15–77 del GPS); filtra ruido blanco
+a la mitad (p95 5–16 m contra 12–24); el rumbo sale del giroscopio (99.9–100 % de los
+frames) y sobrevive a la lluvia; cubre cortes de 10 s con 10–22 m (p50) y le gana al GPS
+extrapolado en el 55–100 % de los cortes.
+
+**No lo hace el EKF fijo, y cuánto ganaría una política (oráculo, medido):**
+
+1. **Cuánto confiar en la velocidad de la cámara durante un corte de GPS.** Hoy siempre
+   la usa. Ignorarla (Doppler constante + giroscopio) es mejor en el 11–70 % de los
+   cortes según la sesión (en 150517, rápida, el 67–70 % de los de 20–30 s). 324 cortes
+   de 10–30 s en las cuatro sesiones, error al volver el GPS (p50 / p90 m):
+
+   | Política | 10 s | 20 s | 30 s |
+   |---|---|---|---|
+   | EKF fijo (siempre con la cámara) | 14.3 / 38.4 | 32.3 / 101.0 | 61.8 / 195.3 |
+   | Siempre sin la cámara | 18.4 / 49.5 | 44.2 / 121.7 | 81.7 / 207.1 |
+   | Regla de un umbral sobre la velocidad (validación dejando una sesión afuera) | 14.7 / 38.3 | 32.0 / 95.1 | 61.4 / 177.7 |
+   | Reglas sobre la razón Doppler/cámara o los inliers (ídem) | 14.7–17.0 / 41.6–49.3 | 30.8–45.3 / 106.6–125.6 | 67.7–81.0 / 189.0–201.7 |
+   | **Oráculo (el mejor en cada corte)** | **8.3 / 25.6** | **21.3 / 67.0** | **39.6 / 111.0** |
+
+   **El margen existe y es grande** (30 s: p90 195 → 111 m, −43 %), **pero ninguna regla
+   de una señal lo captura**: la mejor (velocidad) recupera el 21 % del p90 a 30 s y nada
+   del p50. Correlaciones de las señales con "conviene ignorarla": velocidad +0.32,
+   fracción detenida −0.17, inliers +0.10, inestabilidad de la razón +0.10, sesgo +0.05.
+2. **El peso del GPS con ruido fuerte.** Después de §4.23 el margen es chico: σ 5 m,
+   ninguno (p95 6.5 contra 6.7 del oráculo); σ 10 m, 1–2 m de p95 (15.8 → 14.6, 11.6 →
+   9.5); σ 20 m, grande en la mediana (19.9 → 7.8 y 14.2 → 5.7 m) pero no en el p95 (el
+   oráculo empeora una sesión, 39.7 → 49.7). **Una regla de una línea (varianza ×
+   NIS medio reciente / 2) llega a lo mismo** (σ 20 m: p50 8.2 y 5.3 m), con dos
+   retrocesos en 145514 (σ 10 m p95 11.6 → 20.9; combinado 19.2 → 30.9).
+3. **Multitrayecto:** ningún peso lo corrige (con el peso ideal, p95 18–21 contra 20–21).
+   No es tarea del RL.
+
+#### 4. Sensores
+
+Los tres llegan completos y en el mismo reloj (§4.20, §4.21): GPS e IMU, 100 % de lo
+grabado con los mismos valores; frames, 99.9 % a ≤ 1 µs del grabado (0–17 no enviados
+por sesión). GPS: 1 Hz sin huecos, velocidad entre fixes contra Doppler 0.22–0.31 m/s
+(p50), curso contra giroscopio ±3–8° (p5–p95); no es ground truth (varios metros).
+IMU: 53 Hz, intervalo máximo 19 ms. Cámara: 30 fps, 1280×720, JPEG por cable 66–70 ms
+de la captura a la llegada; calidad de la VO, punto 2.
+
+#### 5. Evaluación
+
+- **Funciona bien (medido):** sensores y reloj; la fusión con GPS bueno (1–2 m);
+  saltos y ráfagas; ruido blanco; el rumbo con el giroscopio, también con lluvia; los
+  cortes cortos (10 s); la ventana con mapa en vivo y replay; la caché.
+- **Funciona regular:** la latencia en la laptop (p95 167–219 ms > 150; la frecuencia
+  cumple); los cortes de más de 20 s (p50 17–161 m a 20–30 s), que dependen de la
+  escala de la cámara; la escala (0.16–1.8 veces la Doppler); la compuerta de altos con
+  lluvia; el modo solo visual en los altos (§4.21 punto 9); los fixes escasos.
+- **Funciona mal:** la cámara sola como trazo (deriva de rumbo, escala); la VO con
+  lluvia.
+- **Sin medir:** ground truth (no hay); noche; túneles y cortes reales del GPS (solo
+  simulados); multitrayecto real (solo sintético); la laptop con el perfil de energía
+  "Rendimiento"; las grabaciones de la de escritorio (2025_03_11, 14:05, 14:18) con el
+  código del 12/10 (no están en la laptop: procesarlas allá y commitear la caché).
+- **Limitaciones aceptables:** la latencia de la laptop (la de escritorio cumple); la
+  cámara sola (es diagnóstico); el multitrayecto (sin otra referencia absoluta no se
+  distingue); la VO con lluvia (el rumbo lo da el giroscopio).
+- **Para arreglar (no bloquean el RL):** la compuerta de altos con lluvia, y el modo
+  solo visual en los altos si se va a reportar como línea base del OE4.
+
+#### 6. ¿Se puede hacer el RL?
+
+**Sí, con un trabajo claro y medible, pero con margen incierto de captar.** El caso con
+margen medido es **la confianza en la cámara durante los cortes de GPS** (oráculo: −43 %
+de p90 a 30 s); el peso del GPS deja poco tras §4.23, y lo poco lo toma una regla. No
+hay que arreglar nada antes. **Riesgo:** con cuatro sesiones (324 cortes) y señales de
+correlación ≤ 0.32, lo aprendido puede no generalizar; §3.5.1 vio exactamente eso (6
+features peor que no decidir; un umbral sí capturaba). Por eso el RL tiene que medirse
+**dejando una sesión afuera** y contra **la regla de velocidad**, no solo contra el EKF
+fijo. Más datos ayudan: las tres grabaciones largas de la de escritorio, procesadas allá
+y traídas por la caché.
+
+### 4.26 Plan del RL (12/10/2026; propuesta, sin implementar)
+
+**Tarea:** cuánto confiar en la velocidad de la cámara (y, en segundo lugar, en el GPS),
+según lo que el filtro observa. Es lo que mide el OE3: "darle más o menos peso a un
+sensor según la situación", con estado y recompensa explícitos.
+
+- **Acciones** (discretas, cada 1 s): multiplicador de la varianza de la velocidad de
+  la cámara `k_cam ∈ {1, 4, ∞}` (∞ = ignorarla: Doppler o velocidad del estado +
+  giroscopio). Fase 2, solo si sobra tiempo: `k_gps ∈ {1, 4}` (6 acciones).
+- **Estado** (5 señales, discretizadas en 3 niveles → 243 estados): segundos sin fix
+  (0, 1–5, > 5); velocidad del filtro (< 6, 6–12, > 12 m/s); inestabilidad de la razón
+  Doppler/cámara en los últimos 10 s; NIS medio de las últimas correcciones de la cámara;
+  fracción de frames con la cámara "detenida" en los últimos 5 s. Todas existen hoy en
+  `GpsCameraFusion` o en `frames.csv`; se agregan a `OnlineFusion` como un `RlState`
+  explícito.
+- **Recompensa:** en episodios con el GPS degradado sintéticamente (cortes de 10–60 s,
+  ruido, ráfagas; la infraestructura de §4.22), `−‖posición fusionada − GPS limpio‖` en
+  cada fix oculto, `−0.1` por cambiar de acción (evita oscilar), y `−` el error con GPS
+  bueno si empeora (que no aprenda a dañar el caso normal).
+- **Entrenamiento:** Q-learning tabular (243 × 3), fuera de línea, sobre los
+  `frames.csv` de la caché (no hace falta procesar video: una sesión completa de
+  `run_fusion` tarda ~0.25 s). ε-greedy, unos 20 000 episodios de 60–120 s: ~30–40 min
+  de CPU. Tabular a propósito: estado y política se leen en una tabla (explícito para el
+  OE3) y no memoriza tanto como un modelo con muchas features (§3.5.1).
+- **Evaluación:** dejando una sesión afuera (4 sesiones de campo, más las de la de
+  escritorio si llegan por la caché). Mismo protocolo que §4.25: barrido de cortes de
+  10/20/30/60 s y el banco de GPS degradado. Comparar contra el EKF fijo, **la regla
+  de velocidad** y el oráculo, y reportar qué fracción del margen captura. **Criterio de
+  éxito, a declarar antes de entrenar:** capturar ≥ 25 % del margen fijo → oráculo en el
+  p90 de los cortes de 20–30 s en las sesiones de prueba, sin empeorar el GPS bueno
+  (p95 ± 0.2 m). Si no se logra, se reporta igual: el OE3 pide desarrollar e integrar
+  (§11, pregunta 2), y el techo medido es el resultado.
+- **Integración:** `rl/policy.py` (estado, acciones, recompensa, la tabla Q en un
+  `.npz` versionado); `OnlineFusion` consulta la política cada segundo; `--rl` en
+  `run_replay.py` y `run_live.py` y una casilla en la ventana; `metrics.json` guarda la
+  distribución de acciones.
+- **Costo estimado:** ~7–9 días de trabajo: entorno, estado y recompensa 2 días;
+  entrenamiento 1 día; evaluación (reusa el banco y los barridos) 1–2 días; integración
+  en el pipeline y la ventana 1–2 días; documentación 1–2 días. Antes de entrenar:
+  procesar en la de escritorio las grabaciones largas y commitear la caché (½ día),
+  y **congelar el EKF** (el RL aprende sobre el ruido que el filtro ve).
+
 ---
 
 ## 5. BUGS IDENTIFICADOS EN `main.py` (SIN CORREGIR)
@@ -2432,6 +2727,15 @@ por cable** (§4.20).
 ## 10. SIGUIENTES PASOS (plan vigente al 7/10/2026)
 
 ### Dónde quedamos (9/10/2026)
+
+**12/10/2026 (§4.23–4.26):** el curso del GPS condicionado a la Doppler (y sin forzar
+con el giroscopio) y las ráfagas sin forzar: la fusión ahora filtra el GPS ruidoso (σ
+10 m: p95 12–16 m contra 24) y no sigue las ráfagas (4 m contra 52), sin cambiar nada
+con GPS bueno. Mapa también en replay; caché de replays deterministas (`cache.py`, en
+git) con las cuatro sesiones de campo. Diagnóstico general medido (§4.25) y plan del RL
+(§4.26): la tarea es la confianza en la cámara durante los cortes de GPS (oráculo −43 %
+de p90 a 30 s; ninguna regla simple lo captura); ~7–9 días. **Siguiente:** procesar en
+la de escritorio las grabaciones largas y commitear su caché; congelar el EKF; el RL.
 
 **11/10/2026, prueba de campo (§4.21):** cuatro sesiones en ciudad (1–3.3 km), las
 grabaciones en `mobile_data/2026_10_11_*`. Cámara, GPS e IMU llegaron completos (lo

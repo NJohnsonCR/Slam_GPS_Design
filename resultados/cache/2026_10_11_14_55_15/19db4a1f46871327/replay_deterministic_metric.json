@@ -1,0 +1,93 @@
+{
+  "frames_procesados": 10585,
+  "frames_descartados": 0,
+  "tasa_descarte_%": 0.0,
+  "duracion_s": 934.6676731410007,
+  "hz_efectivo": 11.324880815047921,
+  "proc_ms_p50": 54.39337699863245,
+  "proc_ms_p95": 61.69770559863536,
+  "proc_ms_max": 178.98091299866792,
+  "detect_ms_p50": 23.15715300210286,
+  "match_ms_p50": 16.181497998331906,
+  "pose_ms_p50": 14.991472999099642,
+  "e2e_ms_p50": 54.39337699863245,
+  "e2e_ms_p95": 61.69770559863536,
+  "gps_age_ms_p50": 496.487508,
+  "gps_age_ms_p95": 961.0835049,
+  "frames_sin_gps": 10,
+  "poses_giro_imposible": 0,
+  "depth_estimaciones": 1050,
+  "depth_ms_p50": 426.95687699961127,
+  "depth_ms_p95": 451.7967162495552,
+  "frames_sin_escala": 10,
+  "fusion_ms_p50": 0.22260500190895982,
+  "fusion_ms_p95": 0.43746600204030955,
+  "fusion": {
+    "solo_visual": false,
+    "giroscopio": true,
+    "velocidad_como_estado": true,
+    "arranco": true,
+    "correcciones": {
+      "posicion": {
+        "n": 349,
+        "rechazadas": 0,
+        "forzadas": 0,
+        "fuera_de_rango": 0,
+        "nis_medio": 0.15245382143044853
+      },
+      "velocidad": {
+        "n": 349,
+        "rechazadas": 0,
+        "forzadas": 0,
+        "fuera_de_rango": 0,
+        "nis_medio": 0.3260458284435671
+      },
+      "curso": {
+        "n": 212,
+        "rechazadas": 0,
+        "forzadas": 0,
+        "fuera_de_rango": 0,
+        "nis_medio": 0.1426928182902969
+      },
+      "camara": {
+        "n": 264,
+        "rechazadas": 5,
+        "forzadas": 0,
+        "fuera_de_rango": 0,
+        "nis_medio": 0.9352723147078562
+      },
+      "alto": {
+        "n": 84,
+        "rechazadas": 0,
+        "forzadas": 0,
+        "fuera_de_rango": 0,
+        "nis_medio": 0.09156116315510558
+      }
+    },
+    "saltos_del_gps": 0,
+    "forzados_retenidos_tras_salto": 0,
+    "cursos_descartados_por_doppler": 0,
+    "arranco_s": 3.331426,
+    "s_final": 0.5775521089612305,
+    "frames_con_giroscopio_pct": 100.0,
+    "frames_con_imu_pct": 99.99055266887105,
+    "tiempo_ms_p50": 0.22260500190895982,
+    "tiempo_ms_p95": 0.43746600204030955
+  },
+  "escala": {
+    "enviadas": 1050,
+    "descartadas_cola": 0,
+    "aceptadas": 789,
+    "falladas": 6,
+    "fuera_de_rango": 1,
+    "detenido": 253
+  },
+  "simulacion": {
+    "frames_procesados": 6474,
+    "frames_descartados": 4111,
+    "tasa_descarte_%": 38.837978271138404,
+    "e2e_ms_p50": 70.96289704168157,
+    "e2e_ms_p95": 88.01588423593783,
+    "e2e_ms_max": 197.3102269876108
+  }
+}

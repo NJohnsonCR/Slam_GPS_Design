@@ -356,6 +356,21 @@ class GpsCameraFusion:
     # change. Between the camera and Doppler it changes ~50 % within 5 s and
     # then hardly more, so what the camera sees next is the car's speed.
     SCALE_HOLD_S = 2.0
+    # The course between two fixes is used only when their distance matches the
+    # Doppler: on clean fixes they differ by 0.24 m (p50) and 1.8 m at most
+    # (four field recordings, 11/10/2026). A noisy pair that does not match
+    # gives a course that turns the heading (§4.22 of CONTEXTO.md).
+    COURSE_DOPPLER_M = 1.5
+    # A burst of the GPS (multipath moves the fixes 30-100 m together for a few
+    # seconds) starts with a fix whose chord misses the Doppler distance by
+    # more than GPS_JUMP_M (never on clean fixes) and that leaves a prediction
+    # the previous fix agreed with. While the rejected fixes stay displaced by
+    # the same vector (within BURST_MATCH_M), none is forced, for up to
+    # JUMP_HOLD_S. "Two in a row agree with each other" would not do: the fixes
+    # of a burst do. Noise displaces each fix differently, so it is still forced.
+    GPS_JUMP_M = 10.0
+    BURST_MATCH_M = 8.0
+    JUMP_HOLD_S = 10.0
 
     def __init__(self, use_course=True, gyro=True, speed_state=True, bias=False, visual_only=False):
         self.use_course = use_course
@@ -366,7 +381,11 @@ class GpsCameraFusion:
         self.v_cam = 0.0
         self.yaw_total = 0.0
         self._yaw_hist = collections.deque()      # (t_ns, accumulated yaw)
-        self._prev_fix = None                     # (t_ns, xy)
+        self._prev_fix = None                     # (t_ns, xy, Doppler speed)
+        self._burst = None                        # (t_ns, displacement) of a GPS burst
+        self._prev_agreed = False                 # whether the previous fix agreed
+        self._from_gyro = False                   # whether the gyroscope turned the last frame
+        self.n_gps_jumps = self.n_held_forcings = self.n_course_skipped = 0
         self._anchor = None
         self._next_camera = None
         self._last_fix = None                     # t_ns of the last fix delivered
@@ -385,6 +404,7 @@ class GpsCameraFusion:
             self.v_cam = step / dt
         self.t_ns = t_ns
         from_gyro = self.gyro and gyro_yaw is not None and np.isfinite(gyro_yaw)
+        self._from_gyro = from_gyro
         if from_gyro:
             yaw, yaw_var = gyro_yaw, PlanarEKF.GYRO_RW ** 2 * dt
         else:
@@ -423,7 +443,7 @@ class GpsCameraFusion:
 
     def on_fix(self, t_ns, xy, speed):
         xy = np.asarray(xy, float)[:2]
-        prev, self._prev_fix = self._prev_fix, (t_ns, xy)
+        prev, self._prev_fix = self._prev_fix, (t_ns, xy, speed)
         self._last_fix = t_ns
         if self.t_ns is None:
             return                  # no frame yet: nothing to correct
@@ -433,16 +453,40 @@ class GpsCameraFusion:
         if self.visual_only:
             return
 
+        # The chord from the previous fix against the distance the Doppler
+        # gives for the same interval (consecutive fixes only).
+        chord = mismatch = None
+        if prev is not None and (t_ns - prev[0]) < 1.5e9:
+            chord = xy - prev[1]
+            mismatch = abs(float(np.hypot(*chord))
+                           - 0.5 * (speed + prev[2]) * (t_ns - prev[0]) / 1e9)
+
         lag = (self.t_ns - t_ns) / 1e9
-        jump = np.linalg.norm(self.ekf.position_innovation(xy, lag, self.v_cam)[0])
+        offset = self.ekf.position_innovation(xy, lag, self.v_cam)[0]
+        jump = float(np.linalg.norm(offset))
         agrees = jump <= 3 * PlanarEKF.GPS_SIGMA_M
+        # A new jump of the GPS inside a burst moves its displacement; the hold
+        # still counts from the burst's first jump.
+        if (mismatch is not None and mismatch > self.GPS_JUMP_M and not agrees
+                and (self._prev_agreed or self._burst is not None)):
+            start = t_ns if self._burst is None else self._burst[0]
+            self._burst = (start, offset.copy())
+            self.n_gps_jumps += 1
+        held = (self._burst is not None
+                and t_ns - self._burst[0] < self.JUMP_HOLD_S * 1e9
+                and np.linalg.norm(offset - self._burst[1]) <= self.BURST_MATCH_M)
         reach = self.V_MAX * (self.t_ns - self._last_agreed) / 1e9 + 3 * PlanarEKF.GPS_SIGMA_M
+        if held and jump <= reach and self._rejected["pos"] >= self.MAX_REJECTED:
+            self.n_held_forcings += 1
         status = self._apply("pos", self.ekf.update_position, xy, lag, self.v_cam,
-                             may_force=jump <= reach)
+                             may_force=jump <= reach and not held)
         # A fix taken with a large innovation (after an outage) may be the wrong
         # one, so only a fix that agreed with the prediction moves the reach.
         if status != "rejected" and agrees:
             self._last_agreed = self.t_ns
+        if agrees:
+            self._burst = None
+        self._prev_agreed = agrees
 
         if self.speed_state:
             self._apply("speed", self.ekf.update_speed, speed, self.v_cam)
@@ -456,13 +500,19 @@ class GpsCameraFusion:
                 # Never forced: no scale explains it.
                 self.log.append((self.t_ns, "speed", "out_of_range", np.nan, None))
 
-        if self.use_course and prev is not None and (t_ns - prev[0]) < 1.5e9:
-            chord = xy - prev[1]
+        if self.use_course and chord is not None:
             dist = float(np.hypot(*chord))
             if dist >= self.MIN_CHORD_M:
-                turned = self.yaw_total - self._yaw_at((t_ns + prev[0]) // 2)
-                self._apply("course", self.ekf.update_course,
-                            np.arctan2(chord[1], chord[0]), turned, dist)
+                if mismatch > self.COURSE_DOPPLER_M:
+                    self.n_course_skipped += 1
+                else:
+                    # With the gyroscope turning the heading, a course that keeps
+                    # disagreeing is the GPS's error, never forced; without it,
+                    # forcing is how the camera's heading comes back.
+                    turned = self.yaw_total - self._yaw_at((t_ns + prev[0]) // 2)
+                    self._apply("course", self.ekf.update_course,
+                                np.arctan2(chord[1], chord[0]), turned, dist,
+                                may_force=not self._from_gyro)
 
     def _apply(self, kind, update, *args, may_force=True):
         """Run one update, forcing it after MAX_REJECTED rejections in a row. Returns its status."""
@@ -559,7 +609,10 @@ class OnlineFusion:
         turned = fus.n_gyro + fus.n_camera_yaw
         out = {"solo_visual": fus.visual_only, "giroscopio": fus.gyro,
                "velocidad_como_estado": fus.speed_state, "arranco": fus.ready,
-               "correcciones": correction_counts(fus.log)}
+               "correcciones": correction_counts(fus.log),
+               "saltos_del_gps": fus.n_gps_jumps,
+               "forzados_retenidos_tras_salto": fus.n_held_forcings,
+               "cursos_descartados_por_doppler": fus.n_course_skipped}
         if fus.ready:
             out["arranco_s"] = (self.start_t - self.first_t) / 1e9
             out["s_final"] = float(fus.ekf.x[3])

@@ -1,0 +1,26 @@
+{
+  "grabacion": "2026_10_11_14_52_51",
+  "hash_grabacion": "05fcf5c3a64af9df66554081c6a788b7fa140c961c43dc82b5c788b40ed93e04",
+  "hash_codigo": "2c39e40776bcafed78832f49db659312f4a1c78c55cd2abcfabf618f03a97522",
+  "version_codigo": 1,
+  "opciones": {
+    "video": "movie.mp4",
+    "frames": null,
+    "mask_bottom": 0.25,
+    "fx": 867.81,
+    "fy": 868.55,
+    "cx": 630.75,
+    "cy": 367.79,
+    "skip_start": 6,
+    "start": 0.0,
+    "scale": "depth",
+    "scale_hz": 3.0,
+    "visual_only": false,
+    "no_gyro": false
+  },
+  "procesado": "2026-10-12 14:52:21",
+  "equipo": "naheem-OMEN-by-HP-Laptop-15-dc0xxx",
+  "opencv": "4.12.0",
+  "numpy": "2.2.6",
+  "torch": "2.8.0+cu126 (CUDA 12.6)"
+}

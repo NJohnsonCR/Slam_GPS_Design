@@ -1,0 +1,93 @@
+{
+  "frames_procesados": 4098,
+  "frames_descartados": 0,
+  "tasa_descarte_%": 0.0,
+  "duracion_s": 402.98430210399965,
+  "hz_efectivo": 10.169130605346542,
+  "proc_ms_p50": 56.19395899520896,
+  "proc_ms_p95": 65.56579870066342,
+  "proc_ms_max": 139.82096500330954,
+  "detect_ms_p50": 23.717580501397606,
+  "match_ms_p50": 17.32096100022318,
+  "pose_ms_p50": 14.67443150067993,
+  "e2e_ms_p50": 56.19395899520896,
+  "e2e_ms_p95": 65.56579870066342,
+  "gps_age_ms_p50": 493.339499,
+  "gps_age_ms_p95": 958.6083,
+  "frames_sin_gps": 17,
+  "poses_giro_imposible": 0,
+  "depth_estimaciones": 406,
+  "depth_ms_p50": 425.8509490009601,
+  "depth_ms_p95": 450.91120725010114,
+  "frames_sin_escala": 10,
+  "fusion_ms_p50": 0.20213599964336026,
+  "fusion_ms_p95": 0.44421284910640674,
+  "fusion": {
+    "solo_visual": false,
+    "giroscopio": true,
+    "velocidad_como_estado": true,
+    "arranco": true,
+    "correcciones": {
+      "posicion": {
+        "n": 123,
+        "rechazadas": 0,
+        "forzadas": 0,
+        "fuera_de_rango": 0,
+        "nis_medio": 0.14606613760253337
+      },
+      "velocidad": {
+        "n": 123,
+        "rechazadas": 0,
+        "forzadas": 0,
+        "fuera_de_rango": 0,
+        "nis_medio": 0.5894301035004399
+      },
+      "curso": {
+        "n": 119,
+        "rechazadas": 0,
+        "forzadas": 0,
+        "fuera_de_rango": 0,
+        "nis_medio": 0.06560413945575408
+      },
+      "camara": {
+        "n": 123,
+        "rechazadas": 1,
+        "forzadas": 0,
+        "fuera_de_rango": 0,
+        "nis_medio": 0.8357432459511025
+      },
+      "alto": {
+        "n": 0,
+        "rechazadas": 0,
+        "forzadas": 0,
+        "fuera_de_rango": 0,
+        "nis_medio": null
+      }
+    },
+    "saltos_del_gps": 0,
+    "forzados_retenidos_tras_salto": 0,
+    "cursos_descartados_por_doppler": 0,
+    "arranco_s": 13.568997,
+    "s_final": 0.6044999722151326,
+    "frames_con_giroscopio_pct": 100.0,
+    "frames_con_imu_pct": 99.97559785261103,
+    "tiempo_ms_p50": 0.20213599964336026,
+    "tiempo_ms_p95": 0.44421284910640674
+  },
+  "escala": {
+    "enviadas": 406,
+    "descartadas_cola": 0,
+    "aceptadas": 395,
+    "falladas": 0,
+    "fuera_de_rango": 1,
+    "detenido": 9
+  },
+  "simulacion": {
+    "frames_procesados": 2435,
+    "frames_descartados": 1663,
+    "tasa_descarte_%": 40.580771107857494,
+    "e2e_ms_p50": 72.51947110125911,
+    "e2e_ms_p95": 90.60546273576618,
+    "e2e_ms_max": 158.97774810218834
+  }
+}

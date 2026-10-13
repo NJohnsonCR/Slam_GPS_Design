@@ -502,9 +502,14 @@ def _outage(fus, k, j, t_from, length, t, inputs, gyro_yaw, fixes, tg, xy, vd):
 
 
 def summarize_sweep(found):
-    """Per length: p50 and p90 of both errors, and how often the filter wins."""
+    """
+    Per length: p50 and p90 of both errors, and how often the filter wins. A
+    length with no outage (longer than the session allows) is left out.
+    """
     out = {}
     for length, rows in found.items():
+        if not rows:
+            continue
         e = np.array([r["error_m"] for r in rows])
         c = np.array([r["error_gps_velocidad_constante_m"] for r in rows])
         out[f"{length}s"] = {"n": len(rows),
