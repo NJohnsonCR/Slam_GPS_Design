@@ -1,0 +1,26 @@
+{
+  "grabacion": "2026_09_30_14_05_19",
+  "hash_grabacion": "1a515cb8420ed558e3b5446c94926b0567b3b716d3fb6d8b528cbb5a35269efe",
+  "hash_codigo": "2c39e40776bcafed78832f49db659312f4a1c78c55cd2abcfabf618f03a97522",
+  "version_codigo": 1,
+  "opciones": {
+    "video": "movie.mp4",
+    "frames": null,
+    "mask_bottom": 0.25,
+    "fx": 867.81,
+    "fy": 868.55,
+    "cx": 630.75,
+    "cy": 367.79,
+    "skip_start": 6,
+    "start": 0.0,
+    "scale": "depth",
+    "scale_hz": 3.0,
+    "visual_only": false,
+    "no_gyro": false
+  },
+  "procesado": "2026-10-13 18:18:54",
+  "equipo": "johnson",
+  "opencv": "4.12.0",
+  "numpy": "2.2.6",
+  "torch": "2.8.0+cu128 (CUDA 12.8)"
+}

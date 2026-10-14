@@ -2424,8 +2424,8 @@ de la captura a la llegada; calidad de la VO, punto 2.
   lluvia.
 - **Sin medir:** ground truth (no hay); noche; túneles y cortes reales del GPS (solo
   simulados); multitrayecto real (solo sintético); la laptop con el perfil de energía
-  "Rendimiento"; las grabaciones de la de escritorio (2025_03_11, 14:05, 14:18) con el
-  código del 12/10 (no están en la laptop: procesarlas allá y commitear la caché).
+  "Rendimiento". (Las grabaciones de la de escritorio con el código del 12/10: hechas
+  el 13/10, §4.27.)
 - **Limitaciones aceptables:** la latencia de la laptop (la de escritorio cumple); la
   cámara sola (es diagnóstico); el multitrayecto (sin otra referencia absoluta no se
   distingue); la VO con lluvia (el rumbo lo da el giroscopio).
@@ -2483,8 +2483,82 @@ sensor según la situación", con estado y recompensa explícitos.
 - **Costo estimado:** ~7–9 días de trabajo: entorno, estado y recompensa 2 días;
   entrenamiento 1 día; evaluación (reusa el banco y los barridos) 1–2 días; integración
   en el pipeline y la ventana 1–2 días; documentación 1–2 días. Antes de entrenar:
-  procesar en la de escritorio las grabaciones largas y commitear la caché (½ día),
-  y **congelar el EKF** (el RL aprende sobre el ruido que el filtro ve).
+  procesar en la de escritorio las grabaciones largas y commitear la caché (½ día;
+  **hecho el 13/10**, §4.27: 6 sesiones para entrenar, 747 cortes de 10–30 s, y
+  2025_03_11 para validar), y **congelar el EKF** (el RL aprende sobre el ruido que el
+  filtro ve).
+- **Ajustes del 13/10 (§4.27):** (1) la evaluación deja **una sesión afuera de seis**;
+  2025_03_11 queda aparte, como validación de otro dominio. (2) La regla de velocidad
+  ajustada en una sesión empeora otra: la comparación contra ella tiene que ser también
+  dejando una sesión afuera, nunca con el umbral ajustado en todas. (3) **El entorno
+  necesita el `location.csv` de cada sesión** (la Doppler de cada fix; `frames.csv` no
+  la trae, y la IMU no hace falta: `frames.csv` tiene `gyro_yaw`). Las grabaciones de
+  campo están solo en la laptop y las de 14:05/14:18 solo aquí: hay que llevar el
+  `location.csv` a la caché (56 KB por sesión) antes de entrenar en una sola
+  computadora.
+
+
+### 4.27 Las grabaciones de la de escritorio, en la caché (13/10/2026)
+
+Procesadas en la de escritorio (RTX 3070, `torch 2.8.0+cu128`) con el código del 12/10
+(el mismo hash de código que las cuatro de la laptop), replay determinista completo con
+escala por profundidad; en git, `resultados/cache/` (~29 MB con las siete).
+
+| Grabación | Qué es | Opciones | Tiempo | Para el RL |
+|---|---|---|---|---|
+| `2026_09_30_14_05_19` | Carro, ciudad, 12 min, Doppler p50 2.7 / máx 18.5 m/s, 14 altos | máscara 0.25, intrínsecos del `HELLO`, `--skip-start 6` | 962 s | **Entrenar** |
+| `2026_09_30_14_18_36` | Carro, más rápido (p50 6.8, máx 21.7 m/s: lo más rápido que hay), camino mojado | máscara 0.22 (capó), ídem | 843 s | **Entrenar** |
+| `2025_03_11` | **Carro** (no caminata: se ve el tablero, Doppler p95 10.8, máx 13.8 m/s), app vieja (MARS Logger), en vertical, fx ≈ 899 | las de la referencia de §13 (máscara 0.14 por defecto) | 283 s | **Solo validar** (otra app, otra orientación y otra cámara) |
+| `2026_09_29_13_01_19` | Caminata bajo techo, 90 s | — | — | No sirve: Doppler máx 0.6 m/s, el filtro no arranca |
+| `2026_10_09_19_08_06` | El teléfono girado en la mano en el escritorio (§4.20) | — | — | No sirve: Doppler máx 0.2 m/s |
+
+- **La fusión, en las tres:** arranca (23.0, 2.4 y 8.9 s), giroscopio en el 100 % de los
+  frames, 0 correcciones de posición rechazadas ni forzadas (695, 767 y 231).
+- **Reproduce lo medido antes:** el barrido da en 14:05 y 14:18, a 30 s, 15.7 / 79.1 y
+  27.3 / 178.2 m (p50 / p90), los mismos de §4.17.
+- **La caché acierta:** el mismo replay de 14:05 otra vez se restauró en 0.6 s, con el
+  JSON y el `frames.csv` idénticos byte a byte.
+- **La clave se invalida bien** (script temporal, 25 casos sobre una copia de una
+  grabación): cambia con un byte distinto en `movie.mp4`, `frame_timestamps.txt`,
+  `location.csv` o `gyro_accel.csv`; con cada una de las 9 opciones; con un cambio en
+  `pipeline.py`, `depth_scale.py`, `fusion.py` o `sources.py`, y con `CODE_VERSION`. No
+  cambia con `movie_metadata.csv` (el replay no lo lee) ni con `run_replay.py`,
+  `evaluate.py` o `live_window.py`. **Lo que la clave no ve:** (1) un cambio en el bucle
+  de `run_replay.py` que mueva los números, si no se sube `CODE_VERSION` a mano; (2) la
+  GPU y las versiones de torch/OpenCV (quedan en `cache.json`: las de la laptop, `cu126`
+  en una GTX 1050 Ti; las de aquí, `cu128` en una RTX 3070).
+
+**Episodios para el RL** (cortes de GPS del protocolo de §4.25: uno cada 10 s desde el
+arranque, mientras haya fixes después):
+
+| Sesión | Manejo con el filtro | 10 / 20 / 30 / 60 s | 10–30 s |
+|---|---|---|---|
+| Campo, 4 sesiones (§4.25) | 19.9 min | 113 / 109 / 105 / 93 (reconstruidos) | **324** (327 reconstruidos desde la caché) |
+| 14:05 | 11.6 min | 68 / 67 / 66 / 63 | 201 |
+| 14:18 | 12.8 min | 75 / 74 / 73 / 70 | 222 |
+| **Total para entrenar (6 sesiones)** | **44 min** | 256 / 250 / 244 / 226 | **747** (2.3 veces) |
+| 2025_03_11 (validación) | 4.7 min | 22 / 21 / 20 / 17 | 63 |
+
+**El margen del RL en las sesiones nuevas** (mismo protocolo que §4.25; script temporal:
+en cada corte, el EKF tal cual contra el mismo filtro sin la velocidad de la cámara
+durante el corte; oráculo = el mejor de los dos; p50 / p90 en m):
+
+| | 10 s | 20 s | 30 s | 60 s | Sin cámara es mejor en |
+|---|---|---|---|---|---|
+| 14:05 EKF → oráculo | 4.9 / 23.0 → 4.6 / 17.2 | 9.8 / 49.1 → 8.3 / 32.1 | 15.7 / 79.1 → 14.4 / 53.6 | 25.1 / 186 → 24.4 / 108 | 24–37 % |
+| 14:18 EKF → oráculo | 10.6 / 42.7 → 6.7 / 22.6 | 16.9 / 107 → 15.0 / 38.7 | 27.3 / 178 → 16.7 / 77.0 | 83.2 / 447 → 49.2 / 218 | 34–43 % |
+| 2025_03_11 EKF → oráculo | 12.4 / 35.1 → 11.7 / 33.9 | 23.9 / 50.0 → 22.2 / 48.2 | 32.1 / 84.9 → 31.1 / 75.9 | 61.8 / 147 → 54.2 / 108 | 29–45 % |
+
+- **El margen se confirma:** a 30 s, p90 −32 % en 14:05 y −57 % en 14:18 (campo, −43 %).
+  Es mayor en la sesión rápida, como en el campo (150517). En 2025_03_11 es chico a
+  10–30 s (−3 a −11 %) y aparece a 60 s (−27 %).
+- **La regla de velocidad no se traslada de una sesión a otra:** con el umbral ajustado
+  en 14:05 (10–13 m/s) y probado en 14:18 captura el 46–86 % del margen de p90; al
+  revés (umbral 7–9 m/s), **empeora** al EKF (captura de −32 a −115 %). La correlación
+  de la velocidad con "conviene sin cámara" va de +0.17 a +0.54 según la sesión y la
+  duración (campo: +0.32). Es lo de §3.5.1: el umbral que sirve depende de la sesión.
+- **Lo que suman al plan:** más del doble de cortes y de manejo, y las velocidades
+  altas (14:18 llega a 21.7 m/s; el campo, a 17.9) para el nivel "> 12 m/s" del estado.
 
 ---
 
@@ -2727,6 +2801,15 @@ por cable** (§4.20).
 ## 10. SIGUIENTES PASOS (plan vigente al 7/10/2026)
 
 ### Dónde quedamos (9/10/2026)
+
+**13/10/2026 (§4.27):** procesadas y en la caché las grabaciones de la de escritorio:
+14:05 y 14:18 para entrenar (con las cuatro de campo, 6 sesiones, 44 min de manejo,
+747 cortes de 10–30 s), 2025_03_11 solo para validar (es carro con la app vieja, no
+caminata); la caminata del 29/9 y la del escritorio del 9/10 no sirven (el filtro no
+arranca). La clave de la caché se invalida bien (25 casos). El margen del RL se confirma
+en las sesiones nuevas (30 s: p90 −32 % y −57 %); la regla de velocidad no se traslada
+entre sesiones. **Antes del RL falta:** el `location.csv` de cada sesión en la caché
+(el de campo, desde la laptop) y congelar el EKF.
 
 **12/10/2026 (§4.23–4.26):** el curso del GPS condicionado a la Doppler (y sin forzar
 con el giroscopio) y las ráfagas sin forzar: la fusión ahora filtra el GPS ruidoso (σ

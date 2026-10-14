@@ -1,0 +1,26 @@
+{
+  "grabacion": "2025_03_11",
+  "hash_grabacion": "1d496db9b5fe08c2c8de4db6ec90bd23c4decf5c3e6f2fb29d82018a20a3dd5b",
+  "hash_codigo": "2c39e40776bcafed78832f49db659312f4a1c78c55cd2abcfabf618f03a97522",
+  "version_codigo": 1,
+  "opciones": {
+    "video": "movie.mp4",
+    "frames": null,
+    "mask_bottom": 0.14,
+    "fx": 899.0,
+    "fy": null,
+    "cx": null,
+    "cy": null,
+    "skip_start": 0,
+    "start": 0.0,
+    "scale": "depth",
+    "scale_hz": 3.0,
+    "visual_only": false,
+    "no_gyro": false
+  },
+  "procesado": "2026-10-13 18:37:44",
+  "equipo": "johnson",
+  "opencv": "4.12.0",
+  "numpy": "2.2.6",
+  "torch": "2.8.0+cu128 (CUDA 12.8)"
+}
