@@ -6,7 +6,11 @@ results travel with the repository between computers.
         frames_deterministic[_metric].csv
         replay_deterministic[_metric].json
         trajectory_deterministic[_metric].png
+        location.csv        the recording's fixes, with their Doppler speed
         cache.json          what the key was made of, and where it was processed
+
+With frames.csv (its gyro_yaw column included) and location.csv the fusion
+can be rerun without the recording, which is what the RL trains on.
 
 The key hashes three things, so any change misses the cache and reprocesses:
 the recording's content (video, timestamps, GPS, IMU), the options that change
@@ -16,10 +20,13 @@ processing loop). Strict replays and the window are not cached: they run in
 real time and drop frames, so two runs differ.
 
 Usage: run_replay.py uses it unless --no-cache; this module also lists the
-cache:
+cache, and adds location.csv to entries stored without it, from the
+recordings found under mobile_data/:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.cache
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.cache --add-location
 """
 
+import argparse
 import hashlib
 import json
 import os
@@ -31,6 +38,8 @@ import time
 _THIS = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_THIS, "..", "..", ".."))
 CACHE_DIR = os.path.join(_ROOT, "resultados", "cache")
+DATA_DIR = os.path.join(_ROOT, "mobile_data")
+LOCATION = "location.csv"
 
 # The recording files the results depend on; the others (movie_metadata.csv,
 # edge_epochs.txt) are not read by the replay.
@@ -118,6 +127,7 @@ class Entry:
         for kind, src in files.items():
             if os.path.abspath(src) != os.path.abspath(self.path(kind)):
                 shutil.copy2(src, self.path(kind))
+        shutil.copy2(os.path.join(self.session, LOCATION), os.path.join(self.dir, LOCATION))
         import cv2
         import numpy as np
         try:
@@ -134,23 +144,71 @@ class Entry:
             json.dump(meta, f, indent=2, ensure_ascii=False)
 
 
-def main():
+def entries():
+    """(recording, key, entry folder, cache.json contents) of every stored entry."""
     if not os.path.isdir(CACHE_DIR):
-        print(f"Caché vacía ({os.path.relpath(CACHE_DIR, _ROOT)} no existe).")
-        return 0
-    current = code_hash()
+        return
     for rec in sorted(os.listdir(CACHE_DIR)):
         for key in sorted(os.listdir(os.path.join(CACHE_DIR, rec))):
-            meta_path = os.path.join(CACHE_DIR, rec, key, "cache.json")
-            if not os.path.exists(meta_path):
-                continue
-            with open(meta_path) as f:
-                m = json.load(f)
-            o = m["opciones"]
-            stale = "" if m["hash_codigo"] == current else "  (código anterior: no se usa)"
-            print(f"{rec}/{key}: escala {o['scale']}, máscara {o['mask_bottom']}, "
-                  f"frames {o['frames'] or 'todos'}, desde {o['start']} s; "
-                  f"{m['procesado']} en {m['equipo']}{stale}")
+            folder = os.path.join(CACHE_DIR, rec, key)
+            meta_path = os.path.join(folder, "cache.json")
+            if os.path.exists(meta_path):
+                with open(meta_path) as f:
+                    yield rec, key, folder, json.load(f)
+
+
+def _shown(path):
+    """A path as the user would type it: relative inside the repository."""
+    rel = os.path.relpath(path, _ROOT)
+    return path if rel.startswith("..") else rel
+
+
+def add_locations(data_dir=DATA_DIR):
+    """
+    Copy location.csv into the entries stored without it, from the recording
+    of the same name under data_dir, only if it is the very recording the
+    entry was made from (same content hash). Returns how many were added.
+    """
+    added = 0
+    for rec, key, folder, m in entries():
+        target = os.path.join(folder, LOCATION)
+        session = os.path.join(data_dir, rec)
+        if os.path.exists(target):
+            print(f"  {rec}/{key}: ya tenía {LOCATION}")
+        elif not os.path.isdir(session):
+            print(f"  {rec}/{key}: la grabación no está en {_shown(data_dir)}/")
+        elif recording_hash(session, m["opciones"]["video"]) != m["hash_grabacion"]:
+            print(f"  {rec}/{key}: NO se agrega: la grabación de {_shown(session)} "
+                  f"no es la que se procesó")
+        else:
+            shutil.copy2(os.path.join(session, LOCATION), target)
+            added += 1
+            print(f"  {rec}/{key}: {LOCATION} agregado")
+    return added
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Lista la caché de replays deterministas")
+    ap.add_argument("--add-location", nargs="?", const=DATA_DIR, metavar="DIR",
+                    help="Agregar location.csv a las entradas que no lo tienen, desde las "
+                         "grabaciones de DIR (por defecto mobile_data/)")
+    args = ap.parse_args()
+    if args.add_location:
+        n = add_locations(os.path.abspath(args.add_location))
+        print(f"\n  {n} agregados.")
+        return 0
+    current = code_hash()
+    listed = False
+    for rec, key, folder, m in entries():
+        listed = True
+        o = m["opciones"]
+        stale = "" if m["hash_codigo"] == current else "  (código anterior: no se usa)"
+        loc = "" if os.path.exists(os.path.join(folder, LOCATION)) else f"  (sin {LOCATION})"
+        print(f"{rec}/{key}: escala {o['scale']}, máscara {o['mask_bottom']}, "
+              f"frames {o['frames'] or 'todos'}, desde {o['start']} s; "
+              f"{m['procesado']} en {m['equipo']}{stale}{loc}")
+    if not listed:
+        print(f"Caché vacía ({os.path.relpath(CACHE_DIR, _ROOT)}).")
     return 0
 
 

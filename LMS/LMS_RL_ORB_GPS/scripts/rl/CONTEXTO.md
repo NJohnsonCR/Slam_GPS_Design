@@ -163,7 +163,7 @@ viales**. Ese es el TFG. El RL es uno de cuatro objetivos.
 | **Sin internet** | Verificado simulando la red caída | El modelo carga en 4 s (antes 96 s); `setup.sh` lo descarga y avisa si la GPU no sirve (§4.9) |
 | Replay de grabaciones de la app nueva | Validado contra el giroscopio | Misma precisión de rotación que en vivo: 0.32° contra 0.33° por frame (§4.10) |
 | **Encadenamiento de poses** (`camera_positions`) | Corregido el 2/10/2026, verificado con un experimento sintético | Antes espejaba las curvas (§4.11) |
-| **Herramienta de evaluación** (`evaluate.py`) | Reproduce el análisis manual de la caminata | Escala contra Doppler, rotación y rumbo contra el giroscopio, forma contra el GPS (§4.12) |
+| **Herramienta de evaluación** (`evaluate.py`) | Reproduce el análisis manual de la caminata del 29/9 (§4.10) | Escala contra Doppler, rotación y rumbo contra el giroscopio, forma contra el GPS (§4.12) |
 | **Front-end visual corregido** (máscara, votación con todos los puntos, red de seguridad de 10°) | Verificado en 2 fragmentos en carro, la referencia vieja y 7 secuencias KITTI | Sin giros de 180°; en KITTI el trazo sigue al ground truth con 2–14 % (§4.13) |
 | Línea base solo visual en carro | Medida y corregida (§4.12, §4.13) | Rumbo máximo 91° y 24° (antes 810° y 294°); se separa 27–41 % de lo recorrido, 16–48 % aun con la velocidad perfecta: es la deriva normal de la cámara sola |
 | **EKF con giroscopio y velocidad como estado** (`fusion.py`, `evaluate.py --fusion --sweep`) | Hecho, evaluado y verificado sobre las grabaciones completas (§4.17, §4.18) e integrado al pipeline: replay, en vivo y la ventana (§4.19) | Predicción a 1 s: 1.3 m p50; cortes de 30 s: 15.7 y 27.3 m p50 (filtro anterior: 31.6 y 44.4; GPS a velocidad constante: 53.8 y 79.1) |
@@ -2276,6 +2276,17 @@ esa duración.
   restaurados en 0.5 s con el JSON idéntico; otra máscara crea otra entrada.
   **Ojo:** el modelo de profundidad en otra GPU o con otro torch puede dar resultados
   algo distintos; `cache.json` dice dónde se procesó cada entrada.
+- **Desde el 13/10 cada entrada guarda también el `location.csv` de su grabación**
+  (56 KB): con él y el `frames.csv` (que trae `gyro_yaw`) la fusión se vuelve a correr
+  sin la grabación, que es sobre lo que entrena el RL. Verificado en 14:05, 14:18 y
+  2025_03_11: la misma posición a 0.0000 m y el mismo giro a 5·10⁻¹¹ rad que con la
+  grabación entera. Las entradas guardadas antes se completan con
+  `venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.cache --add-location`, que busca la
+  grabación del mismo nombre en `mobile_data/` y **solo copia si el hash de su contenido
+  es el de la entrada** (probado con un `location.csv` alterado: no lo copia). El listado
+  (`python -m ...realtime.cache`) marca las entradas `(sin location.csv)`. La clave no
+  cambió (`cache.py` no está en el código que se hashea): las entradas existentes
+  siguen valiendo.
 
 
 ### 4.25 Diagnóstico general del sistema (12/10/2026)
@@ -2492,10 +2503,11 @@ sensor según la situación", con estado y recompensa explícitos.
   ajustada en una sesión empeora otra: la comparación contra ella tiene que ser también
   dejando una sesión afuera, nunca con el umbral ajustado en todas. (3) **El entorno
   necesita el `location.csv` de cada sesión** (la Doppler de cada fix; `frames.csv` no
-  la trae, y la IMU no hace falta: `frames.csv` tiene `gyro_yaw`). Las grabaciones de
-  campo están solo en la laptop y las de 14:05/14:18 solo aquí: hay que llevar el
-  `location.csv` a la caché (56 KB por sesión) antes de entrenar en una sola
-  computadora.
+  la trae, y la IMU no hace falta: `frames.csv` tiene `gyro_yaw`). **Hecho el 13/10:**
+  la caché guarda el `location.csv` de cada entrada; las tres de la de escritorio ya lo
+  tienen y con solo la caché la fusión da lo mismo que con la grabación (0.0000 m). Las
+  cuatro de campo lo agregan en la laptop con
+  `venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.cache --add-location` (§4.24).
 
 
 ### 4.27 Las grabaciones de la de escritorio, en la caché (13/10/2026)
@@ -2552,11 +2564,30 @@ durante el corte; oráculo = el mejor de los dos; p50 / p90 en m):
 - **El margen se confirma:** a 30 s, p90 −32 % en 14:05 y −57 % en 14:18 (campo, −43 %).
   Es mayor en la sesión rápida, como en el campo (150517). En 2025_03_11 es chico a
   10–30 s (−3 a −11 %) y aparece a 60 s (−27 %).
-- **La regla de velocidad no se traslada de una sesión a otra:** con el umbral ajustado
-  en 14:05 (10–13 m/s) y probado en 14:18 captura el 46–86 % del margen de p90; al
-  revés (umbral 7–9 m/s), **empeora** al EKF (captura de −32 a −115 %). La correlación
-  de la velocidad con "conviene sin cámara" va de +0.17 a +0.54 según la sesión y la
-  duración (campo: +0.32). Es lo de §3.5.1: el umbral que sirve depende de la sesión.
+- **La regla de velocidad no se traslada de una sesión a otra** (hallazgo central de
+  esta sección). La regla: durante un corte, ignorar la velocidad de la cámara si el
+  filtro va a más de un umbral; el umbral se elige para el mejor p90 en una sesión y
+  se prueba en la otra (script temporal):
+
+  | Corte | Ajustada en 14:05 → probada en 14:18 | Ajustada en 14:18 → probada en 14:05 |
+  |---|---|---|
+  | 10 s | umbral 10.0 m/s; p90 42.7 → 25.4 (oráculo 22.6): **86 %** del margen | umbral 13.2; p90 23.0 → 24.8 (oráculo 17.2): **−32 %** |
+  | 20 s | 13.3; 106.5 → 73.0 (38.7): **49 %** | 8.8; 49.1 → 60.7 (32.1): **−69 %** |
+  | 30 s | 13.3; 178.2 → 126.2 (77.0): **51 %** | 7.3; 79.1 → 108.5 (53.6): **−115 %** |
+  | 60 s | 13.3; 447.3 → 341.0 (217.9): **46 %** | 7.3; 185.8 → 237.3 (107.5): **−66 %** |
+
+  Un sentido captura la mitad del margen o más; el otro **empeora al EKF fijo**: en
+  14:05 la cámara sirve a velocidades donde en 14:18 ya no (14:18 es más rápida y con
+  el camino mojado). La señal existe en las dos (correlación de la velocidad con
+  "conviene sin cámara" +0.38 a +0.54 en 14:18, +0.17 a +0.27 en 14:05; campo, +0.32),
+  pero su punto de corte depende de la sesión. Es el patrón de §3.5.1 y §4.25 medido
+  directamente entre dos sesiones. **Qué implica:** (1) una regla fija de una señal no
+  es una línea base confiable fuera de la sesión donde se ajustó, lo que refuerza el
+  argumento del RL: decidir con varias señales a la vez (velocidad, inestabilidad de
+  la razón Doppler/cámara, NIS de la cámara, segundos sin fix); (2) el mismo riesgo vale
+  para el RL: tiene que medirse dejando una sesión afuera, y contra la regla de
+  velocidad evaluada igual (ajustada sin la sesión de prueba), nunca contra una regla
+  ajustada con todas.
 - **Lo que suman al plan:** más del doble de cortes y de manejo, y las velocidades
   altas (14:18 llega a 21.7 m/s; el campo, a 17.9) para el nivel "> 12 m/s" del estado.
 
@@ -2617,7 +2648,7 @@ de programación), y cada uno cambió o invirtió las conclusiones:
    desfase falso de +32 ms, porque frame a frame el ruido de la VO es del tamaño
    de la rotación real. Sobre ventanas de 0.5 s el ajuste queda limpio (§4.10).
 7. **Leer la calidad de la rotación en la razón de inliers** (29/9/2026). Se dijo
-   que la mitad de los frames de la caminata "no tenía geometría"; el giroscopio
+   que la mitad de los frames de la caminata del 29/9 "no tenía geometría"; el giroscopio
    mostró que esos frames tenían el error más bajo.
 8. **Encadenamiento de poses al revés** (heredado del sistema original; descubierto
    el 2/10/2026, §4.11). Afectó todos los mapas y las trayectorias de los scripts
@@ -2735,7 +2766,10 @@ El 2/10/2026 se decidió borrar las carpetas que el pipeline no usa
 disco. Quedan `image_02` y `oxts`. Se pueden volver a descargar.
 
 ### Móvil (`mobile_data/2025_03_11/`)
-Grabado con una versión modificada de **MARS Logger** (Android).
+Grabado con una versión modificada de **MARS Logger** (Android). **Es un recorrido en
+carro, no una caminata** (se ve el tablero; Doppler p50 2.9, p95 10.8, máximo 13.8 m/s;
+1.8 km según la cámara). La caminata es `2026_09_29_13_01_19` (§4.10). Para el RL va
+solo como validación: otra app, el teléfono en vertical, otros intrínsecos (§4.27).
 
 | Propiedad | Valor |
 |---|---|
@@ -2805,11 +2839,14 @@ por cable** (§4.20).
 **13/10/2026 (§4.27):** procesadas y en la caché las grabaciones de la de escritorio:
 14:05 y 14:18 para entrenar (con las cuatro de campo, 6 sesiones, 44 min de manejo,
 747 cortes de 10–30 s), 2025_03_11 solo para validar (es carro con la app vieja, no
-caminata); la caminata del 29/9 y la del escritorio del 9/10 no sirven (el filtro no
-arranca). La clave de la caché se invalida bien (25 casos). El margen del RL se confirma
+caminata); la caminata del 29/9 y la prueba con el teléfono quieto en el escritorio del
+9/10 no sirven (el filtro no arranca). La clave de la caché se invalida bien (25 casos). El margen del RL se confirma
 en las sesiones nuevas (30 s: p90 −32 % y −57 %); la regla de velocidad no se traslada
-entre sesiones. **Antes del RL falta:** el `location.csv` de cada sesión en la caché
-(el de campo, desde la laptop) y congelar el EKF.
+entre sesiones: ajustada en una, empeora la otra (§4.27, §12 punto 21). La caché guarda
+el `location.csv` de cada entrada (con eso la fusión corre sin la grabación); falta
+agregarlo a las cuatro de campo en la laptop (`git pull` y `python -m
+LMS.LMS_RL_ORB_GPS.realtime.cache --add-location`). **Siguiente:** el RL, empezando por
+el entorno, el estado y la recompensa, con el EKF congelado (§4.26).
 
 **12/10/2026 (§4.23–4.26):** el curso del GPS condicionado a la Doppler (y sin forzar
 con el giroscopio) y las ráfagas sin forzar: la fusión ahora filtra el GPS ruidoso (σ
@@ -3347,6 +3384,13 @@ sugerido, en la respuesta del 9/10.
     combinando el giro de la cámara o del giroscopio con la velocidad de la cámara o
     del Doppler se ve qué produce el lazo (el rumbo), y que la calibración no lo
     explica. Mismo método que §4.13, aplicado a una pregunta de diseño.
+21. **La regla fija que sirve en una sesión empeora otra** (§4.27): cuándo dejar de
+    confiar en la velocidad de la cámara durante un corte de GPS. Hay margen en todas
+    las sesiones (oráculo, 30 s: p90 −32 a −57 %), pero el umbral de velocidad que lo
+    captura cambia con la sesión (7–13 m/s): ajustado en 14:05 y probado en 14:18
+    captura el 46–86 % del margen; al revés, empeora al EKF (−32 a −115 %). Es el
+    argumento medido para una política que mira varias señales, y la razón por la que
+    toda comparación (RL y reglas) va dejando una sesión afuera.
 
 ---
 
