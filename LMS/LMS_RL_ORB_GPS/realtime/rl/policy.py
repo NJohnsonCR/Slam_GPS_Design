@@ -5,7 +5,9 @@ with: the speed rule (ignore the camera above a speed) and the oracle (the
 best constant k of each outage).
 
 The protocol was fixed before the first training (CONTEXTO.md §4.30), and the
-evaluation follows it as written:
+evaluation follows it as written; its second version (§4.34, --version v2)
+changes the actions and adds a third baseline, the camera's fixed weight in
+outages (one k for every outage, chosen like the rule):
 
     sessions   the cached ones but VALIDATION train and are tested in turn;
                VALIDATION is tested with the policy trained on all of them
@@ -22,6 +24,7 @@ evaluation follows it as written:
                moves no more than GOOD_GPS_TOL_M in the p95
 
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.rl.policy
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.rl.policy --version v2
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.rl.policy --sessions 14_05 14_18 --seeds 0 --check
 """
 
@@ -57,7 +60,13 @@ RULE_THRESHOLDS = tuple(float(v) for v in range(0, 21, 2)) + (np.inf,)
 CRITERION_LENGTHS = (20, 30)
 CRITERION_CAPTURE = 0.25
 GOOD_GPS_TOL_M = 0.2
-POLICY_FILE = os.path.join(_THIS, "q_table.npz")
+# Each version of the protocol: its actions and where its policy is kept.
+VERSIONS = {"v1": ((1.0, 4.0, np.inf), "q_table.npz"),               # §4.30
+            "v2": ((1.0, 16.0, 256.0, np.inf), "q_table_v2.npz")}     # §4.34
+# The camera's fixed weight in outages, a baseline since v2.
+WEIGHTS = (1.0, 4.0, 16.0, 64.0, 256.0, np.inf)
+CRITERION_V2_P50_M = 1.0            # v2: the median may be at most this much worse than the fixed filter
+POLICY_FILE = os.path.join(_THIS, VERSIONS["v1"][1])
 OUT_DIR = os.path.join(_ROOT, "resultados", "rl")
 
 
@@ -198,14 +207,14 @@ def job(task):
         _, name, spec = task
         out = grid_errors(name, spec)[0]
     elif kind == "rl":                              # train without the test session, test on it
-        _, test, train_names, seed, save = task
+        _, test, train_names, seed, saves = task
         table, curve = train(train_names, seed)
         errors, actions = grid_errors(test, ("rl", None), table)
         out = {"errors": errors, "curve": curve, "good_gps": good_gps(test, table),
                "actions": {f"{k:g}": int(np.sum(np.array(actions) == k)) for k in E.ACTIONS},
                "states_visited": int(np.sum(table.n.sum(axis=1) > 0))}
-        if save:
-            table.save(save, trained_on=list(train_names), seed=seed, episodes=EPISODES)
+        for path in saves:
+            table.save(path, trained_on=list(train_names), seed=seed, episodes=EPISODES)
     elif kind == "fixed_gps":
         _, name = task
         out = good_gps(name)
@@ -227,7 +236,11 @@ def main():
     ap.add_argument("--check", action="store_true",
                     help="Prueba de funcionamiento: no guarda la política ni se reporta")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--version", choices=sorted(VERSIONS), default="v1",
+                    help="Versión del protocolo: v1 (§4.30) o v2 (§4.34)")
     args = ap.parse_args()
+    E.ACTIONS, policy_name = VERSIONS[args.version]
+    policy_file = os.path.join(_THIS, policy_name)
 
     t_all = time.perf_counter()
     sessions = E.cached_sessions(report=print)
@@ -245,22 +258,28 @@ def main():
     for s in sessions:
         BENCHES[s.name] = Bench(s)
     print(f"Copias del filtro listas ({time.perf_counter() - t_all:.0f} s); "
-          f"{EPISODES} episodios por política, semillas {args.seeds}")
+          f"{EPISODES} episodios por política, semillas {args.seeds}; protocolo {args.version}, "
+          f"acciones k = {', '.join(f'{k:g}' for k in E.ACTIONS)}")
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(OUT_DIR, ("prueba_" if args.check else "") + stamp)
+    out_dir = os.path.join(OUT_DIR, ("prueba_" if args.check else "") + stamp + "_" + args.version)
     os.makedirs(out_dir, exist_ok=True)
-    tasks = [("grid", n, ("k", k)) for n in train_pool + validation for k in E.ACTIONS]
+    constants = sorted(set(E.ACTIONS) | set(WEIGHTS))
+    tasks = [("grid", n, ("k", k)) for n in train_pool + validation for k in constants]
     tasks += [("grid", n, ("rule", thr)) for n in train_pool + validation
               for thr in RULE_THRESHOLDS if np.isfinite(thr)]
     tasks += [("fixed_gps", n) for n in train_pool + validation]
+    # Every policy is kept with the results, to look into it afterwards; the
+    # one trained on all sessions with the first seed is the one that stays.
+    table_path = lambda test, seed: os.path.join(out_dir, f"q_{test}_semilla{seed}.npz")
     for test in train_pool:
         others = tuple(n for n in train_pool if n != test)
-        tasks += [("rl", test, others, seed, None) for seed in args.seeds]
+        tasks += [("rl", test, others, seed, (table_path(test, seed),)) for seed in args.seeds]
     for v in validation:
         for seed in args.seeds:
-            save = None if args.check or seed != args.seeds[0] else POLICY_FILE
-            tasks.append(("rl", v, tuple(train_pool), seed, save))
+            keep = not args.check and seed == args.seeds[0]
+            tasks.append(("rl", v, tuple(train_pool), seed,
+                          (table_path(v, seed),) + ((policy_file,) if keep else ())))
     # The long ones first, so the pool does not end waiting on one.
     tasks.sort(key=lambda t: t[0] != "rl")
 
@@ -273,7 +292,7 @@ def main():
                 print(f"  [{n}/{len(tasks)}] política probada en {task[1]}, semilla {task[3]}: "
                       f"{dt / 60:.1f} min", flush=True)
 
-    const = {k: {n: results[("grid", n, ("k", k))] for n in train_pool + validation} for k in E.ACTIONS}
+    const = {k: {n: results[("grid", n, ("k", k))] for n in train_pool + validation} for k in constants}
     rule_runs = {thr: {n: results[("grid", n, ("rule", thr))] for n in train_pool + validation}
                  for thr in RULE_THRESHOLDS if np.isfinite(thr)}
     rule_runs[np.inf] = const[1.0]          # never ignoring it is the fixed filter
@@ -285,19 +304,29 @@ def main():
         best = min(score.values())
         return max(thr for thr, v in score.items() if v == best)   # ties: the higher threshold
 
+    def fit_weight(names):
+        """The fixed camera weight with the lowest mean p90 of the criterion outages on these sessions."""
+        score = {k: np.mean([p(pooled(const[k], names, L), 90) for L in CRITERION_LENGTHS])
+                 for k in WEIGHTS}
+        best = min(score.values())
+        return min(k for k, v in score.items() if v == best)       # ties: the lighter one
+
     report = {"protocolo": {"episodios": EPISODES, "eps": [EPS_START, EPS_END], "alpha_min": ALPHA_MIN,
                             "gamma": GAMMA, "largos_entrenamiento_s": TRAIN_LENGTHS_S,
                             "semillas": args.seeds, "umbrales_regla": [str(t) for t in RULE_THRESHOLDS],
                             "niveles": {k: list(v) for k, v in E.RlState.LEVELS.items()},
-                            "prueba_de_funcionamiento": args.check},
+                            "prueba_de_funcionamiento": args.check, "version": args.version,
+                            "acciones": [str(k) for k in E.ACTIONS], "pesos": [str(k) for k in WEIGHTS]},
               "sesiones": {}}
     rl_err = {seed: {} for seed in args.seeds}
-    rule_err, oracle_err = {}, {}
+    rule_err, oracle_err, weight_err = {}, {}, {}
     print("\nPor sesión de prueba (p90 al volver el GPS, m; la regla y el RL entrenados sin ella):")
     for test in train_pool + validation:
         others = [n for n in train_pool if n != test]
         thr = fit_rule(others)
         rule_err[test] = rule_runs[thr][test]
+        weight = fit_weight(others)
+        weight_err[test] = const[weight][test]
         oracle_err[test] = {L: np.min([const[k][test][L] for k in E.ACTIONS], axis=0)
                             for L in E.OUTAGE_LENGTHS}
         runs = [trained[(test, seed)] for seed in args.seeds]
@@ -309,37 +338,44 @@ def main():
             rows[L] = {"cortes": len(const[1.0][test][L]),
                        "ekf_fijo": [p(const[1.0][test][L], 50), p(const[1.0][test][L], 90)],
                        "regla": [p(rule_err[test][L], 50), p(rule_err[test][L], 90)],
+                       "peso_fijo": [p(weight_err[test][L], 50), p(weight_err[test][L], 90)],
                        "rl": [[p(r["errors"][L], 50), p(r["errors"][L], 90)] for r in runs],
                        "oraculo": [p(oracle_err[test][L], 50), p(oracle_err[test][L], 90)]}
         report["sesiones"][test] = {
-            "umbral_regla": str(thr), "cortes": rows,
+            "umbral_regla": str(thr), "peso_fijo": str(weight), "cortes": rows,
             "gps_bueno_ekf_fijo": fixed_gps, "gps_bueno_rl": [r["good_gps"] for r in runs],
             "acciones_rl": [r["actions"] for r in runs], "curva": [r["curve"] for r in runs],
             "estados_visitados": [r["states_visited"] for r in runs]}
         line = " | ".join(
             f"{L} s: fijo {rows[L]['ekf_fijo'][1]:5.1f}, regla {rows[L]['regla'][1]:5.1f}, "
+            f"peso {rows[L]['peso_fijo'][1]:5.1f}, "
             f"RL {np.mean([x[1] for x in rows[L]['rl']]):5.1f}, oráculo {rows[L]['oraculo'][1]:5.1f}"
             for L in CRITERION_LENGTHS)
-        print(f"  {test}{' (validación)' if test in validation else ''}: {line}; umbral de la regla {thr:g} m/s")
+        print(f"  {test}{' (validación)' if test in validation else ''}: {line}; umbral de la regla "
+              f"{thr:g} m/s, peso fijo {weight:g}")
 
     def summary(names, label):
         print(f"\n{label} (p50 / p90 al volver el GPS, m; RL: media de {len(args.seeds)} semillas):")
         out = {}
         for L in E.OUTAGE_LENGTHS:
             f, o, r = pooled(const[1.0], names, L), pooled(oracle_err, names, L), pooled(rule_err, names, L)
+            w = pooled(weight_err, names, L)
             rl = [pooled(rl_err[seed], names, L) for seed in args.seeds]
             rl90 = [p(x, 90) for x in rl]
             margin = p(f, 90) - p(o, 90)
             # Below a metre of margin a share of it means nothing.
             cap = lambda v: (p(f, 90) - v) / margin if margin >= 1.0 else float("nan")
             out[L] = {"cortes": len(f), "ekf_fijo": [p(f, 50), p(f, 90)], "oraculo": [p(o, 50), p(o, 90)],
-                      "regla": [p(r, 50), p(r, 90)], "rl_p50": [p(x, 50) for x in rl], "rl_p90": rl90,
-                      "captura_regla": cap(p(r, 90)), "captura_rl": cap(float(np.mean(rl90))),
+                      "regla": [p(r, 50), p(r, 90)], "peso_fijo": [p(w, 50), p(w, 90)],
+                      "rl_p50": [p(x, 50) for x in rl], "rl_p90": rl90,
+                      "captura_regla": cap(p(r, 90)), "captura_peso_fijo": cap(p(w, 90)),
+                      "captura_rl": cap(float(np.mean(rl90))),
                       "captura_rl_por_semilla": [cap(v) for v in rl90]}
             c = out[L]
             share = lambda v: "sin margen" if np.isnan(v) else f"{100 * v:+.0f} %"
             print(f"  {L:2d} s ({c['cortes']} cortes): EKF fijo {c['ekf_fijo'][0]:5.1f} / {c['ekf_fijo'][1]:5.1f} | "
                   f"regla {c['regla'][0]:5.1f} / {c['regla'][1]:5.1f} ({share(c['captura_regla'])}) | "
+                  f"peso fijo {c['peso_fijo'][0]:5.1f} / {c['peso_fijo'][1]:5.1f} ({share(c['captura_peso_fijo'])}) | "
                   f"RL {np.mean(c['rl_p50']):5.1f} / {np.mean(rl90):5.1f} ({share(c['captura_rl'])}; "
                   f"semillas {', '.join(share(v) for v in c['captura_rl_por_semilla'])}) | "
                   f"oráculo {c['oraculo'][0]:5.1f} / {c['oraculo'][1]:5.1f}")
@@ -351,18 +387,38 @@ def main():
     worst_gps = max(abs(r[1] - report["sesiones"][n]["gps_bueno_ekf_fijo"][1])
                     for n in train_pool for r in report["sesiones"][n]["gps_bueno_rl"])
     captures = [report["prueba"][L]["captura_rl"] for L in CRITERION_LENGTHS]
-    ok = all(c >= CRITERION_CAPTURE for c in captures) and worst_gps <= GOOD_GPS_TOL_M
-    report["criterio"] = {"captura_20_30": captures, "gps_bueno_peor_diferencia_p95_m": worst_gps, "cumple": ok}
+    ok_v1 = all(c >= CRITERION_CAPTURE for c in captures) and worst_gps <= GOOD_GPS_TOL_M
+    report["criterio"] = {"captura_20_30": captures, "gps_bueno_peor_diferencia_p95_m": worst_gps,
+                          "cumple_v1": ok_v1}
     print(f"\nCon el GPS bueno, la predicción de cada fix: p95 a lo sumo {worst_gps:.2f} m del EKF fijo")
-    print(f"Criterio (≥ {100 * CRITERION_CAPTURE:.0f} % del margen a 20 y 30 s, GPS bueno ± {GOOD_GPS_TOL_M} m): "
-          f"captura {', '.join(f'{100 * c:.0f} %' for c in captures)} -> "
-          f"{'CUMPLE' if ok else 'NO CUMPLE'}" + ("  (prueba de funcionamiento)" if args.check else ""))
+    tag = "  (prueba de funcionamiento)" if args.check else ""
+    print(f"Criterio v1 (≥ {100 * CRITERION_CAPTURE:.0f} % del margen a 20 y 30 s, GPS bueno ± {GOOD_GPS_TOL_M} m): "
+          f"captura {', '.join(f'{100 * c:.0f} %' for c in captures)} -> {'CUMPLE' if ok_v1 else 'NO CUMPLE'}{tag}")
+    if args.version == "v2":
+        # §4.34: a better tail than the fixed camera weight, without giving up the median.
+        tail = [(float(np.mean(report["prueba"][L]["rl_p90"])), report["prueba"][L]["peso_fijo"][1])
+                for L in CRITERION_LENGTHS]
+        median = [float(np.mean(report["prueba"][L]["rl_p50"])) - report["prueba"][L]["ekf_fijo"][0]
+                  for L in CRITERION_LENGTHS]
+        ok_v2 = (all(a < b for a, b in tail) and all(d <= CRITERION_V2_P50_M for d in median)
+                 and worst_gps <= GOOD_GPS_TOL_M)
+        report["criterio"].update({"p90_rl_contra_peso_fijo_20_30": tail, "p50_rl_menos_ekf_fijo_20_30": median,
+                                   "cumple_v2": ok_v2})
+        print(f"Criterio v2 (p90 menor que el peso fijo y p50 a lo sumo {CRITERION_V2_P50_M:g} m peor que el "
+              f"EKF fijo, a 20 y 30 s): p90 " + ", ".join(f"{a:.1f} contra {b:.1f}" for a, b in tail)
+              + "; p50 " + ", ".join(f"{d:+.1f} m" for d in median) + f" -> {'CUMPLE' if ok_v2 else 'NO CUMPLE'}{tag}")
 
+    # The error of every outage, in grid order, for any analysis afterwards.
+    report["cortes"] = {n: {"ekf_fijo": const[1.0][n], "sin_camara": const[np.inf][n],
+                            **{f"k{k:g}": const[k][n] for k in constants if np.isfinite(k) and k != 1.0},
+                            "regla": rule_err[n], "peso_fijo": weight_err[n],
+                            "rl": [trained[(n, seed)]["errors"] for seed in args.seeds]}
+                        for n in train_pool + validation}
     with open(os.path.join(out_dir, "evaluacion.json"), "w") as f:
         json.dump(report, f, indent=1, default=float)
     print(f"\nResultados en {os.path.relpath(out_dir, _ROOT)}  ({(time.perf_counter() - t_all) / 60:.0f} min)")
     if not args.check and validation:
-        print(f"Política entrenada con las {len(train_pool)} sesiones: {os.path.relpath(POLICY_FILE, _ROOT)}")
+        print(f"Política entrenada con las {len(train_pool)} sesiones: {os.path.relpath(policy_file, _ROOT)}")
     return 0
 
 

@@ -1,6 +1,8 @@
 # Contexto del proyecto — TFG SLAM + GPS + RL
 
-**Última actualización:** 11 de octubre de 2026 (primera prueba de campo: sensores
+**Última actualización:** 16 de octubre de 2026 (el RL, §4.28–4.34: cumple su criterio; con
+la vara justa empata en la cola con un peso fijo y gana en la mediana; corrida v2 pendiente
+de revisar, ver "Dónde quedamos"). **Antes:** 11 de octubre de 2026 (primera prueba de campo: sensores
 completos, el EKF los usó en las cuatro sesiones; la cámara sola falla con lluvia en el
 parabrisas; la rotonda la sigue el GPS, no la cámara, §4.21. Antes, la laptop de campo: torch con CUDA 12.6
 para la GTX 1050 Ti, §14 y §15; con el teléfono por cable la latencia p95 no cumple en
@@ -2838,10 +2840,179 @@ las sesiones en vivo 145250, 145514, 150517 y 151614):
    decisiones durante los cortes; la tabla final ve 187 estados de 243 y elige `k = 1`
    en 72, `k = 4` en 42 e ignorar en 73.
 
+**Ojo (§4.33):** la línea base de este criterio es el EKF fijo tal cual, que en los cortes
+confía de más en la cámara; un peso fijo bien elegido empata con el RL en el p90.
+
 **Política que queda:** `realtime/rl/q_table.npz` (14 KB; las seis sesiones, semilla 0).
 **Falta:** integrarla (`OnlineFusion` la consulta cada segundo, `--rl` en `run_replay.py`
 y `run_live.py`, una casilla en la ventana, el corte simulado para verla, §4.28) y
 documentarla.
+
+
+### 4.32 ¿El resultado del RL es real? Comparación con el RL anterior y controles (16/10/2026)
+
+**Qué cambió respecto del RL anterior (§3.4, §3.5.1):**
+
+| | RL anterior | RL de §4.30–4.31 |
+|---|---|---|
+| Recompensa | Nunca miró la posición real (`ground_truth=None`): imitaba una heurística, cuyo techo era ella misma | La distancia a cada fix de GPS escondido y al de la vuelta, contra el EKF fijo del mismo corte; verificada (0 exacto con `k = 1`, la suma coincide a 5·10⁻¹³) |
+| Problema de decisión | Sin MDP: `next_state` siempre `None`, γ declarado y sin usar, sin exploración | Episodios con estado siguiente (los segundos sin fix avanzan), γ = 1 al terminar el corte, ε-greedy |
+| Estado | Una señal constante (`visual_conf` = 1.0 siempre) y otra sin normalizar | Cinco señales medidas, en terciles; 187 de 243 estados vistos |
+| Qué controla | Ponderaba posiciones; después, elegir la fuente de escala | Un peso dentro de un EKF que funciona (`k = 1` es el filtro fijo, a 0 m); acciones acotadas |
+| Margen antes de entrenar | 17 % (ponderar) con ~4 % aprendible; el 64.6 % de la escala salía de una sola secuencia | Oráculo medido en las seis sesiones (−32 a −57 % del p90 a 30 s en cada una) |
+| Línea base | La mejor constante | El EKF fijo, y la regla de velocidad ajustada igual (dejando una sesión afuera) |
+| Modelo | Regresión de 6 features: −1656 a −35 % de captura (memorizaba el dominio) | Tabla: un estado que no vio decide como el EKF fijo |
+| Evaluación | Dejando una secuencia afuera, 7 secuencias KITTI de dominios distintos | Dejando una sesión afuera, seis sesiones del mismo carro y teléfono, protocolo declarado antes y una sola corrida |
+
+**Controles contra un artefacto** (segunda corrida idéntica del protocolo, que además
+guarda la tabla de cada prueba y el error de cada corte; scripts temporales):
+1. **Reproducible:** la segunda corrida da los mismos números al centímetro y la misma
+   tabla final, byte a byte.
+2. **El estado es lo que sirve:** con las mismas tablas de cada prueba, pero con los
+   estados barajados (misma mezcla de acciones, sin relación con lo que el filtro ve),
+   la captura cae a +4 % y +3 % (de −9 a +16 %); con acciones al azar en la proporción
+   que eligió el RL, a +8 % y +7 % (de −6 a +15 %). El RL: +33 % y +40 %.
+3. **No lo hace una sesión:** bootstrap por sesión (2000 remuestreos de las seis, media
+   de las tres semillas): a 20 s, p5–p95 de +16 a +49 % (≥ 25 % en el 86 %, > 0 en el
+   99 %); a 30 s, de +22 a +52 % (≥ 25 % en el 93 %, > 0 en el 100 %). Sacando cada
+   sesión: 28–51 % a 20 s, 31–50 % a 30 s.
+4. **No es solo la regla de velocidad:** en los cortes lentos (≤ 10 m/s al empezar),
+   donde la regla casi no sirve (+8 % a 20 s; −14 % a 30 s), el RL captura +16 % y
+   +20 %; en los rápidos, +44 % y +26 % contra +36 % y +36 % de la regla.
+5. **Lo que no se controla:** los terciles se calcularon con las seis sesiones (sin
+   etiquetas, declarado); las acciones (`k = 4`), la espera de 1.5 s y los niveles fijos
+   se eligieron mirando 14:05 y 14:18 (§4.27–4.28); la referencia es el GPS escondido,
+   con su error de varios metros (frente a p90 de 80–170 m); los cortes son simulados
+   sobre seis sesiones de dos días en rutas parecidas.
+
+**Prueba visual** (`resultados/rl/20261016_120530/prueba_visual_151615.png`, fuera de
+git): 15:16, sesión de campo, con la política entrenada sin ella; de sus 45 cortes de
+30 s, el de mejora mediana, el de más mejora y el de más empeora (sin elegir a mano):
+- **Mediana:** EKF fijo 71.3 m, RL 71.1 m; los dos trazos se superponen (los dos creen
+  que el carro va más lento de lo que va).
+- **Más mejora:** EKF fijo **497.6 m**, RL **114.9 m**. La escala de la cámara se
+  dispara y el EKF fijo recorre ~800 m donde el carro hizo ~300; el RL ignora la
+  cámara desde el segundo 7 y se queda cerca.
+- **Más empeora:** EKF fijo 35.1 m, RL 292.6 m. El RL ignora la cámara casi todo el
+  corte y se queda con una velocidad baja mientras el carro avanza ~460 m; el EKF fijo,
+  con la cámara, sigue la forma.
+- En la sesión: mejora mediana +0.2 m, p10 −18.9, p90 +36.5; mejor en el 49 % de los
+  cortes, peor en el 47 %.
+
+**El patrón, en las seis sesiones** (cortes de 30 s, mejora del RL sobre el EKF fijo,
+media de semillas): arrancando a < 3 m/s, p10/p50/p90 −5.3 / −0.2 / +2.0 m (casi
+nada); a 3–10 m/s, −13.3 / −0.1 / +15.9; **a más de 10 m/s, −61.2 / +0.5 / +157.1**
+(empeora > 20 m en el 34 % y mejora > 20 m en el 36 %). De los 33 cortes donde
+empeora más de 20 m, solo el 6 % arranca casi detenido. **En el corte típico el RL y el
+EKF fijo dan lo mismo; a velocidad alta el RL apuesta, y gana más de lo que pierde.**
+Eso es lo que mide el p90: rescata los cortes donde la escala de la cámara se
+dispara, a cambio de empeorar algunos donde ignorarla deja la velocidad baja.
+
+
+### 4.33 La debilidad del RL, diagnosticada (16/10/2026)
+
+**Estado al 16/10:** el RL funciona y cumple el criterio declarado (§4.31, verificado en
+§4.32), con una debilidad: en algunos cortes rápidos ignora la cámara y pierde mucho.
+El estudiante decidió intentar mejorarla antes de integrar, con un límite: si se
+estanca, lo discute con el asesor y sigue con lo que hay.
+
+**Diagnóstico** (244 cortes de 30 s de las seis sesiones, la política de cada prueba,
+semilla 0; script temporal; "error de la cámara" = su velocidad con la escala congelada
+al empezar el corte contra la Doppler escondida, mediana relativa):
+
+| Mejora del RL sobre el EKF fijo | Cortes | Cambio real de velocidad (p50) | Error de la cámara (p50) | Tiempo que la ignora (p50) |
+|---|---|---|---|---|
+| Empeora > 20 m | 31 | **6.7 m/s** | 34 % | 83 % |
+| ±20 m | 176 | 2.2 m/s | 29 % | 22 % |
+| Mejora > 20 m | 37 | 4.4 m/s | **59 %** | 83 % |
+
+| Cámara (error < 25 %) / carro (cambia > 3 m/s) | Cortes | Ignora | Mejora p10 / p50 / p90 (m) |
+|---|---|---|---|
+| Bien / estable | 34 | 27 % | −10.1 / −0.1 / +5.9 |
+| Bien / cambia | 39 | 31 % | −35.1 / −0.9 / +13.4 |
+| Mal / estable | 78 | 33 % | −10.9 / +0.5 / **+96.6** |
+| Mal / cambia | 89 | 37 % | **−72.2** / +0.1 / +89.7 |
+
+- **La confusión que sospechó el estudiante es correcta, con un matiz:** el RL ignora la
+  cámara igual de seguido cuando gana (la cámara mentía: 59 % de error) que cuando
+  pierde (el carro cambió de velocidad: 6.7 m/s); el estado no separa las dos causas.
+  Y **ignorar la cámara es suponer velocidad constante**: sale caro siempre que el carro
+  acelera o frena, aunque la cámara también se equivoque (p10 −72 m en "mal / cambia").
+- **Otras causas de la dispersión Doppler/cámara** (la señal que mira el RL antes del
+  corte): el retraso de la mediana móvil de la cámara (~1 s) cuando el carro acelera o
+  frena; la Doppler ruidosa a baja velocidad (el umbral de 2 m/s la acota); la escala
+  que cambia con la escena (calle cerrada contra autopista abierta, §4.21); la lluvia;
+  los altos (la compuerta pone 0). Durante el corte, el NIS de la cámara tiene la misma
+  ambigüedad: una cámara que no coincide con la velocidad del filtro puede estar mal o
+  ver una aceleración real.
+- **El acelerómetro no la separa así como está** (14:05 y 14:18, la aceleración sobre el
+  eje de la cámara, horizontal, integrada, contra la Doppler): en 10 s, error p50
+  1.6–2.8 m/s con un cambio real p50 de 1.4–1.9 m/s (correlación 0.51–0.53; la cámara,
+  0.32–0.65); en 30 s, 3.7–6.0 m/s (correlación 0.29–0.44; la cámara, 0.32–0.60). Con
+  el teléfono en el tablero, las vibraciones y la inclinación al frenar lo contaminan;
+  habría que calibrarlo con el GPS presente (días, resultado incierto).
+
+**Hallazgo al buscar alternativas: el EKF fijo confía de más en la cámara durante los
+cortes.** Con la escala congelada, el error de la velocidad de la cámara es mayor que el
+que supone el filtro (mediana 29 % en los cortes típicos, contra el 20 % de
+`CAMERA_SPEED_REL`, medido con el GPS presente). Un peso fijo de la cámara en los cortes
+(su varianza × `k` desde los 1.5 s sin fix, sin RL), elegido como la regla con las cinco
+sesiones de entrenamiento de cada prueba entre {1, 4, 16, 64, 256, ∞} (salió 256 en
+cuatro pruebas y 64 en dos):
+
+| Seis sesiones juntas | p90 20 s | p90 30 s | p50 20 s | p50 30 s |
+|---|---|---|---|---|
+| EKF fijo | 97.1 | 169.6 | 19.9 | 32.3 |
+| Peso fijo de la cámara en los cortes (dejando una sesión afuera) | 80.8 (+32 %) | 133.7 (+42 %) | 26.2 | 39.7 |
+| RL de §4.31 | 80.3 (+33 %) | 135.0 (+40 %) | **20.6** | **34.1** |
+
+- **En la cola, el RL empata con un peso fijo bien elegido**; la diferencia es la
+  mediana: el peso fijo empeora el corte típico 6–7 m y el RL 0.7–1.8 m. El RL decide
+  cuándo bajar el peso; el peso fijo lo baja siempre.
+- §3.5.1 ya lo había advertido: la vara justa es un EKF fijo **bien ajustado**. El
+  criterio de §4.30 se midió contra el EKF fijo tal cual, que en los cortes está mal
+  ajustado; el resultado de §4.31 es correcto, pero hay que reportarlo junto a este.
+- Con un peso finito en vez de ignorar, las pérdidas grandes bajan: donde ignorar pierde
+  más de 20 m (126 cortes de 30 s), pierde 80.5 m en promedio; con la varianza × 16,
+  9.2 m; × 64, 19.5 m. A cambio gana menos donde ignorar gana (127.0 → 56.0 y 83.6 m).
+  El oráculo con {1, 4, 16, ∞} llega a p90 46.1 / 77.3 m (20 / 30 s): **sobre el peso
+  fijo sigue habiendo margen.**
+- Promediar las tablas de las tres semillas no cambia nada (34 % y 39 %).
+
+**Alternativas** (costo; probabilidad de mejorar; si cambia el protocolo):
+
+| Alternativa | Costo | Probabilidad | Protocolo |
+|---|---|---|---|
+| **A. RL v2: acciones con pesos finitos fuertes** ({1, 16, 256, ∞} o {1, 4, 64, ∞}), y el peso fijo bien elegido como línea base | ~1 h de código + ~1 h de corrida | **Media-alta** de bajar las pérdidas grandes y quedar ≥ el peso fijo en la cola; **media** de ganarle claramente en la cola | Sí: acciones, línea base y criterio, declarados antes |
+| B. Penalizar empeorar (recompensa asimétrica) | ~1 h + 1 h | Media: baja las pérdidas, pero también las ganancias; puede quedar bajo el peso fijo | Sí: la recompensa |
+| C. El acelerómetro en el estado | Días (calibrarlo con el GPS, traer la IMU de campo a la caché) | Baja-media: así como está no supera a la cámara | Sí: el estado |
+| D. La variación de la velocidad de la cámara en el estado | ~2 h + 1 h | Baja-media: tiene la misma ambigüedad (la cámara puede mentir también sobre el cambio) | Sí: el estado |
+| E. Más datos (grabar más, sobre todo autopista) | Días | Media | No (las sesiones) |
+| F. Promediar semillas, más episodios | Minutos a 1 h | Baja (medido: no cambia) | Sí |
+
+
+### 4.34 Protocolo v2 del RL, fijado antes de correrlo (16/10/2026)
+
+Aprobado por el estudiante el 16/10 (alternativa A de §4.33). Todo lo de §4.30 vale,
+salvo:
+- **Acciones:** `k ∈ {1, 16, 256, ∞}` (la varianza de la velocidad de la cámara por
+  `k`; ∞ la ignora). Pesos finitos fuertes para que la cámara siga mostrando las
+  aceleraciones con su escala amortiguada; ∞ se queda porque gana mucho cuando la escala
+  se dispara.
+- **Líneas base:** el EKF fijo, la regla de velocidad (como en §4.30) y **el peso fijo
+  de la cámara en los cortes**: `k` constante desde los 1.5 s sin fix, elegido entre {1,
+  4, 16, 64, 256, ∞} con la menor media del p90 de 20 y 30 s en las cinco sesiones de
+  entrenamiento de cada prueba (empate: el más chico).
+- **Oráculo:** el mejor de las cuatro acciones constantes en cada corte.
+- **Criterio v2** (seis sesiones de prueba juntas, media de las tres semillas): (1) el
+  p90 del RL v2 es **menor que el del peso fijo** a 20 s y a 30 s; (2) su p50 es **a lo
+  sumo 1 m peor que el del EKF fijo** a 20 s y a 30 s; (3) con el GPS bueno, el p95 de
+  la predicción no se mueve más de 0.2 m. Se reporta además la captura contra el EKF
+  fijo como en §4.31.
+- **Si no cumple:** se reporta el RL de §4.31 con el hallazgo de §4.33, y el estudiante
+  lo discute con el asesor.
+- Los niveles del estado no cambian (§4.30). Es una segunda iteración elegida después de
+  ver las sesiones de prueba (§4.33): se declara así al reportarla.
 
 ---
 
@@ -3087,6 +3258,40 @@ por cable** (§4.20).
 ## 10. SIGUIENTES PASOS (plan vigente al 7/10/2026)
 
 ### Dónde quedamos (9/10/2026)
+
+**16/10/2026, al compactar la sesión: la corrida del protocolo v2 (§4.34) quedó
+lanzada y sin revisar.** Se lanzó a las 14:08 en segundo plano (`python -m
+LMS.LMS_RL_ORB_GPS.realtime.rl.policy --version v2 --workers 7`, ~1 h); la espera desde
+la conversación se cortó a mano, pero el proceso siguió corriendo. Al retomar:
+1. Ver si terminó: `resultados/rl/20261016_140855_v2/evaluacion.json` (si existe, terminó;
+   la consola la imprime al final con los criterios v1 y v2). Si no existe y no hay un
+   proceso `realtime.rl.policy` vivo, se cortó: volver a lanzar el mismo comando (da lo
+   mismo: semillas fijas, reproducible, §4.32).
+2. Mostrarle los números al estudiante **antes de commitear**: el criterio v2 (p90 del RL
+   v2 menor que el del peso fijo a 20 y 30 s, p50 a lo sumo 1 m peor que el EKF fijo,
+   GPS bueno igual), por sesión, y la validación. Anotarlos en una §4.35.
+3. Si no cumple: se reporta el RL de §4.31 con el hallazgo de §4.33 y el estudiante lo
+   discute con el asesor. Si cumple: la política v2 queda en `realtime/rl/q_table_v2.npz`.
+4. Después: la integración (la política en `OnlineFusion`, `--rl` en `run_replay.py` y
+   `run_live.py`, la casilla en la ventana, el corte de GPS simulado en el mapa), con los
+   números antes de commitear cada cosa.
+
+**Sin commitear al 16/10** (el estudiante commitea): `realtime/rl/policy.py` (guarda la
+tabla de cada prueba y el error de cada corte; `--version v2` con la línea base del peso
+fijo y el criterio v2) y este documento (§4.32–4.34 y "Dónde quedamos"). Ya commiteados:
+`env.py` con los terciles de las seis sesiones, `q_table.npz` (v1) y §4.28–4.31. Resultados de las
+corridas, fuera de git: `resultados/rl/20261015_211156/` (v1, primera),
+`20261016_120530/` (v1, repetida con tablas y cortes, y `prueba_visual_151615.png`).
+
+**16/10/2026:** el resultado del RL es real (§4.32: reproducible; con los estados
+barajados la captura cae a 3–4 %; bootstrap por sesión +16…+49 % a 20 s y +22…+52 % a
+30 s). Debilidad diagnosticada (§4.33): ignora la cámara igual cuando miente que cuando
+el carro cambia de velocidad, y ahí pierde. El estudiante intenta mejorarla antes de
+integrar, con límite (si se estanca, lo discute con el asesor). **Hallazgo (§4.33): el
+EKF fijo confía de más en la cámara en los cortes;** un peso fijo de la cámara elegido
+dejando una sesión afuera captura lo mismo que el RL en el p90 (+32 / +42 %) pero
+empeora la mediana 6–7 m (el RL, 1–2 m). **Aprobado el protocolo v2 (§4.34):** acciones
+{1, 16, 256, ∞}, el peso fijo como línea base nueva; se corre antes de integrar.
 
 **15/10/2026, el RL entrenado y evaluado (§4.30, §4.31): CUMPLE el criterio.** Dejando
 una sesión afuera (seis sesiones, tres semillas), captura el 33 % del margen a 20 s y el
@@ -3668,7 +3873,9 @@ sugerido, en la respuesta del 9/10.
     cambiar nada con el GPS bueno. Supera a la regla de velocidad por 4–10 puntos y
     daña menos sesiones (una contra dos), a cambio de 1–2 m en la mediana; no se
     traslada a una grabación de otra app y otra cámara. Estado, acciones y recompensa
-    explícitos (OE3).
+    explícitos (OE3). **Con la vara justa** (§4.33): un peso fijo de la cámara en los
+    cortes, bien elegido, empata con el RL en el p90; el RL gana en la mediana (6 m),
+    porque decide cuándo bajar el peso. Resultado de la versión 2 en §4.34.
 
 ---
 
