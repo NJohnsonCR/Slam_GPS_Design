@@ -2591,6 +2591,133 @@ durante el corte; oráculo = el mejor de los dos; p50 / p90 en m):
 - **Lo que suman al plan:** más del doble de cortes y de manejo, y las velocidades
   altas (14:18 llega a 21.7 m/s; el campo, a 17.9) para el nivel "> 12 m/s" del estado.
 
+
+### 4.28 El entorno del RL (13/10/2026)
+
+`realtime/rl/env.py` (nuevo). Corre sobre la caché, sin video; `python -m
+LMS.LMS_RL_ORB_GPS.realtime.rl.env` lo revisa (identidad con el EKF fijo y los cortes con
+`k` constante) y sale con error si la identidad se rompe.
+
+- **El filtro:** `PolicyFusion`, subclase de `GpsCameraFusion`; `fusion.py` no se tocó
+  (la caché sigue valiendo para cualquier política). Solo cambia el peso de la
+  velocidad de la cámara: la varianza (en marcha o detenida) por `k ∈ {1, 4, ∞}`, con
+  ∞ = no usarla. **Con `k = 1` es el EKF fijo: 0 m de diferencia** en toda la sesión, en
+  las tres; con un error a propósito (la sonda del NIS sobre el filtro real en vez de
+  una copia) la diferencia sube a 1.47 m: la prueba detecta que la subclase toque el
+  filtro.
+- **Cuándo decide:** una vez por segundo, en cada velocidad de la cámara, y **solo con
+  1.5 s o más sin fix**; con el GPS presente decide el filtro fijo. Medido: con el GPS
+  bueno la velocidad de la cámara no aporta (ignorarla en toda la sesión da la
+  predicción contra cada fix p50/p95 1.25/3.57 contra 1.30/3.88 m en 14:05, 1.28/3.29
+  contra 1.33/3.33 en 14:18, 2.42/5.55 contra 3.24/6.68 en 2025_03_11). Así "no
+  empeorar el GPS bueno" se cumple por construcción y la recompensa no necesita ese
+  término; el estado del filtro al empezar cada corte es el del EKF fijo.
+- **Episodio:** una copia del filtro fijo cada 1 s de la sesión (`Snapshots`); un corte
+  de 10–60 s desde una de ellas, hasta el fix con que vuelve el GPS. La grilla de
+  evaluación (uno cada 10 s desde el arranque) es la de `evaluate.py --sweep`.
+  ~30 episodios por segundo.
+- **Estado (`RlState`, 3⁵ = 243):** segundos sin fix (≤ 5, ≤ 15, más); velocidad del
+  filtro (≤ 6, ≤ 12, más m/s); dispersión de Doppler/cámara en los últimos 10 fixes
+  (coeficiente de variación; ≤ 0.18, ≤ 0.25, más); NIS medio de las últimas 5
+  velocidades de la cámara, calculado sobre una copia con el peso del filtro fijo, así
+  que sigue llegando mientras se la ignora (≤ 0.2, ≤ 0.75, más); fracción de frames
+  "detenidos" por la compuerta en los últimos 5 s (0, ≤ 0.5, más). La dispersión y el
+  NIS van en sus terciles sobre los cortes de 14:05 y 14:18 (con la χ² de 1 grado el
+  74 % del NIS caía en el primer nivel); hay que revisarlos cuando entren las de campo.
+  En la grilla: 19 109 decisiones, 137 estados visitados, 119 con ≥ 20 decisiones.
+- **Recompensa:** −(distancia a cada fix oculto y al de la vuelta), en m, −0.1 por
+  cambio de acción (§4.26). La suma por decisión coincide con la del episodio (5·10⁻¹³).
+  Tiene colas grandes: suma por episodio p50 −56 (10 s) a −1630 m (60 s), p10 −2783.
+  **Opción:** la misma contra el EKF fijo del mismo corte (cuánto más cerca que él, fix
+  por fix): elige la misma política (lo que se resta no depende de las acciones) y le
+  quita la dificultad de cada tramo; con una política al azar, en cortes de 30 s, el
+  rango p10–p90 baja de −2371…−148 a −206…+146 (14:18).
+
+**Con `k` constante en todo el corte** (desde los 1.5 s sin fix; p50 / p90 al volver el GPS, m):
+
+| | 10 s | 20 s | 30 s | 60 s |
+|---|---|---|---|---|
+| 14:05 EKF fijo / `k = 4` / sin cámara / oráculo de los 3 | 4.9/23.0 · 4.5/21.6 · 9.6/30.8 · **3.9/16.9** | 9.8/49.1 · 11.3/43.4 · 26.3/78.9 · **9.2/30.9** | 15.7/79.1 · 14.1/79.2 · 46.7/115 · **11.5/49.0** | 25.1/186 · 30.4/173 · 88.0/279 · **20.3/94.2** |
+| 14:18 | 10.6/42.7 · 10.3/33.1 · 16.0/37.9 · **6.2/19.5** | 16.9/107 · 19.6/114 · 31.5/76.7 · **14.3/38.7** | 27.3/178 · 28.1/181 · 48.6/128 · **15.7/79.8** | 83.2/447 · 80.6/509 · 97.6/334 · **45.9/205** |
+| 2025_03_11 (validación) | 12.4/35.1 · 11.5/36.0 · 18.2/52.0 · **11.1/34.8** | 23.9/50.0 · 21.1/75.8 · 40.4/118 · **20.2/48.6** | 32.1/84.9 · 30.6/116 · 50.8/173 · **29.1/84.9** | 61.8/147 · 61.0/157 · 96.6/284 · **53.6/110** |
+
+- El EKF fijo coincide con §4.27; "sin cámara" difiere un poco de allá porque ahora el
+  primer 1.5 s del corte lo decide el filtro fijo.
+- **`k = 4` solo, casi igual al EKF fijo; en el oráculo suma algo:** es el mejor de los
+  tres en el 30–45 % de los cortes de 30 s. Con la misma restricción, el oráculo de 2
+  acciones (1 e ∞) da p50 / p90 14.0 / 51.1 (14:05), 19.0 / 80.8 (14:18) y 31.1 / 84.9
+  (2025_03_11); con 3, 11.5 / 49.0, 15.7 / 79.8 y 29.1 / 84.9: baja la mediana 2–3 m y
+  el p90 0–2 m.
+- **Las señales al empezar el corte** (correlación con "conviene sin la cámara"):
+  velocidad +0.20 / +0.48 (14:05 / 14:18), dispersión +0.13 / +0.31, NIS +0.13 / +0.31,
+  detenido −0.09 / −0.27. **En 2025_03_11 ninguna** (−0.15 a +0.18 sin patrón): otro
+  dominio; puede que el RL no gane ahí, y se reporta igual.
+
+**Cortes reales (preguntas del estudiante, 13/10):** la app usa el **proveedor
+fusionado** de Android (`FusedLocationProviderClient`, `LocationProvider.java`), no el
+GPS solo. En un túnel puede seguir mandando posiciones estimadas (red, inercial) en vez
+de cortarse, y saltar a la salida; sin la precisión de cada fix (`getAccuracy`, deseable
+de §10) el filtro no lo distingue. Si los fixes no se cortan, la política (que decide
+con ≥ 1.5 s sin fix) no se activa y lo que actúa es el rechazo de saltos del EKF fijo
+(§4.18, §4.23). **No medido.** Propuesta: grabar el túnel Zurquí (Ruta 32) en los dos
+sentidos y el centro de San José, como caso de prueba real (no para entrenar): cómo
+falla el GPS del teléfono, la cámara con la luz del túnel, y el error al salir contra el
+primer fix bueno, que es la misma métrica de los cortes simulados.
+
+
+### 4.29 ¿El RL también para el peso del GPS? No (13/10/2026)
+
+Pregunta del estudiante: el ruido del GPS sí está en las grabaciones y los cortes no;
+¿conviene que el RL decida también cuánto confiar en el GPS (su varianza)? Banco temporal
+sobre la caché (14:05, 14:18, 2025_03_11; 3 semillas): ruido blanco de σ 0/5/10/20 m en
+cada eje de los fixes, la Doppler intacta; error de la posición fusionada contra el fix
+limpio en cada fix desde el arranque. La varianza del GPS se multiplica por `k` desde
+una subclase (atributo de la instancia), sin tocar `fusion.py`. El oráculo elige cada
+10 s el mejor `k ∈ {1, 4, 16}` **mirando el GPS limpio**: es una cota optimista.
+
+| p50 / p95 (m) | GPS solo | EKF fijo | `k = 4` fijo | `k = 16` fijo | Regla del NIS (§4.25) | Oráculo cada 10 s |
+|---|---|---|---|---|---|---|
+| GPS limpio, 14:05 · 14:18 | 0 | 1.0/3.0 · 1.0/2.7 | 1.5/4.0 · 1.4/3.6 | 2.4/5.4 · 1.9/4.8 | 1.0/3.0 · 1.0/2.7 | 1.0/3.0 · 1.0/2.7 (elige `k = 1` el 96–100 %) |
+| σ 5 m | 5.9/12.3 | 2.0/4.9 · 2.1/4.9 | 2.2/5.7 · 2.5/5.7 | 3.4/9.4 · 3.8/10.0 | 2.0/5.4 · 2.3/5.3 | 1.7/4.6 · 1.9/4.6 |
+| σ 10 m | 11.8/24.6 | 4.4/11.0 · 4.7/11.1 | **3.0/7.7 · 3.4/8.0** | 3.6/8.9 · 4.1/11.3 | 3.2/8.8 · 3.7/8.5 | 2.3/7.0 · 2.7/7.0 |
+| σ 20 m | 23.6/49.3 | 14.1/38.6 · 15.2/39.0 | 8.3/19.6 · 7.4/19.9 | **4.8/26.9 · 5.5/15.0** | **1146/1542** · 5.7/13.2 | 3.8/12.7 · 4.3/10.9 |
+
+2025_03_11, igual de forma: limpio 2.8/5.9 (oráculo el mismo), σ 10 m 7.8/14.7 →
+oráculo 5.9/11.0, σ 20 m 17.5/36.5 → 8.2/25.5 (la regla del NIS: 224/347).
+
+**Por qué no:**
+1. **Con el GPS de las grabaciones no hay margen.** Con el GPS limpio, cualquier `k > 1`
+   empeora y el oráculo elige el filtro fijo el 96–100 % del tiempo. El ruido natural es
+   chico: el NIS de posición es 0.17–0.49 (§4.25), menos que los 4 m que supone el
+   filtro, y la predicción contra cada fix es 1.3–2.0 m (p50). Con σ 5 m tampoco: el EKF
+   fijo ya filtra a 2.0/4.9 contra 5.9/12.3 del GPS solo, y el oráculo baja 0.3 m.
+2. **El ruido natural no se puede evaluar.** La única referencia es el mismo GPS: una
+   política que confíe más en él (`k < 1`) se "acerca" a la referencia por definición.
+   Para medir hay que sumar ruido sintético sobre fixes limpios, igual que los cortes:
+   el argumento de "el ruido sí ocurre de verdad" no favorece al ruido sobre los cortes.
+3. **Donde hay margen (σ ≥ 10 m), lo toma un peso fijo según el nivel de ruido.** A σ 10
+   m, `k = 4` en toda la sesión da 3.0–3.4/7.7–8.0 contra el oráculo 2.3–2.7/7.0; a σ 20
+   m, `k = 16` llega a 4.8–5.5/15–27 contra 3.8–4.3/11–13. La decisión es "cuánto ruido
+   tiene este GPS", que cambia despacio: un problema de **estimación** (un filtro de
+   Kalman adaptativo, con la varianza estimada de las innovaciones), no de decisiones
+   secuenciales. Para el RL quedaría poco por encima de esa regla.
+4. **Una regla adaptativa ingenua puede divergir:** con σ 20 m la regla del NIS se fue a
+   1146 m (14:05) y 224 m (2025_03_11): varianza alta → innovaciones más grandes →
+   varianza más alta, hasta soltar el GPS. En 14:18 funcionó (5.7/13.2). Si algún día se
+   adapta el peso del GPS, tiene que ir acotado (acciones discretas, como las del RL).
+5. **El ruido real de ciudad es multitrayecto** (error lento y correlado): ningún peso lo
+   corrige (§4.22, §4.25).
+
+**Si se quisiera de todos modos** (no recomendado; solo si sobra tiempo): acciones
+`k_gps ∈ {1, 4, 16}` junto a las de la cámara (9 acciones); al estado, el NIS medio de la
+posición y la fracción de fixes rechazados recientes (cada uno 3 niveles: 243 × 9 = 2187
+pares, demasiados para 6 sesiones; habría que sacar señales); episodios con el nivel de
+ruido sorteado sobre la caché y la recompensa contra el fix limpio. El margen esperado,
+por el oráculo: σ 10 m, p95 de ~11 a ~7 m; σ 20 m, de ~39 a ~11–13 m; con GPS limpio o σ
+5 m, nada.
+
+**Decisión: el RL queda en la confianza en la cámara durante los cortes (§4.26, §4.28).**
+
 ---
 
 ## 5. BUGS IDENTIFICADOS EN `main.py` (SIN CORREGIR)
@@ -2835,6 +2962,15 @@ por cable** (§4.20).
 ## 10. SIGUIENTES PASOS (plan vigente al 7/10/2026)
 
 ### Dónde quedamos (9/10/2026)
+
+**13/10/2026, el entorno del RL (§4.28):** `realtime/rl/env.py`, sobre la caché y sin
+tocar `fusion.py`; con `k = 1` es el EKF fijo a 0 m. La política decide solo con el GPS
+ausente (con el GPS bueno la cámara no aporta: medido). Estado de 243 con niveles
+parejos, recompensa verificada; el oráculo de 3 acciones a 30 s, p90 79 → 49 m (14:05)
+y 178 → 80 m (14:18). **Espera aprobación del estudiante** (la restricción a los cortes,
+la recompensa contra el EKF fijo y los niveles) antes del entrenamiento. **El peso del
+GPS no entra en el RL** (§4.29): con el GPS de las grabaciones no hay margen ni forma de
+medirlo, y donde hay (ruido sintético σ ≥ 10 m) lo toma un peso fijo por nivel de ruido.
 
 **13/10/2026 (§4.27):** procesadas y en la caché las grabaciones de la de escritorio:
 14:05 y 14:18 para entrenar (con las cuatro de campo, 6 sesiones, 44 min de manejo,
