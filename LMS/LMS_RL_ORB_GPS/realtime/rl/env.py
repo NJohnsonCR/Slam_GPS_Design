@@ -66,12 +66,12 @@ class RlState:
     stopped: float              # share of frames the stop gate called stopped, last seconds
 
     # Upper bounds of levels 0 and 1 for each signal; the third level is above.
-    # The spread and the NIS at their terciles over the outages of 14:05 and
-    # 14:18 (13/10/2026); the others where they mean something.
+    # The spread and the NIS at their terciles over the grid outages of the six
+    # training sessions (15/10/2026); the others where they mean something.
     LEVELS = {"since_fix_s": (5.0, 15.0),       # just out / a while / long
               "speed": (6.0, 12.0),             # m/s
-              "ratio_spread": (0.18, 0.25),
-              "camera_nis": (0.2, 0.75),
+              "ratio_spread": (0.17, 0.29),
+              "camera_nis": (0.28, 1.03),
               "stopped": (0.0, 0.5)}            # none / some / most
     N_STATES = 3 ** 5
 
@@ -296,22 +296,21 @@ def run_episode(snaps: Snapshots, i: int, length_s: int, controller: Callable) -
     return Episode(s.name, (t_from - snaps.start_t) / 1e9, length_s, errors, fus.decisions, reward)
 
 
-def transitions(ep: Episode, baseline: Optional[Episode] = None):
+def transitions(ep: Episode, baseline: Optional[dict] = None):
     """
     The episode as (state index, action index, reward, next state index or
     None at the end): each error goes to the decision in force when it was
-    measured, each switch to the decision that made it. With the fixed
-    filter's run of the same outage as baseline, each error counts as how
-    much farther than the baseline's.
+    measured, each switch to the decision that made it. With baseline, the
+    fixed filter's error at each fix of the same outage ({t_ns: metres}),
+    each error counts as how much farther than the baseline's.
     """
     if not ep.decisions:
         return []
     times = np.array([d[0] for d in ep.decisions], np.int64)
     rewards = np.zeros(len(ep.decisions))
-    base = dict(baseline.errors) if baseline is not None else {}
     for t_err, e in ep.errors:
         n = max(int(np.searchsorted(times, t_err, side="right")) - 1, 0)
-        rewards[n] -= e - base.get(t_err, 0.0)
+        rewards[n] -= e - (baseline[t_err] if baseline is not None else 0.0)
     prev = 1.0
     for n, (_, _, k) in enumerate(ep.decisions):
         if k != prev:

@@ -2718,6 +2718,131 @@ por el oráculo: σ 10 m, p95 de ~11 a ~7 m; σ 20 m, de ~39 a ~11–13 m; con G
 
 **Decisión: el RL queda en la confianza en la cámara durante los cortes (§4.26, §4.28).**
 
+
+### 4.30 Protocolo del RL, fijado antes de entrenar (15/10/2026)
+
+Aprobado por el estudiante el 15/10 (las tres decisiones de §4.28, y "fijar los
+parámetros de antemano, sin ajustarlos según cómo le va"). Código:
+`realtime/rl/policy.py`; la evaluación sigue esto tal cual, y lo que se reporta es la
+primera corrida completa.
+
+- **Sesiones:** entrenan y se prueban por turno las seis de carro con la app nueva
+  (las cuatro de campo, 14:05 y 14:18), **dejando una afuera** (6 pruebas). 2025_03_11
+  solo se prueba, con la política entrenada en las seis.
+- **Estado y acciones:** los de §4.28 (243 estados, `k ∈ {1, 4, ∞}`, decide con ≥ 1.5 s
+  sin fix). Los niveles de la dispersión Doppler/cámara y del NIS de la cámara se
+  recalculan una vez, antes de entrenar, en los terciles de las decisiones de la grilla
+  (con `k = 1`) de las seis sesiones juntas: sin etiquetas, pero con la distribución de
+  la sesión de prueba (fuga leve, declarada). Los demás niveles no cambian.
+- **Recompensa:** la de §4.28 contra el EKF fijo del mismo corte (cuánto más cerca que
+  él de cada fix oculto y del de la vuelta), −0.1 m por cambio de acción.
+- **Q-learning tabular:** `Q` en cero; ante un empate gana `k = 1` (un estado que no vio
+  decide como el filtro fijo); sin descuento (γ = 1: el episodio termina al volver el
+  GPS); α = máx(1/visitas, 0.02); ε-greedy de 0.5 a 0.05 lineal; **20 000 episodios**
+  por política; cada episodio, una sesión de entrenamiento al azar (proporcional a su
+  largo), un segundo al azar y un corte de 10 a 60 s (entero, uniforme); las
+  actualizaciones de cada episodio, del final al principio. **3 semillas** (0, 1, 2)
+  por prueba; se reporta la media de sus p90 y el rango.
+- **Regla de velocidad (línea base):** `k = ∞` si la velocidad del filtro pasa un umbral,
+  si no `k = 1`, decidiendo en los mismos momentos que el RL. **Un solo umbral** (al
+  empezar un corte no se sabe cuánto va a durar; en §4.27 se ajustó por largo, que era
+  optimista) de {0, 2, …, 20 m/s, nunca}, el de menor media del p90 de los cortes de 20
+  y 30 s en las cinco sesiones de entrenamiento de cada prueba (empate: el más alto).
+- **Oráculo:** el mejor de los tres `k` constantes en cada corte.
+- **Se mide en** la grilla de la sesión de prueba (un corte cada 10 s, de 10/20/30/60
+  s), el error al volver el GPS; las seis sesiones de prueba juntas.
+- **Criterio de éxito** (§4.26): el RL captura **≥ 25 % del margen** del EKF fijo al
+  oráculo en el p90 de los cortes de 20 s **y** de 30 s, con las seis sesiones de
+  prueba juntas, **y** con el GPS bueno (la sesión entera, sin cortes) el p95 de la
+  predicción de cada fix no se mueve más de 0.2 m del EKF fijo en ninguna sesión.
+  También se reportan: la regla medida igual, cada sesión, 10 y 60 s, la mediana, la
+  validación, las acciones elegidas y la curva de aprendizaje.
+- **Política que queda:** la entrenada con las seis sesiones, semilla 0,
+  `realtime/rl/q_table.npz` (con sus niveles y acciones; se niega a cargar con otros).
+- **Antes, una prueba de funcionamiento** con solo 14:05 y 14:18 y una semilla
+  (`--check`), para ver que el código aprende y cuánto tarda; sus números no se
+  reportan ni se usan para cambiar nada de lo de arriba (solo errores de programación).
+
+**Hecho antes de la corrida que se reporta (15/10):**
+- Prueba de funcionamiento: corre (12 min por política de 20 000 episodios, ~37 ms por
+  episodio), la tabla ve 144–145 estados, usa las tres acciones y su recompensa media
+  sube; con el GPS bueno la política no actúa (0.00 m). Sin cambios al protocolo. De paso
+  se agregó la mediana a la curva de aprendizaje (la media la tiran los pocos cortes
+  donde ignorar la cámara ahorra cientos de metros); solo diagnóstico.
+- Terciles recalculados con las seis sesiones (27 703 decisiones): dispersión
+  Doppler/cámara **0.17 / 0.29** (antes 0.18 / 0.25) y NIS de la cámara **0.28 / 1.03**
+  (antes 0.20 / 0.75), en `RlState.LEVELS`.
+
+
+### 4.31 Resultado del RL: cumple el criterio (15/10/2026)
+
+La corrida del protocolo de §4.30, la primera y única completa (`python -m
+LMS.LMS_RL_ORB_GPS.realtime.rl.policy`, 49 min con 7 procesos; resultados en
+`resultados/rl/20261015_211156/evaluacion.json`, fuera de git). 21 políticas: 6 pruebas
+× 3 semillas, más 3 entrenadas con las seis para la validación.
+
+**Las seis sesiones de prueba juntas** (cada una probada con políticas entrenadas sin
+ella; error al volver el GPS, p50 / p90 en m; RL, media de 3 semillas; entre
+paréntesis, la parte del margen del EKF fijo al oráculo que se captura en el p90):
+
+| Corte | Cortes | EKF fijo | Regla de velocidad | **RL** | Oráculo |
+|---|---|---|---|---|---|
+| 10 s | 256 | 9.6 / 34.1 | 8.5 / 32.7 (+11 %) | 8.6 / 32.6 (+12 %; semillas +23, +13, −1) | 5.5 / 21.1 |
+| **20 s** | 250 | 19.9 / 97.1 | 20.6 / 85.3 (+23 %) | 20.6 / **80.3 (+33 %; +33, +28, +38)** | 14.3 / 46.5 |
+| **30 s** | 244 | 32.3 / 169.6 | 37.7 / 138.3 (+36 %) | 34.1 / **135.0 (+40 %; +36, +37, +47)** | 21.2 / 83.2 |
+| 60 s | 226 | 76.6 / 361.5 | 112.8 / 339.4 (+13 %) | 70.3 / 324.0 (+21 %; +15, +31, +18) | 48.0 / 185.8 |
+
+**Criterio: CUMPLE.** Captura el 33 % del margen a 20 s y el 40 % a 30 s (≥ 25 %), y
+**cada una de las tres semillas** también (28–38 % y 36–47 %). Con el GPS bueno la
+predicción de cada fix queda idéntica (0.00 m de diferencia en el p95): en las seis
+sesiones de carro no hay ningún hueco natural de 1.5 s, así que la política nunca actuó.
+
+**Por sesión** (p90 a 20 / 30 s; RL, media de semillas; umbral de la regla ajustado
+sin la sesión; las de campo por la hora de su grabación `2026_10_11_*`, que en §4.21 son
+las sesiones en vivo 145250, 145514, 150517 y 151614):
+
+| Sesión de prueba | Cortes 20/30 s | EKF fijo | Regla (umbral) | RL | Oráculo |
+|---|---|---|---|---|---|
+| 14:05 | 67 / 66 | 49.1 / 79.1 | 55.9 / 104.6 (10 m/s) | 47.9 / 78.7 | 30.9 / 49.0 |
+| 14:18 | 74 / 73 | 106.5 / 178.2 | 68.6 / 124.0 (10) | 81.4 / 134.9 | 38.7 / 79.8 |
+| 14:52 | 10 / 9 | 45.3 / 55.4 | 75.5 / 98.9 (10) | 57.4 / 102.1 | 35.3 / 49.3 |
+| 14:55 | 32 / 31 | 82.2 / 111.8 | 52.8 / 99.8 (10) | 57.4 / 87.1 | 32.9 / 50.3 |
+| 15:05 | 21 / 20 | 142.8 / 273.3 | 142.8 / 267.4 (18) | 104.1 / 218.8 | 78.7 / 130.5 |
+| 15:16 | 46 / 45 | 118.2 / 185.7 | 110.5 / 150.9 (10) | 100.5 / 160.5 | 58.3 / 120.7 |
+| 2025_03_11 (validación) | 21 / 20 | 50.0 / 84.9 | 75.4 / 119.1 (10) | 76.2 / 104.6 | 48.6 / 84.9 |
+
+**Lo que hay que decir junto al "cumple":**
+1. **La regla de velocidad, con cinco sesiones para ajustarla, queda cerca:** 23 % y 36 %
+   contra 33 % y 40 % del RL. El RL le gana por 10 puntos a 20 s, 4 a 30 s y 8 a 60 s;
+   a 10 s empatan. Buena parte de lo que aprende es "a velocidad alta, no creerle a la
+   cámara". Con cinco sesiones el umbral salió estable (10 m/s en cinco de seis
+   pruebas, 18 en una), a diferencia de §4.27, donde se ajustaba con una sola sesión y
+   por largo de corte.
+2. **El RL daña menos sesiones que la regla:** la regla empeora al EKF fijo en dos de
+   seis (14:05 y 14:52, a 20 y 30 s); el RL empeora en una (14:52, la más corta: 9–10
+   cortes) y queda igual en 14:05. Mejora en las otras cuatro.
+3. **Mejora la cola, no la mediana:** el p50 del RL es 0.7 m peor a 20 s y 1.8 m peor a
+   30 s que el EKF fijo (la regla, 0.7 y 5.4 m peor); a 60 s mejora (70.3 contra 76.6).
+   El criterio era el p90, declarado de antemano: el RL cambia un poco del corte típico
+   por mucho de los malos. La curva de aprendizaje lo muestra: la recompensa media sube
+   (de ~60–150 a ~150–300 por cada 1000 episodios) y la mediana queda en 0 a −3.
+4. **Varía entre semillas por sesión** (14:05 a 30 s: 58.7, 82.6 y 94.7 contra 79.1 del
+   fijo); junta, cada semilla cumple.
+5. **No se traslada al otro dominio:** en 2025_03_11 (otra app, teléfono vertical, otra
+   cámara) no hay margen (a 30 s el oráculo es el EKF fijo, 84.9; a 10 s, 0.3 m), y el
+   RL y la regla empeoran el p90 (20 s: 76.2 y 75.4 contra 50.0; 30 s: 104.6 y 119.1
+   contra 84.9); la mediana queda igual o mejor (30 s: 30.6 contra 32.1). Ahí la
+   política decidió además 47 veces con "GPS bueno": el video sigue ~50 s después del
+   último fix; sin fixes, la predicción no cambia.
+6. **Acciones** en las pruebas: `k = 1` 30–55 %, `k = 4` 16–26 %, ignorar 20–54 % de las
+   decisiones durante los cortes; la tabla final ve 187 estados de 243 y elige `k = 1`
+   en 72, `k = 4` en 42 e ignorar en 73.
+
+**Política que queda:** `realtime/rl/q_table.npz` (14 KB; las seis sesiones, semilla 0).
+**Falta:** integrarla (`OnlineFusion` la consulta cada segundo, `--rl` en `run_replay.py`
+y `run_live.py`, una casilla en la ventana, el corte simulado para verla, §4.28) y
+documentarla.
+
 ---
 
 ## 5. BUGS IDENTIFICADOS EN `main.py` (SIN CORREGIR)
@@ -2962,6 +3087,14 @@ por cable** (§4.20).
 ## 10. SIGUIENTES PASOS (plan vigente al 7/10/2026)
 
 ### Dónde quedamos (9/10/2026)
+
+**15/10/2026, el RL entrenado y evaluado (§4.30, §4.31): CUMPLE el criterio.** Dejando
+una sesión afuera (seis sesiones, tres semillas), captura el 33 % del margen a 20 s y el
+40 % a 30 s en el p90 (criterio ≥ 25 %), sin tocar el GPS bueno. La regla de velocidad
+queda cerca (23 y 36 %); el RL daña menos sesiones; mejora la cola y empeora 1–2 m la
+mediana; no se traslada a 2025_03_11. Política en `realtime/rl/q_table.npz`.
+**Siguiente:** integrarla al pipeline y a la ventana (con el corte simulado para verla) y
+documentar; aparte, la grabación del túnel como caso real (§4.28).
 
 **13/10/2026, el entorno del RL (§4.28):** `realtime/rl/env.py`, sobre la caché y sin
 tocar `fusion.py`; con `k = 1` es el EKF fijo a 0 m. La política decide solo con el GPS
@@ -3526,7 +3659,16 @@ sugerido, en la respuesta del 9/10.
     captura cambia con la sesión (7–13 m/s): ajustado en 14:05 y probado en 14:18
     captura el 46–86 % del margen; al revés, empeora al EKF (−32 a −115 %). Es el
     argumento medido para una política que mira varias señales, y la razón por la que
-    toda comparación (RL y reglas) va dejando una sesión afuera.
+    toda comparación (RL y reglas) va dejando una sesión afuera. Con cinco sesiones
+    para ajustarla (§4.31) el umbral sale estable (10 m/s) y la regla captura 23–36 %
+    del margen, pero sigue empeorando dos de seis sesiones.
+22. **El RL cumple su criterio declarado de antemano** (§4.30, §4.31): dejando una
+    sesión afuera captura el 33 % (20 s) y el 40 % (30 s) del margen del EKF fijo al
+    oráculo en el p90 de los cortes de GPS, cada semilla por encima del 25 %, sin
+    cambiar nada con el GPS bueno. Supera a la regla de velocidad por 4–10 puntos y
+    daña menos sesiones (una contra dos), a cambio de 1–2 m en la mediana; no se
+    traslada a una grabación de otra app y otra cámara. Estado, acciones y recompensa
+    explícitos (OE3).
 
 ---
 
