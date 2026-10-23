@@ -9,7 +9,6 @@ import json
 from datetime import datetime
 from typing import Dict
 import matplotlib.pyplot as plt
-import pandas as pd
 
 # Agrega el directorio raíz al sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))

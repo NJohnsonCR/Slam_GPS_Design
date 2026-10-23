@@ -63,7 +63,7 @@ python - <<'EOF'
 import sys
 import numpy as np
 sys.path.insert(0, "LMS/LMS_RL_ORB_GPS")
-import cv2, tkinter, PIL.ImageTk, pyproj, pandas, scipy, sklearn, simplekml, torch  # noqa: F401
+import cv2, tkinter, PIL.ImageTk, pyproj, pandas, scipy, sklearn, torch  # noqa: F401
 from realtime.depth_scale import DepthScaleEstimator, usable_gpu
 DepthScaleEstimator(np.eye(3), device=-1)
 print("Modelo de profundidad descargado.")
@@ -74,7 +74,7 @@ if gpu:
 elif torch.cuda.is_available():
     print("AVISO: hay GPU, pero esta versión de torch no corre en ella; el modelo de")
     print("profundidad correrá en la CPU (más lento). Ver 'Si algo falla en la laptop'")
-    print("en scripts/rl/CONTEXTO.md.")
+    print("en LMS/LMS_RL_ORB_GPS/docs/CONTEXTO.md.")
 else:
     print("AVISO: sin GPU utilizable (¿driver NVIDIA instalado? probar nvidia-smi); el")
     print("modelo de profundidad correrá en la CPU (más lento).")

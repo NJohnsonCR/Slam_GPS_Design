@@ -2,24 +2,19 @@
 The RL's environment: how much to trust the camera's speed while the GPS is
 out, decided once a second from what the filter sees.
 
-    episode  a cached session and a GPS outage of 10-60 s, run from a copy of
-             the fixed filter taken where the outage starts, until the GPS
-             comes back
-    action   the camera speed's variance times k in ACTIONS; inf ignores it,
-             and the filter goes on with its own speed and the gyroscope.
-             Asked only after GPS_GAP_S without a fix: with the GPS there the
-             camera speed adds nothing (ignoring it all session does not
-             worsen the prediction of each fix), so the fixed filter decides
+    episode  a cached session and a GPS outage of 10-60 s, from a copy of the
+             fixed filter where the outage starts, until the GPS comes back
+    action   the camera speed's variance times k in ACTIONS (inf ignores it),
+             only after GPS_GAP_S without a fix: with the GPS there the camera
+             speed adds nothing
     state    RlState: five signals of the filter, three levels each
-    reward   minus the distance (m) to each hidden fix and to the fix the GPS
-             comes back with, minus SWITCH_COST per change of action; or, with
-             the fixed filter's run of the same outage as baseline, how much
-             closer than it, which takes out how hard each stretch is
+    reward   minus the distance to each hidden fix and to the one the GPS comes
+             back with, relative to the fixed filter's in the same outage,
+             minus SWITCH_COST per change of action
 
-The filter is fusion.GpsCameraFusion untouched: PolicyFusion only changes how
-the camera speed's update is weighted, so with k = 1 it is the fixed EKF to
-the last digit, and the cache stays valid for any policy. Everything runs on
-the cache (frames.csv and location.csv), without video:
+PolicyFusion only weighs the camera speed's update, so with k = 1 it is the
+fixed EKF to the last digit and the cache stays valid for any policy. It runs
+on the cache, without video:
 
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.rl.env
 """
@@ -67,7 +62,7 @@ class RlState:
 
     # Upper bounds of levels 0 and 1 for each signal; the third level is above.
     # The spread and the NIS at their terciles over the grid outages of the six
-    # training sessions (15/10/2026); the others where they mean something.
+    # training sessions; the others where they mean something.
     LEVELS = {"since_fix_s": (5.0, 15.0),       # just out / a while / long
               "speed": (6.0, 12.0),             # m/s
               "ratio_spread": (0.17, 0.29),

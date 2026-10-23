@@ -8,7 +8,7 @@ con mediciones GPS, simulando el formato frame-por-frame de KITTI.
 import cv2
 import numpy as np
 import pandas as pd
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 
 class MobileVideoProcessor:

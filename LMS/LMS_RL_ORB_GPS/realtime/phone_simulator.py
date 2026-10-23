@@ -1,28 +1,20 @@
 """
-Phone simulator: serves a recording made by the app with the app's own
-protocol, so the live client and the interface can be tested without the
-phone.
+Phone simulator: serves a recording of the app with the app's protocol, so
+the live client and the window can be tested without the phone.
 
-    TCP 5000  HELLO line, then every frame as a 20-byte header plus its JPEG
+    TCP 5000  HELLO, then each frame as a 20-byte header and its JPEG
     UDP 5001  SUBSCRIBE / START / STOP / TIME in; SUBSCRIBED, STATE, GPS, IMU
-              and TIME lines out (IMU as the app sends it: each gyro_accel.csv
-              row)
+              and TIME out
 
-It behaves like the phone where it matters to the PC: the camera runs in real
-time from the first connection, a new connection replaces the previous one,
-frames are dropped (not queued) when the PC falls behind, and fixes and IMU
-samples arrive when the video reaches their timestamp. --no-imu leaves the
-IMU out, as the app did before it sent it. Frames carry the recording's boot
-clock, so they pair with its location.csv; the Unix capture time is the
-current one, so the measured latency is that of the PC. TIME answers with
-that boot clock as it runs while playing, and the current Unix time.
+It behaves like the phone where it matters: the camera runs in real time from
+the first connection, a new connection replaces the old one, frames are
+dropped when the PC falls behind, and fixes and IMU samples go out when the
+video reaches them. Frames keep the recording's boot clock, so they pair with
+its location.csv, and the current Unix time, so the latency measured is the
+PC's. --no-imu leaves the IMU out.
 
-Usage:
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.phone_simulator \\
-        mobile_data/2026_09_30_14_18_36 --start 380 --duration 120
-
-    # in another terminal
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_live 127.0.0.1
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.phone_simulator mobile_data/2026_09_30_14_18_36 --start 380
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_live 127.0.0.1        (in another terminal)
 """
 
 import argparse

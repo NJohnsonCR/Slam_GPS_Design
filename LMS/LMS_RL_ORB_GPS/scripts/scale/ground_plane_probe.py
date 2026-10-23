@@ -1,28 +1,12 @@
 """
-SONDEO - ¿Funciona la recuperación de escala por plano de tierra en KITTI?
-
-Prueba mínima antes de implementar nada en el pipeline.
-
-IDEA DE LA VALIDACIÓN
----------------------
-El método necesita conocer la altura de la cámara sobre el suelo (h) para
-convertir unidades arbitrarias en metros. En vez de asumir h y ver si la escala
-sale bien, se hace al revés, que es mucho más informativo:
-
-  1. Se estima la homografía entre dos frames usando SOLO puntos de la carretera.
-  2. Al descomponerla se obtiene la traslación dividida por la distancia al
-     plano:   t_homografia = t_metrica / d
-  3. Como el ground truth da la distancia métrica real recorrida, se puede
-     despejar:   d = distancia_real / ||t_homografia||
-  4. Ese d ES la altura de la cámara.
-
-Si el método funciona, d debe salir CONSTANTE a lo largo de toda la secuencia y
-parecerse a la altura real del montaje de KITTI (~1.65 m). Si sale errático, la
-geometría no se está resolviendo bien y el enfoque no sirve.
-
-Ojo: el ground truth se usa aquí SOLO para validar, no forma parte del método.
-Una vez validado, h se fija como constante medida con cinta métrica y el método
-funciona sin GPS ni ground truth.
+Does ground-plane scale recovery work on KITTI? The method needs the camera's
+height above the road, h. Instead of assuming h, it is solved for: the
+homography between two frames from road points only gives the translation
+over the distance to the plane, t_h = t / d; with the true distance from the
+ground truth, d = distance / ||t_h||, and d is the camera's height. If the
+method works, d is constant over the sequence and close to KITTI's mount
+(~1.65 m). The ground truth only validates; the method itself would use a
+measured h.
 
 Uso:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.scale.ground_plane_probe \
@@ -50,12 +34,12 @@ for _p in (_ROOT, _LMS_RL):
 from LMS.LMS_ORB_with_PG.main import PoseGraphSLAM
 from utils.gps.gps_utils import latlon_to_utm
 
-# Calibración de la cámara 02 de KITTI (los mismos valores del pipeline)
+# KITTI camera 02 calibration (the pipeline's values)
 KITTI_FX, KITTI_FY = 718.856, 718.856
 KITTI_CX, KITTI_CY = 607.1928, 185.2157
-KITTI_CAM_HEIGHT = 1.65      # altura documentada del montaje, solo de referencia
+KITTI_CAM_HEIGHT = 1.65      # the mount's documented height, for reference only
 
-GROUND_ROI_TOP = 0.60        # los puntos del suelo se buscan bajo este % de la altura
+GROUND_ROI_TOP = 0.60        # road points are taken below this share of the image height
 MIN_GROUND_MATCHES = 25
 
 
@@ -81,17 +65,16 @@ def load_gt(gps_dir, n):
 
 def pick_ground_solution(Rs, Ts, Ns):
     """
-    decomposeHomographyMat devuelve hasta 4 soluciones. Se elige la que
-    corresponde al suelo: en el marco de la cámara de KITTI el eje Y apunta
-    hacia ABAJO, así que la normal del plano del suelo (que apunta hacia la
-    cámara) debe tener componente Y marcadamente negativa.
+    Of decomposeHomographyMat's up to 4 solutions, the road's: KITTI's camera
+    Y axis points down, so the road normal (towards the camera) has a clearly
+    negative Y.
     """
     best, best_score = None, -np.inf
     for R, T, N in zip(Rs, Ts, Ns):
         n = N.ravel()
-        if n[1] > 0:           # normal invertida: usar la opuesta
+        if n[1] > 0:           # flipped normal: take the opposite
             n = -n
-        score = -n[1]          # cuánto apunta "hacia arriba" en el marco cámara
+        score = -n[1]          # how much it points up in the camera frame
         if score > best_score:
             best_score, best = score, (R, T.ravel(), n)
     return best, best_score
@@ -139,7 +122,7 @@ def main():
         if i > 0 and des is not None and prev_des is not None:
             matches = slam.filter_matches_lowe_ratio(prev_des, des)
 
-            # solo correspondencias en la parte baja de AMBAS imágenes
+            # only correspondences in the bottom of both images
             g = [m for m in matches
                  if prev_kp[m.queryIdx].pt[1] > GROUND_ROI_TOP * H_img
                  and kp[m.trainIdx].pt[1] > GROUND_ROI_TOP * H_img]
@@ -157,7 +140,7 @@ def main():
                         (Rb, Tb, Nb), score = pick_ground_solution(Rs, Ts, Ns)
                         nt = float(np.linalg.norm(Tb))
                         if nt > 1e-6:
-                            # t_homografia = t_metrica / d  ->  d = dist_real / ||t_h||
+                            # t_h = t / d  ->  d = true distance / ||t_h||
                             h_implied.append(true_step[i - 1] / nt)
                             normals.append(Nb)
                             done = True
@@ -218,9 +201,8 @@ def main():
     print(f"{'='*88}")
 
     # ------------------------------------------------------------------
-    # ¿Mejora si se descartan los frames cuya normal no parece suelo?
-    # La altura de cámara es CONSTANTE, así que no hace falta una estimación
-    # por frame: basta con quedarse con las mediciones confiables.
+    # The height is constant, so frames whose normal does not look like the
+    # road can be dropped: only the reliable measurements are needed.
     # ------------------------------------------------------------------
     print(f"\n{'-'*88}")
     print("FILTRADO POR CALIDAD DE LA NORMAL DEL PLANO")
@@ -228,7 +210,7 @@ def main():
     print(f"{'exigencia sobre la normal':<34}{'frames':>9}{'mediana h':>12}{'IQR rel':>10}{'sesgo':>9}")
     print("-" * 88)
 
-    ny = -N[:, 1]                      # cuánto apunta hacia arriba (1.0 = suelo perfecto)
+    ny = -N[:, 1]                      # how much it points up (1.0 = a perfect road)
     for thr in (0.0, 0.90, 0.97, 0.99, 0.995):
         sel = np.isfinite(h) & np.isfinite(ny) & (ny >= thr)
         if sel.sum() < 5:

@@ -1,24 +1,12 @@
 """
-PASO 3 (corregido) - Imitación del oráculo con tasas de sensor realistas.
+Imitation of the oracle's GPS weight with realistic sensor rates.
 
-Historial de correcciones (importante para el informe del TFG):
-  v1: la pose arrancaba con rotación identidad, ignorando que el marco de la
-      cámara está girado ~124° respecto del mapa -> la VO avanzaba mal.
-  v2: asumía un fix de GPS por frame, régimen donde no hay nada que adaptar.
-  v3: las features se calculaban sobre la trayectoria del ORÁCULO pero se
-      aplicaban sobre la trayectoria de la POLÍTICA, que se desvía. Desajuste
-      de distribución: la política veía en producción estados que nunca vio
-      entrenando.
-
-Esta versión resuelve las tres. La clave de la tercera es que ahora existe un
-único bucle `run_episode` que calcula las features EN LÍNEA sobre la trayectoria
-que realmente se está recorriendo, y consulta a la política en cada fix. Es
-también como debe funcionar en tiempo real.
-
-Para cubrir los estados que la política va a visitar, los datos de entrenamiento
-se recolectan recorriendo cada secuencia con VARIAS políticas de comportamiento
-(pesos constantes distintos y el oráculo), etiquetando cada estado con el peso
-óptimo calculado en ESE estado.
+One loop, run_episode, computes the features online over the trajectory being
+driven and asks the policy at each fix, as it would run in real time; features
+taken from the oracle's trajectory would not match the states the policy
+reaches. To cover those states, training data comes from driving each sequence
+with several behaviour policies (constant weights and the oracle), each state
+labelled with the optimal weight in that state.
 
 Uso:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.rl.imitate_oracle
@@ -67,14 +55,11 @@ def rot_angle(R):
 
 def run_episode(cache, gps, period, R0, weight_fn):
     """
-    Bucle único de fusión. Calcula las features EN LÍNEA sobre la trayectoria
-    que se está recorriendo y consulta la política en cada fix.
-
-    weight_fn: 'oracle', un escalar, o una función feat_vector -> w.
-
-    Devuelve (trayectoria, features por fix, peso óptimo por fix, peso usado).
-    El peso óptimo se registra siempre, sea cual sea la política: es la etiqueta
-    de entrenamiento para ese estado.
+    The fusion loop: features computed online over the trajectory being driven,
+    the policy asked at each fix. weight_fn is 'oracle', a scalar or a function
+    feat_vector -> w. Returns (trajectory, features per fix, optimal weight per
+    fix, weight used); the optimal weight is the training label of that state,
+    whatever the policy.
     """
     R_vo, t_vo = cache['R_vo'], cache['t_vo']
     scales, gt = cache['step_scales'], cache['gt']
@@ -153,7 +138,7 @@ def main():
     print("  Features calculadas EN LÍNEA sobre la propia trayectoria de la política.")
     print(f"  Datos recolectados con {len(BEHAVIOR_POLICIES)} políticas de comportamiento distintas.\n")
 
-    # ---------- recolección de datos ----------
+    # ---------- data collection ----------
     Xs, ys = [], []
     for nm in SPLIT['train']:
         c = caches[nm]
@@ -201,7 +186,7 @@ def main():
     w_fixed = float(W_GRID[int(np.argmin(errs))])
     print(f"Mejor peso CONSTANTE según entrenamiento: w = {w_fixed:.3f}\n")
 
-    # ---------- evaluación ----------
+    # ---------- evaluation ----------
     print("=" * 100)
     print("EVALUACIÓN EN SECUENCIAS NUNCA VISTAS")
     print("=" * 100)

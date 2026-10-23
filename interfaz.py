@@ -1,28 +1,28 @@
-import os
-import subprocess
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+"""
+Launcher of the project's LMS systems: one button per LMS_* folder, the
+classic RL-ORB-SLAM-GPS with automatic dataset detection, and the real-time
+pipeline window (realtime/live_window.py).
+"""
+
 import json
+import os
 import sys
 import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
 from medir_metricas import medir_metricas
 
-# ============================================================================
-# IMPORTS PARA LMS_RL_ORB_GPS (NUEVOS)
-# ============================================================================
-# Agregar path del sistema LMS_RL_ORB_GPS al sys.path
+# The classic LMS_RL_ORB_GPS loads from its own folder (utils.GUI, main).
 lms_rl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'LMS', 'LMS_RL_ORB_GPS')
 utils_gui_path = os.path.join(lms_rl_path, 'utils', 'GUI')
 
 LMS_RL_AVAILABLE = False
 
 if os.path.exists(utils_gui_path):
-    # Agregar el path al sys.path si no está ya
     if lms_rl_path not in sys.path:
         sys.path.insert(0, lms_rl_path)
-    
     try:
-        # Importar usando la ruta relativa correcta desde LMS_RL_ORB_GPS
         from utils.GUI.gui_processor import GUIProcessor
         from utils.GUI.dataset_detector import DatasetDetector
         LMS_RL_AVAILABLE = True
@@ -32,172 +32,128 @@ if os.path.exists(utils_gui_path):
         LMS_RL_AVAILABLE = False
 else:
     print(f"Advertencia: No existe el directorio {utils_gui_path}")
-# ============================================================================
 
-CARPETA_LMS = "LMS"
+LMS_DIR = "LMS"
 
-def obtener_tipos_lms():
+
+def lms_types():
     return [
-        nombre for nombre in os.listdir(CARPETA_LMS)
-        if os.path.isdir(os.path.join(CARPETA_LMS, nombre)) and nombre.startswith("LMS_")
-    ] if os.path.exists(CARPETA_LMS) else []
+        name for name in os.listdir(LMS_DIR)
+        if os.path.isdir(os.path.join(LMS_DIR, name)) and name.startswith("LMS_")
+    ] if os.path.exists(LMS_DIR) else []
 
-def seleccionar_entrada(nombre_lms):
-    # Determinar si este LMS específico necesita directorio KITTI en lugar de video
-    necesita_kitti = "RL_ORB_GPS" in nombre_lms
-    print(necesita_kitti)
-    
-    if necesita_kitti:
-        # Seleccionar directorio KITTI
-        directorio = filedialog.askdirectory(
-            title="Seleccionar directorio con datos KITTI (ej: 2011_09_26_drive_0002_extract)"
+
+def choose_input(lms_name):
+    """A KITTI folder for the RL_ORB_GPS system, an .mp4 video for the others."""
+    if "RL_ORB_GPS" in lms_name:
+        folder = filedialog.askdirectory(
+            title="Choose a KITTI folder (e.g. 2011_09_26_drive_0002_extract)"
         )
-        if not directorio:
+        if not folder:
             return None
-        
-        # Verificar estructura de directorio KITTI
-        # Buscar subdirectorios image_02/data y oxts/data
+
+        # image_02/data and oxts/data, in the folder chosen or one level up.
         image_dirs = []
         oxts_dirs = []
-        
-        # Buscar en el directorio seleccionado y un nivel arriba
-        possible_paths = [
-            directorio,
-            os.path.dirname(directorio)  # Un nivel arriba
-        ]
-        
-        for path in possible_paths:
+        for path in (folder, os.path.dirname(folder)):
             for root, dirs, files in os.walk(path):
                 if "image_02" in dirs and "data" in os.listdir(os.path.join(root, "image_02")):
                     image_dirs.append(os.path.join(root, "image_02", "data"))
                 if "oxts" in dirs and "data" in os.listdir(os.path.join(root, "oxts")):
                     oxts_dirs.append(os.path.join(root, "oxts", "data"))
-        
+
         if not image_dirs or not oxts_dirs:
-            messagebox.showerror("Error", 
-                "El directorio seleccionado no tiene la estructura KITTI esperada.\n"
-                "Se requieren las carpetas: image_02/data y oxts/data\n\n"
-                "Seleccione el directorio que contiene estas carpetas (ej: 2011_09_26_drive_0002_extract)")
+            messagebox.showerror("Error",
+                "The folder chosen does not have the KITTI layout.\n"
+                "It needs the folders image_02/data and oxts/data.\n\n"
+                "Choose the folder that holds them (e.g. 2011_09_26_drive_0002_extract)")
             return None
-        
-        # Verificar que hay archivos en las carpetas
+
         image_files = [f for f in os.listdir(image_dirs[0]) if f.endswith(('.png', '.jpg', '.jpeg'))]
         gps_files = [f for f in os.listdir(oxts_dirs[0]) if f.endswith('.txt')]
-        
         if not image_files:
-            messagebox.showerror("Error", "No se encontraron imágenes en image_02/data")
+            messagebox.showerror("Error", "No images in image_02/data")
             return None
-            
         if not gps_files:
-            messagebox.showerror("Error", "No se encontraron datos GPS en oxts/data")
+            messagebox.showerror("Error", "No GPS data in oxts/data")
             return None
-            
-        # Devolver el directorio base que contiene ambas carpetas
-        base_dir = os.path.dirname(os.path.dirname(image_dirs[0]))
-        return base_dir
-    else:
-        # Seleccionar video como antes
-        return filedialog.askopenfilename(
-            title="Seleccionar video .mp4",
-            filetypes=[("Archivos de video", "*.mp4")]
-        )
 
-def ejecutar_lms(nombre_lms):
-    entrada = seleccionar_entrada(nombre_lms)
-    if not entrada:
-        messagebox.showwarning("Selección cancelada", "No se seleccionó ninguna entrada.")
+        # The folder that holds both.
+        return os.path.dirname(os.path.dirname(image_dirs[0]))
+    return filedialog.askopenfilename(
+        title="Choose an .mp4 video",
+        filetypes=[("Video files", "*.mp4")]
+    )
+
+
+def run_lms(lms_name):
+    source = choose_input(lms_name)
+    if not source:
+        messagebox.showwarning("Cancelled", "No input was chosen.")
         return
 
-    messagebox.showinfo("LMS seleccionado", f"Ejecutando: {nombre_lms}\nCon entrada:\n{entrada}")
-    script_path = os.path.join(CARPETA_LMS, nombre_lms, "main.py")
-    
-    # Determinar el tipo de entrada (directorio KITTI o archivo video)
-    if os.path.isdir(entrada):
-        comando = ["python3", script_path, entrada, "--kitti"]
+    messagebox.showinfo("LMS chosen", f"Running: {lms_name}\nWith input:\n{source}")
+    script_path = os.path.join(LMS_DIR, lms_name, "main.py")
+    if os.path.isdir(source):
+        command = ["python3", script_path, source, "--kitti"]
     else:
-        comando = ["python3", script_path, entrada]
+        command = ["python3", script_path, source]
 
-    resultados = medir_metricas(comando, nombre_lms)
+    results = medir_metricas(command, lms_name)
 
-    salida_filtrada = {}
-    for clave, valor in resultados.items():
-        if isinstance(valor, str):
-            if not valor.strip():
+    # Long outputs would not fit in the dialog.
+    shown = {}
+    for key, value in results.items():
+        if isinstance(value, str):
+            if not value.strip():
                 continue
-            if len(valor) > 500:
-                salida_filtrada[clave] = valor[:500] + "... (truncado)"
+            if len(value) > 500:
+                shown[key] = value[:500] + "... (truncated)"
                 continue
-        salida_filtrada[clave] = valor
+        shown[key] = value
 
-    mensaje = json.dumps(salida_filtrada, indent=4, ensure_ascii=False)
-    messagebox.showinfo("Resultados de ejecución", mensaje)
+    messagebox.showinfo("Run results", json.dumps(shown, indent=4, ensure_ascii=False))
 
-# ============================================================================
-# NUEVA FUNCIÓN PARA LMS_RL_ORB_GPS CON DETECCIÓN AUTOMÁTICA
-# ============================================================================
-def ejecutar_lms_rl_orb_gps_auto():
-    """
-    Ejecuta el sistema LMS_RL_ORB_GPS con detección automática de dataset.
-    NO modifica el flujo existente de otros LMS.
-    """
+
+def run_lms_rl_orb_gps_auto():
+    """The classic LMS_RL_ORB_GPS on a folder, detecting whether it is KITTI or a phone recording."""
     if not LMS_RL_AVAILABLE:
         messagebox.showerror(
             "Error",
-            "El módulo LMS_RL_ORB_GPS no está disponible.\n"
-            "Verifique que exista la carpeta:\n"
+            "The LMS_RL_ORB_GPS module is not available.\n"
+            "Check that this folder exists:\n"
             "LMS/LMS_RL_ORB_GPS/utils/gps/"
         )
         return
-    
-    # Seleccionar directorio base
-    directorio_base = filedialog.askdirectory(
-        title="Seleccionar Directorio Base (KITTI o Mobile Dataset)"
-    )
-    
-    if not directorio_base:
-        messagebox.showwarning("Selección cancelada", "No se seleccionó ningún directorio.")
+
+    base_dir = filedialog.askdirectory(title="Choose a dataset folder (KITTI or phone recording)")
+    if not base_dir:
+        messagebox.showwarning("Cancelled", "No folder was chosen.")
         return
-    
-    # Detectar rápidamente el tipo para mostrar preview
-    dataset_info = DatasetDetector.detect_dataset_type(directorio_base)
-    
-    # Mostrar ventana de confirmación con información del dataset
+
+    dataset_info = DatasetDetector.detect_dataset_type(base_dir)
     summary = DatasetDetector.get_dataset_summary(dataset_info)
-    
-    confirm = messagebox.askyesno(
-        "Confirmar Dataset",
-        f"{summary}\n\n¿Desea procesar este dataset?",
-        icon='question'
-    )
-    
-    if not confirm:
+    if not messagebox.askyesno("Confirm dataset", f"{summary}\n\nProcess this dataset?",
+                               icon='question'):
         return
-    
-    # Crear ventana de progreso
+
     progress_window = tk.Toplevel()
-    progress_window.title("Procesando Dataset - LMS_RL_ORB_GPS")
+    progress_window.title("Processing dataset - LMS_RL_ORB_GPS")
     progress_window.geometry("700x450")
     progress_window.resizable(True, True)
-    
-    # Frame principal con padding
+
     main_frame = tk.Frame(progress_window, bg="white", padx=10, pady=10)
     main_frame.pack(fill=tk.BOTH, expand=True)
-    
-    # Título
-    title_label = tk.Label(
+    tk.Label(
         main_frame,
-        text="Procesando Dataset con LMS_RL_ORB_GPS",
+        text="Processing the dataset with LMS_RL_ORB_GPS",
         font=("Helvetica Neue", 14, "bold"),
         bg="white",
         fg="#0d47a1"
-    )
-    title_label.pack(pady=(0, 10))
-    
-    # Frame para el texto con scrollbar
+    ).pack(pady=(0, 10))
+
     text_frame = tk.Frame(main_frame, bg="white")
     text_frame.pack(fill=tk.BOTH, expand=True)
-    
-    # Text widget con scrollbar
     progress_text = tk.Text(
         text_frame,
         wrap=tk.WORD,
@@ -208,15 +164,14 @@ def ejecutar_lms_rl_orb_gps_auto():
         borderwidth=1
     )
     progress_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    
     scrollbar = tk.Scrollbar(text_frame, command=progress_text.yview)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     progress_text.config(yscrollcommand=scrollbar.set)
-    
-    # Botón de cerrar (inicialmente deshabilitado)
+
+    # Enabled once processing ends.
     close_button = tk.Button(
         main_frame,
-        text="Cerrar",
+        text="Close",
         state=tk.DISABLED,
         font=("Segoe UI", 10, "bold"),
         bg="#388e3c",
@@ -224,93 +179,83 @@ def ejecutar_lms_rl_orb_gps_auto():
         command=progress_window.destroy
     )
     close_button.pack(pady=(10, 0))
-    
+
     def append_log(message):
-        """Agregar mensaje al log de progreso."""
         progress_text.insert(tk.END, message + "\n")
         progress_text.see(tk.END)
         progress_text.update()
-    
+
     def process_in_thread():
-        """Ejecutar procesamiento en hilo separado."""
         try:
             append_log("=" * 70)
-            append_log("Iniciando procesamiento...")
+            append_log("Starting...")
             append_log("=" * 70)
-            
+
             result = GUIProcessor.process_directory(
-                base_path=directorio_base,
-                max_frames=None,  # Procesar todos los frames
+                base_path=base_dir,
+                max_frames=None,
                 training_mode=False,
                 augmentation_prob=0.0,
                 progress_callback=append_log
             )
-            
+
             append_log("\n" + "=" * 70)
-            
             if result['success']:
-                append_log(" PROCESAMIENTO COMPLETADO EXITOSAMENTE")
+                append_log(" PROCESSING FINISHED")
                 append_log("=" * 70)
-                append_log(f"Tipo de dataset: {result['result_type']}")
-                append_log(f"Keyframes generados: {result.get('keyframes', 'N/A')}")
-                append_log("\nResultados guardados en:")
+                append_log(f"Dataset type: {result['result_type']}")
+                append_log(f"Keyframes: {result.get('keyframes', 'N/A')}")
+                append_log("\nResults saved in:")
                 append_log("  → resultados/LMS_RL_ORB_GPS/")
                 append_log("=" * 70)
-                
                 messagebox.showinfo(
-                    "Procesamiento Completo",
-                    f"Dataset procesado exitosamente\n\n"
-                    f"Tipo: {result['result_type']}\n"
+                    "Processing finished",
+                    f"Dataset processed\n\n"
+                    f"Type: {result['result_type']}\n"
                     f"Keyframes: {result.get('keyframes', 'N/A')}\n\n"
-                    f"Revisa la carpeta:\n"
+                    f"See the folder:\n"
                     f"resultados/LMS_RL_ORB_GPS/"
                 )
             else:
-                append_log(" ERROR EN PROCESAMIENTO")
+                append_log(" PROCESSING FAILED")
                 append_log("=" * 70)
                 append_log(f"Error: {result['error']}")
                 if 'traceback' in result:
                     append_log("\nTraceback:")
                     append_log(result['traceback'])
                 append_log("=" * 70)
-                
                 messagebox.showerror(
-                    "Error en Procesamiento",
+                    "Processing failed",
                     f"Error: {result['error']}\n\n"
-                    f"Revisa la ventana de progreso para más detalles."
+                    f"The progress window has the details."
                 )
-        
+
         except Exception as e:
             import traceback
             error_trace = traceback.format_exc()
-            
             append_log("\n" + "=" * 70)
-            append_log(" ERROR INESPERADO")
+            append_log(" UNEXPECTED ERROR")
             append_log("=" * 70)
             append_log(f"Error: {str(e)}")
-            append_log("\nTraceback completo:")
+            append_log("\nFull traceback:")
             append_log(error_trace)
             append_log("=" * 70)
-            
             messagebox.showerror(
-                "Error Inesperado",
-                f"Error durante procesamiento:\n{str(e)}\n\n"
-                f"Revisa la ventana de progreso para más detalles."
+                "Unexpected error",
+                f"Error while processing:\n{str(e)}\n\n"
+                f"The progress window has the details."
             )
-        
+
         finally:
-            # Habilitar botón de cerrar cuando termine (usar after para thread safety)
+            # From the worker thread, through after(); the window may be closed already.
             try:
                 progress_window.after(0, lambda: close_button.config(state=tk.NORMAL))
-                append_log("\nProcesamiento finalizado. Puede cerrar esta ventana.")
+                append_log("\nDone. This window can be closed.")
             except Exception as e:
-                # La ventana pudo haber sido cerrada manualmente
                 print(f"Ventana cerrada: {e}")
-    
-    # Iniciar procesamiento en hilo separado
-    thread = threading.Thread(target=process_in_thread, daemon=True)
-    thread.start()
-# ============================================================================
+
+    threading.Thread(target=process_in_thread, daemon=True).start()
+
 
 _realtime_window = None
 
@@ -329,93 +274,71 @@ def open_realtime_window(parent):
     PipelineWindow(_realtime_window)
 
 
-def crear_interfaz():
-    ventana = tk.Tk()
-    ventana.title("Plataforma LMS múltiple")
-    ventana.geometry("800x600")
-    ventana.resizable(False, False)
+def build_launcher():
+    window = tk.Tk()
+    window.title("Multi-LMS platform")
+    window.geometry("800x600")
+    window.resizable(False, False)
 
-    # === Canvas con degradado ===
-    canvas = tk.Canvas(ventana, width=800, height=600)
+    canvas = tk.Canvas(window, width=800, height=600)
     canvas.pack(fill="both", expand=True)
-
-    # Degradado de #99c2ff a #f0f4f8
+    # Background gradient, #99c2ff to #f0f4f8.
     for i in range(600):
-        r = int(153 + (240 - 153) * (i / 600))  # Red: 153 → 240
-        g = int(194 + (244 - 194) * (i / 600))  # Green: 194 → 244
-        b = int(255 + (248 - 255) * (i / 600))  # Blue: 255 → 248
-        color = f'#{r:02x}{g:02x}{b:02x}'
-        canvas.create_line(0, i, 800, i, fill=color)
+        r = int(153 + (240 - 153) * (i / 600))
+        g = int(194 + (244 - 194) * (i / 600))
+        b = int(255 + (248 - 255) * (i / 600))
+        canvas.create_line(0, i, 800, i, fill=f'#{r:02x}{g:02x}{b:02x}')
 
-    estilo = ttk.Style()
-    estilo.theme_use('clam')
-    estilo.configure("TButton",
-                     font=("Segoe UI", 11, "bold"),
-                     padding=10,
-                     background="#388e3c",
-                     foreground="white",
-                     relief="flat")
-    estilo.map("TButton", background=[("active", "#2e7d32")])
-    estilo.configure("TLabel", background="#ffffff", foreground="#333")
+    style = ttk.Style()
+    style.theme_use('clam')
+    style.configure("TButton",
+                    font=("Segoe UI", 11, "bold"),
+                    padding=10,
+                    background="#388e3c",
+                    foreground="white",
+                    relief="flat")
+    style.map("TButton", background=[("active", "#2e7d32")])
+    style.configure("TLabel", background="#ffffff", foreground="#333")
 
     frame = tk.Frame(canvas, bg="white", bd=2, relief="ridge")
     frame.place(relx=0.5, rely=0.5, anchor="center", width=600, height=470)
 
-    tk.Label(frame, text="Plataforma LMS múltiple", font=("Helvetica Neue", 20, "bold"), bg="white", fg="#0d47a1").pack(pady=(20, 10))
-    tk.Label(frame, text="Seleccione un LMS y un video .mp4 para generar una trayectoria 2D", font=("Segoe UI", 11), bg="white").pack()
+    tk.Label(frame, text="Multi-LMS platform", font=("Helvetica Neue", 20, "bold"), bg="white", fg="#0d47a1").pack(pady=(20, 10))
+    tk.Label(frame, text="Choose an LMS and an .mp4 video to build a 2D trajectory", font=("Segoe UI", 11), bg="white").pack()
 
-    # === Botones ===
-    frame_botones = tk.Frame(frame, bg="white")
-    frame_botones.pack(pady=20)
+    buttons = tk.Frame(frame, bg="white")
+    buttons.pack(pady=20)
 
-    tipos_lms = obtener_tipos_lms()
-    
-    # ========================================================================
-    # MODIFICACIÓN: Usar detección automática para LMS_RL_ORB_GPS
-    # ========================================================================
-    lms_normales = [lms for lms in tipos_lms if "RL_ORB_GPS" not in lms]
-    tiene_rl_orb_gps = any("RL_ORB_GPS" in lms for lms in tipos_lms)
-    
-    # Botones para LMS normales (flujo existente sin cambios)
-    for i, lms in enumerate(lms_normales):
-        nombre_mostrado = lms.replace("LMS_", "LMS tipo ")
-        boton = ttk.Button(frame_botones, text=nombre_mostrado, command=lambda lms=lms: ejecutar_lms(lms))
-        boton.grid(row=i // 2, column=i % 2, padx=15, pady=10)
-    
-    # Botón único para LMS_RL_ORB_GPS (con auto-detección integrada)
-    if tiene_rl_orb_gps:
-        row_especial = (len(lms_normales) + 1) // 2
-        
+    types = lms_types()
+    others = [lms for lms in types if "RL_ORB_GPS" not in lms]
+    has_rl_orb_gps = any("RL_ORB_GPS" in lms for lms in types)
+
+    for i, lms in enumerate(others):
+        ttk.Button(buttons, text=lms.replace("LMS_", "LMS "),
+                   command=lambda lms=lms: run_lms(lms)).grid(row=i // 2, column=i % 2, padx=15, pady=10)
+
+    # LMS_RL_ORB_GPS gets one button: with automatic detection when its modules
+    # load, the classic run otherwise.
+    if has_rl_orb_gps:
+        row = (len(others) + 1) // 2
         if LMS_RL_AVAILABLE:
-            # Si los módulos están disponibles, usar detección automática
-            boton_rl_orb = ttk.Button(
-                frame_botones,
-                text="LMS_RL_ORB_GPS",
-                command=ejecutar_lms_rl_orb_gps_auto
-            )
+            rl_button = ttk.Button(buttons, text="LMS_RL_ORB_GPS", command=run_lms_rl_orb_gps_auto)
         else:
-            # Si no están disponibles, usar el modo clásico como fallback
-            for lms in tipos_lms:
-                if "RL_ORB_GPS" in lms:
-                    boton_rl_orb = ttk.Button(
-                        frame_botones,
-                        text="LMS_RL_ORB_GPS (Modo Clásico)",
-                        command=lambda lms=lms: ejecutar_lms(lms)
-                    )
-                    break
-        
-        boton_rl_orb.grid(row=row_especial, column=0, columnspan=2, padx=15, pady=10, sticky="ew")
+            lms = next(lms for lms in types if "RL_ORB_GPS" in lms)
+            rl_button = ttk.Button(buttons, text="LMS_RL_ORB_GPS (classic mode)",
+                                   command=lambda: run_lms(lms))
+        rl_button.grid(row=row, column=0, columnspan=2, padx=15, pady=10, sticky="ew")
 
-    # Pipeline en tiempo real: el video del teléfono o de una grabación, sin consola
-    fila_realtime = (len(lms_normales) + 1) // 2 + (1 if tiene_rl_orb_gps else 0)
-    ttk.Button(frame_botones, text="SLAM GPS con realtime",
-               command=lambda: open_realtime_window(ventana)).grid(
-        row=fila_realtime, column=0, columnspan=2, padx=15, pady=10, sticky="ew")
-    # ========================================================================
+    # The real-time pipeline: the phone's video or a recording, without a console.
+    realtime_row = (len(others) + 1) // 2 + (1 if has_rl_orb_gps else 0)
+    ttk.Button(buttons, text="Real-time SLAM GPS",
+               command=lambda: open_realtime_window(window)).grid(
+        row=realtime_row, column=0, columnspan=2, padx=15, pady=10, sticky="ew")
 
-    tk.Label(frame, text="© TEC 2025 | Proyecto SLAM", font=("Segoe UI", 11), bg="white", fg="black").pack(side="bottom", pady=10)
+    tk.Label(frame, text="© TEC 2025 | SLAM Project", font=("Segoe UI", 11), bg="white", fg="black").pack(side="bottom", pady=10)
 
-    ventana.mainloop()
+    window.mainloop()
+
 
 if __name__ == "__main__":
-    crear_interfaz()
+    build_launcher()

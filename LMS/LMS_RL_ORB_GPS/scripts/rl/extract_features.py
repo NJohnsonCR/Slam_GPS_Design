@@ -1,20 +1,13 @@
 """
-PASO 1 - Extracción de "apuntes" (cache de features) de una secuencia KITTI.
+Feature cache of a KITTI sequence: the video is processed once and what the
+camera and the GPS give per frame goes to an .npz, so an episode over it takes
+milliseconds instead of minutes.
 
-Procesa el video UNA sola vez y guarda en un .npz todo lo que producen la cámara
-y el GPS en cada frame. El entrenamiento posterior del RL trabaja sobre este
-archivo en vez de reprocesar las imágenes, lo que baja un episodio de minutos a
-milisegundos.
+Only what does not depend on the fusion weight is kept, which is what makes
+the cache valid. The translation is kept raw, as recoverPose gives it, before
+any alignment or scaling with the GPS: the free visual odometry that the
+"traditional SLAM" baseline needs.
 
-Lo que se guarda por frame es SOLO lo que no depende de la decisión de fusión
-(el peso w). Eso es lo que hace válido el cache: la odometría visual calcula
-R y t a partir de las imágenes, sin intervención del peso.
-
-IMPORTANTE: la traslación se guarda CRUDA, tal como sale de recoverPose, antes
-de cualquier alineación o escalado con GPS. Esa es la rama de odometría visual
-libre que hace falta como baseline de "SLAM tradicional".
-
-Uso:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.rl.extract_features \
         kitti_data/2011_09_26/2011_09_26_drive_0009_sync
 """
@@ -30,8 +23,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# El proyecto usa imports relativos a dos raíces distintas: la raíz del repo
-# (para LMS.*) y la carpeta LMS_RL_ORB_GPS (para utils.*). Se replican ambas.
+# Imports resolve against two roots: the repository (LMS.*) and
+# LMS_RL_ORB_GPS (utils.*).
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _LMS_RL_DIR = os.path.abspath(os.path.join(_THIS_DIR, '..', '..'))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_LMS_RL_DIR, '..', '..'))
@@ -42,7 +35,7 @@ for _p in (_PROJECT_ROOT, _LMS_RL_DIR):
 from LMS.LMS_ORB_with_PG.main import PoseGraphSLAM
 from utils.gps.gps_utils import latlon_to_utm
 
-# Calibración de la cámara 02 de KITTI (los mismos valores que usa main.py)
+# KITTI camera 02 calibration (the same values as main.py)
 KITTI_FX, KITTI_FY = 718.856, 718.856
 KITTI_CX, KITTI_CY = 607.1928, 185.2157
 
@@ -50,7 +43,7 @@ MIN_MATCHES = 15
 
 
 def find_kitti_dirs(sequence_path):
-    """Localiza image_02/data y oxts/data dentro de la secuencia."""
+    """image_02/data and oxts/data inside the sequence."""
     image_dir = gps_dir = None
     for root, dirs, _files in os.walk(sequence_path):
         if "image_02" in dirs and "data" in os.listdir(os.path.join(root, "image_02")):
@@ -61,10 +54,7 @@ def find_kitti_dirs(sequence_path):
 
 
 def load_ground_truth(gps_dir, n_frames):
-    """
-    Lee los archivos OXTS y devuelve la posición verdadera en metros,
-    relativa al primer frame (marco local ENU aproximado vía UTM).
-    """
+    """The true position from the OXTS files, in metres from the first frame (local ENU through UTM)."""
     gps_files = sorted(f for f in os.listdir(gps_dir) if f.endswith('.txt'))[:n_frames]
     positions = []
     for fname in gps_files:
@@ -77,17 +67,14 @@ def load_ground_truth(gps_dir, n_frames):
 
 def extract_visual_odometry(image_dir, n_frames, verbose_every=50):
     """
-    Odometría visual libre, frame a frame.
+    Free visual odometry, frame to frame, with the pipeline's algorithm (same
+    ORB, matcher and Lowe ratio) and no GPS. Per pair of consecutive frames:
 
-    Devuelve, por cada par de frames consecutivos:
-      R_vo        rotación relativa (3x3)
-      t_vo        traslación relativa CRUDA, norma unitaria (3,)
-      n_matches   cantidad de correspondencias tras el filtro de Lowe
-      n_inliers   correspondencias que pasan la verificación geométrica
-      ok          si la estimación de pose tuvo éxito
-
-    No se aplica ninguna corrección con GPS. El algoritmo de VO es exactamente
-    el del pipeline (mismo ORB, mismo matcher, mismo ratio de Lowe).
+      R_vo        relative rotation (3x3)
+      t_vo        raw relative translation, unit norm (3,)
+      n_matches   correspondences after Lowe's ratio test
+      n_inliers   correspondences that pass the geometric check
+      ok          whether the pose was estimated
     """
     slam = PoseGraphSLAM(fx=KITTI_FX, fy=KITTI_FY, cx=KITTI_CX, cy=KITTI_CY)
 
@@ -158,11 +145,9 @@ def extract_visual_odometry(image_dir, n_frames, verbose_every=50):
 
 def integrate_vo(R_rel, t_rel, step_scales=None):
     """
-    Encadena las poses relativas para obtener la trayectoria de VO libre.
-
-    step_scales: si se entrega, escala cada paso (la VO monocular no puede
-    recuperar la escala métrica por sí sola; es estándar tomarla del ground
-    truth para evaluar la calidad de rotación y dirección por separado).
+    The free VO trajectory, chaining the relative poses. step_scales, if given,
+    scales each step: monocular VO has no metric scale, and taking it from the
+    ground truth is the standard way to judge rotation and direction alone.
     """
     pose = np.eye(4)
     positions = [pose[:3, 3].copy()]
@@ -179,10 +164,7 @@ def integrate_vo(R_rel, t_rel, step_scales=None):
 
 
 def umeyama_align(traj_est, traj_ref):
-    """
-    Alineación de Umeyama con escala (misma que usa TrajectoryMetrics).
-    Estándar para evaluar VO monocular, que no tiene escala absoluta.
-    """
+    """Umeyama alignment with scale (as TrajectoryMetrics): monocular VO has no absolute scale."""
     n = min(len(traj_est), len(traj_ref))
     est, ref = traj_est[:n], traj_ref[:n]
 
@@ -202,7 +184,7 @@ def umeyama_align(traj_est, traj_ref):
 
 
 def ate(traj_est, traj_ref):
-    """Error absoluto de trayectoria tras alineación."""
+    """Absolute trajectory error after alignment."""
     aligned, scale = umeyama_align(traj_est, traj_ref)
     n = min(len(aligned), len(traj_ref))
     errors = np.linalg.norm(aligned[:n] - traj_ref[:n], axis=1)
@@ -250,11 +232,11 @@ def main():
     print(f"  Matches  — mediana: {np.median(vo['n_matches']):.0f}, mín: {vo['n_matches'].min()}")
     print(f"  Inliers  — mediana: {np.median(vo['n_inliers']):.0f}")
 
-    # Escala por paso tomada del ground truth: la VO monocular no la recupera.
+    # Per-step scale from the ground truth: monocular VO does not recover it.
     step_scales = np.linalg.norm(np.diff(gt, axis=0), axis=1)
 
-    traj_unit = integrate_vo(vo['R_vo'], vo['t_vo'])                 # sin escala
-    traj_gtsc = integrate_vo(vo['R_vo'], vo['t_vo'], step_scales)    # escala del GT
+    traj_unit = integrate_vo(vo['R_vo'], vo['t_vo'])                 # unscaled
+    traj_gtsc = integrate_vo(vo['R_vo'], vo['t_vo'], step_scales)    # ground-truth scale
 
     print("\n[3/3] Reconstrucción y evaluación del baseline de VO libre…")
     m_unit, aligned_unit = ate(traj_unit, gt)

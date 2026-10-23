@@ -2,7 +2,7 @@
 
 **Para:** una sesión de trabajo dedicada exclusivamente a la app móvil.
 **Última actualización:** 8 de septiembre de 2026
-**Documento hermano:** `scripts/rl/CONTEXTO.md` (estado del lado PC)
+**Documento hermano:** `CONTEXTO.md` (estado del lado PC), en esta misma carpeta
 
 Este documento es **autocontenido**. No hace falta conocer el proyecto de SLAM
 para trabajar con él.

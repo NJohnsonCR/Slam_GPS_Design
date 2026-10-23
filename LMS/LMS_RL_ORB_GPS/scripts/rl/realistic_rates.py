@@ -1,26 +1,14 @@
 """
-PASO 2b - Oráculo bajo tasas de sensor REALISTAS.
+The oracle's GPS weight under realistic sensor rates. With a fix every frame
+the pose is re-anchored all the time, the VO never drifts and the optimal
+weight is nearly constant; with the GPS at ~1 Hz and the camera at 10-30 Hz the
+VO drifts between fixes. Three questions:
 
-El paso 3 dio negativo, pero el experimento estaba mal planteado: se asumía un
-fix de GPS en CADA frame. En ese régimen la pose se reancla constantemente, la
-odometría visual nunca acumula deriva, y por lo tanto el peso óptimo es casi
-constante. No había nada que adaptar por construcción.
-
-En el despliegue real el GPS llega a ~1 Hz y la cámara corre a 10-30 Hz: entre
-fix y fix la VO navega sola y acumula deriva. Este script mide si en ESE régimen
-aparece una señal consistente y aprendible.
-
-Se responden tres preguntas separadas:
-
-  A) ¿Aparece margen para un peso adaptativo al bajar la tasa de GPS?
-  B) ¿La conclusión depende de la calidad de la cámara?
-  C) ¿Cuánto del peso óptimo es PREDECIBLE y cuánto es azar del ruido GPS?
-
-(C) es la decisiva. El peso perfecto instantáneo depende del ruido concreto que
-le tocó a ese fix, que nadie puede predecir. Se descompone su varianza en:
-    - varianza ENTRE eventos de fix (se repite entre semillas -> predecible)
-    - varianza DENTRO de un evento (cambia con cada semilla -> azar)
-Solo la primera es aprendible. Si es despreciable, ninguna política sirve.
+  A) does a margin for an adaptive weight appear as the GPS rate drops?
+  B) does it depend on the camera's quality?
+  C) how much of the optimal weight is predictable, and how much is the GPS
+     noise of each fix? Its variance between fix events (repeated across
+     seeds) is learnable; within an event (changing with the seed) it is not.
 
 Uso:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.rl.realistic_rates
@@ -37,13 +25,13 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# KITTI graba a 10 Hz -> el período se expresa en frames.
-#   1 frame  = 10 Hz  (lo que asumía el experimento anterior)
-#  10 frames = 1 Hz   (GPS realista de teléfono)
-#  30 frames = 0.33 Hz (GPS degradado / cañón urbano)
+# KITTI records at 10 Hz, so the period is in frames:
+#   1 frame  = 10 Hz
+#  10 frames = 1 Hz    (a phone's GPS)
+#  30 frames = 0.33 Hz (degraded GPS, urban canyon)
 GPS_PERIODS = [1, 5, 10, 20, 30]
 SIGMAS = [3.0, 5.0, 10.0]
-VO_DEGRADATIONS = [0.0, 0.25, 0.5, 1.0]   # grados extra de deriva de rumbo por frame
+VO_DEGRADATIONS = [0.0, 0.25, 0.5, 1.0]   # extra heading drift per frame, degrees
 N_SEEDS = 6
 W_GRID = np.linspace(0.0, 1.0, 21)
 
@@ -56,10 +44,7 @@ def degrade_gps(gt, sigma, rng):
 
 
 def degrade_vo(R_vo, rot_sigma_deg, rng):
-    """
-    Simula una cámara/algoritmo peor: agrega deriva de rumbo aleatoria por paso.
-    Con rot_sigma_deg = 0 se usa la VO real tal cual salió de las imágenes.
-    """
+    """A worse camera or algorithm: random heading drift per step (0 keeps the real VO)."""
     if rot_sigma_deg <= 0:
         return R_vo
     out = np.empty_like(R_vo)
@@ -73,15 +58,10 @@ def degrade_vo(R_vo, rot_sigma_deg, rng):
 
 def estimate_initial_rotation(R_vo, t_vo, scales, ref_traj, n_init=None):
     """
-    Estima la rotación mundo <- cámara al arrancar.
-
-    La VO entrega el movimiento en el marco de la cámara, que en KITTI está
-    rotado más de 100° respecto del marco UTM. Sin esta alineación la VO avanza
-    en direcciones equivocadas y toda la fusión pierde sentido.
-
-    Un sistema real resuelve esto igual: usa los primeros desplazamientos del
-    GPS para fijar el rumbo. Por eso `ref_traj` es el GPS (ruidoso, observable)
-    y no el ground truth.
+    The world <- camera rotation at the start. In KITTI the camera frame is
+    turned over 100 degrees from UTM, and without this the VO moves the wrong
+    way. Like a real system, it takes the heading from the first GPS
+    displacements: ref_traj is the noisy GPS, not the ground truth.
     """
     n = len(R_vo) if n_init is None else min(n_init, len(R_vo))
     P = np.eye(4)
@@ -108,14 +88,10 @@ def estimate_initial_rotation(R_vo, t_vo, scales, ref_traj, n_init=None):
 
 def replay(R_vo, t_vo, scales, gps, gt, period, w_policy, R0=None):
     """
-    Bucle de fusión con GPS intermitente.
-
-    Entre fixes la pose avanza SOLO con la VO (acumulando deriva). En cada fix
-    se mezcla la pose acumulada con la medición de GPS usando el peso w.
-
-    w_policy: 'oracle', un escalar, o un vector con un peso por evento de fix.
-    R0: rotación inicial mundo <- cámara (ver estimate_initial_rotation).
-    Devuelve la trayectoria completa y los pesos usados en cada fix.
+    Fusion with intermittent GPS: between fixes only the VO moves the pose; at
+    each fix it is blended with the GPS with weight w. w_policy is 'oracle', a
+    scalar or one weight per fix event; R0 the starting world <- camera
+    rotation. Returns the trajectory and the weights used.
     """
     n = len(R_vo)
     pose = np.eye(4)
@@ -133,7 +109,7 @@ def replay(R_vo, t_vo, scales, gps, gt, period, w_policy, R0=None):
         rel[:3, 3] = t_vo[i] * scales[i]
         pose = pose @ rel
 
-        if (i + 1) % period == 0:            # llegó un fix de GPS
+        if (i + 1) % period == 0:            # a GPS fix
             a, b, g = pose[:3, 3], gps[i + 1], gt[i + 1]
             diff = a - b
             den = float(diff @ diff)
@@ -156,7 +132,7 @@ def replay(R_vo, t_vo, scales, gps, gt, period, w_policy, R0=None):
 
 
 def gps_hold_trajectory(gps, gt, period, n):
-    """GPS solo, manteniendo el último fix entre mediciones (1 Hz real)."""
+    """The GPS alone, holding the last fix between them."""
     out = np.empty((n + 1, 3))
     last = gps[0].copy()
     out[0] = last
@@ -185,7 +161,7 @@ def load_caches(cache_dir, min_steps=50):
 
 
 def evaluate(caches, period, sigma, vo_deg, n_seeds=N_SEEDS):
-    """Devuelve ATE medio de cada estrategia y la matriz de pesos óptimos por semilla."""
+    """Mean ATE of each strategy, and the optimal weights per seed."""
     res = {'gps': [], 'vo': [], 'fixed': [], 'oracle': [], 'w_best': []}
     w_by_seq = {}
 
@@ -199,7 +175,7 @@ def evaluate(caches, period, sigma, vo_deg, n_seeds=N_SEEDS):
             gps = degrade_gps(c['gt'], sigma, rng)
             R = degrade_vo(c['R_vo'], vo_deg, rng)
 
-            # Rumbo inicial estimado con el GPS ruidoso, como haría el sistema real
+            # Starting heading from the noisy GPS, as the real system would
             R0 = estimate_initial_rotation(R, c['t_vo'], c['step_scales'], gps)
 
             res['gps'].append(ate(gps_hold_trajectory(gps, c['gt'], period, n), c['gt']))
@@ -226,17 +202,15 @@ def evaluate(caches, period, sigma, vo_deg, n_seeds=N_SEEDS):
 
 def variance_decomposition(w_by_seq):
     """
-    Separa la varianza del peso óptimo en parte predecible y parte de azar.
-
-    predecible : varianza ENTRE eventos de fix de la media sobre semillas
-    azar       : varianza DENTRO de cada evento, entre semillas
+    The optimal weight's variance split: predictable (between fix events, of
+    the mean over seeds) and chance (within each event, across seeds).
     """
     pred, noise = [], []
     for w in w_by_seq.values():                  # (semillas, eventos)
         if w.shape[1] < 5:
             continue
-        pred.append(np.var(w.mean(axis=0)))      # varía entre eventos
-        noise.append(np.mean(np.var(w, axis=0))) # varía entre semillas
+        pred.append(np.var(w.mean(axis=0)))      # varies between events
+        noise.append(np.mean(np.var(w, axis=0))) # varies between seeds
     if not pred:
         return 0.0, 0.0, 0.0
     p, q = float(np.mean(pred)), float(np.mean(noise))
@@ -256,7 +230,7 @@ def main():
     print(f"Secuencias: {len(caches)}   |   KITTI graba a 10 Hz")
     print("Período de GPS:  1 frame = 10 Hz  |  10 frames = 1 Hz  |  30 frames = 0.33 Hz\n")
 
-    # ---------------- A) barrido de tasa de GPS ----------------
+    # ---------------- A) GPS rate sweep ----------------
     print("=" * 104)
     print("A) ¿APARECE MARGEN AL BAJAR LA TASA DE GPS?   (VO real, sin degradar)")
     print("=" * 104)
@@ -276,7 +250,7 @@ def main():
                   f"{r['fixed']:>13.2f}m{r['w_best']:>7.2f}{r['oracle']:>10.2f}m"
                   f"{margin:>8.1f}%{pred_pct:>11.1f}%")
 
-    # ---------------- B) barrido de calidad de VO ----------------
+    # ---------------- B) VO quality sweep ----------------
     print("\n" + "=" * 104)
     print("B) ¿DEPENDE DE LA CALIDAD DE LA CÁMARA?   (GPS a 1 Hz = 10 frames, σ=5m)")
     print("=" * 104)
@@ -294,7 +268,7 @@ def main():
         print(f"{label:>14}{r['gps']:>10.2f}m{r['vo']:>10.2f}m{r['fixed']:>13.2f}m"
               f"{r['w_best']:>7.2f}{r['oracle']:>10.2f}m{margin:>8.1f}%{pred_pct:>11.1f}%")
 
-    # ---------------- C) descomposición de varianza ----------------
+    # ---------------- C) variance split ----------------
     print("\n" + "=" * 104)
     print("C) ¿CUÁNTO DEL PESO ÓPTIMO ES APRENDIBLE?   (σ=5m, VO real)")
     print("=" * 104)
@@ -307,7 +281,7 @@ def main():
         p, q, pct = variance_decomposition(w_by_seq)
         print(f"{period:>9}{10/period:>8.1f}Hz{p:>17.4f}{q:>15.4f}{pct:>14.1f}%")
 
-    # ---------------- gráfico ----------------
+    # ---------------- plot ----------------
     os.makedirs(args.out_dir, exist_ok=True)
     fig, axes = plt.subplots(1, 3, figsize=(17, 5))
 

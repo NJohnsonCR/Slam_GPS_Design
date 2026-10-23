@@ -196,7 +196,7 @@ El task de la app leyó el código de `realtime/` solo en parte (sobre todo `sou
 3. **Corregir o considerar la distorsión** del lente (5.4).
 4. **Guiarse por la marca de tiempo de cada frame y de cada posición**, y tolerar frames y posiciones faltantes.
 5. **La frecuencia real de GPS es ~1.9 Hz.** Los supuestos basados en 1 Hz pueden revisarse.
-6. **La velocidad Doppler del GPS** podría mejorar la línea base de escala por GPS (§3.3 y §3.5.1 de `scripts/rl/CONTEXTO.md`). Es una idea a evaluar, no una conclusión.
+6. **La velocidad Doppler del GPS** podría mejorar la línea base de escala por GPS (§3.3 y §3.5.1 de `CONTEXTO.md`). Es una idea a evaluar, no una conclusión.
 7. **En el entorno virtual del proyecto están instalados `opencv-python` y `opencv-contrib-python` a la vez.** Ambos instalan `cv2` y pueden chocar. Conviene dejar uno.
 8. **En OpenCV, los nombres de ventana deben ir sin tildes.** El backend Qt no encuentra ventanas con nombres no ASCII, y `imshow` abre una ventana nueva por frame.
 

@@ -1,40 +1,24 @@
 """
 Window of the real-time pipeline: the video, live from the phone or from a
-recording, with the session's status and a map of the GPS and the fusion,
-started and stopped with buttons instead of commands.
+recording, the session's status and a map of the GPS and the fused track.
+The session runs on a worker thread; tkinter is only touched from the main
+thread, which polls it.
 
-The session (session.py) runs on a worker thread. tkinter is only touched
-from the main thread, which polls the session: the newest frame about 15
-times per second, the map twice and the status once per second.
+Two tabs, built from the same panel so they cannot drift apart: "Real time"
+for normal use, and "Development", which adds a simulated GPS outage and
+draws, on the map, the hidden fixes, the track while the GPS was cut and the
+fixed EKF beside the RL. One session at a time: the phone sends one video
+stream and the depth model takes the GPU.
 
-The map draws the two tracks that matter while driving: the fusion (the
-official track) and the GPS (its reference), in metres east and north of the
-first fix, without a street background (decided on 5/10/2026). The camera
-alone and the camera with the gyroscope are diagnostics: they are in the
-plot saved at the end (run_replay.plot_trajectory).
+The texts are in English; the session's own states and errors arrive in
+Spanish, as the console prints them, and are translated here (english()).
 
-Two tabs, built from the same panel so they cannot drift apart:
-
-    Tiempo real   normal use: with the RL box ticked, its policy weighs the
-                  camera while the GPS is out, and a status line says what it
-                  decides
-    Desarrollo    the same, plus what is for debugging: "Cortar el GPS" hides
-                  the GPS from the fusion for a few seconds (a simulated
-                  outage); the map draws the hidden fixes, hollow, the fused
-                  track during the outage in a lighter colour, and with the RL
-                  the fixed EKF on the same inputs, to see what each does
-
-Only one session runs at a time: the phone sends one video stream and the
-depth model takes the GPU.
-
-Usage:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.live_window
-
-It also opens from interfaz.py, with the "SLAM GPS con realtime" button.
 """
 
 import json
 import os
+import re
 import sys
 import threading
 import tkinter as tk
@@ -67,7 +51,46 @@ OUT_DIR = os.path.join(_ROOT, "resultados", "realtime")
 SETTINGS = os.path.join(OUT_DIR, "interfaz.json")      # last values typed, per user
 DEFAULTS = {"mode": "live", "ip": "", "record": False, "recording": "",
             "start": 0.0, "scale": True, "mask": 25, "rl": False, "cut_s": 30}
-TABS = (("tiempo_real", "Tiempo real", False), ("desarrollo", "Desarrollo", True))
+# Settings key, title, development tab.
+TABS = (("tiempo_real", "Real time", False), ("desarrollo", "Development", True))
+
+# The session's states, end reasons and errors, as the window shows them.
+SESSION_TEXT = {
+    "sin iniciar": "not started",
+    "conectando con el teléfono": "connecting to the phone",
+    "leyendo la grabación": "reading the recording",
+    "cargando el modelo de profundidad": "loading the depth model",
+    "precalentando": "warming up",
+    "en marcha": "running",
+    "detenida": "stopped",
+    "guardando": "saving",
+    "terminada": "finished",
+    "sesión detenida": "session stopped",
+    "fin de la grabación": "end of the recording",
+    "la cámara cambió entre conexiones": "the camera changed between connections",
+    "cabecera de frame inválida": "invalid frame header",
+    "el teléfono cerró la conexión de video": "the phone closed the video connection",
+    "no llegan frames hace 5 s": "no frames for 5 s",
+    "se cortó la conexión de video": "the video connection dropped",
+    "Sesión cancelada antes de empezar.": "Session cancelled before it started.",
+    "No se procesó ningún frame.": "No frame was processed.",
+    "No se pudo iniciar la grabación en el teléfono. ¿Está la app en primer plano, en la "
+    "pantalla de video?": "Could not start recording on the phone. Is the app in the "
+                          "foreground, on the video screen?",
+}
+SESSION_PATTERNS = ((r"buscando el segundo (\d+) de la grabación", r"seeking second \1 of the recording"),
+                    (r"no se pudo conectar al video \((.*)\)", r"could not connect to the video (\1)"),
+                    (r"No se pudo cargar la política del RL \((.*)\)\.", r"Could not load the RL policy (\1)."))
+
+
+def english(text):
+    """A session text in English; one not in the table is shown as it is."""
+    if text in SESSION_TEXT:
+        return SESSION_TEXT[text]
+    for pattern, repl in SESSION_PATTERNS:
+        if re.fullmatch(pattern, text or ""):
+            return re.sub(pattern, repl, text)
+    return text
 
 
 class TrackMap:
@@ -105,7 +128,7 @@ class TrackMap:
         self._now = None            # newest fused position, kept or not
         self._rings = []            # one circle per hidden fix
         self._idle = c.create_text(self.w / 2, self.h / 2, fill="#9a9a96",
-                                   text="Mapa: el GPS y la fusión, en metros")
+                                   text="Map: the GPS and the fused track, in metres")
         self._gps_line = c.create_line(0, 0, 0, 0, fill=COLOR_GPS, width=3, state="hidden")
         self._fixed_line = c.create_line(0, 0, 0, 0, fill=FIXED_COLOR, width=2, dash=(5, 3),
                                          state="hidden")
@@ -118,14 +141,14 @@ class TrackMap:
                                        state="hidden")
         c.create_text(self.w - 10, 8, anchor="ne", text="N ↑", font=("TkDefaultFont", 9, "bold"))
         # Two columns at most, so the legend keeps to two rows.
-        rows = [((8, 12), "line", COLOR_GPS, "GPS (referencia)"),
+        rows = [((8, 12), "line", COLOR_GPS, "GPS (reference)"),
                 ((8, 28), "line", COLOR_FUSED,
-                 "Fusión con RL (trazo oficial)" if rl else "Fusión (trazo oficial)")]
+                 "Fused with RL (official track)" if rl else "Fused (official track)")]
         if self.developer:
-            rows += [((215, 12), "ring", COLOR_GPS, "GPS escondido"),
-                     ((215, 28), "line", OUTAGE_COLOR, "Fusión durante el corte")]
+            rows += [((215, 12), "ring", COLOR_GPS, "Hidden GPS"),
+                     ((215, 28), "line", OUTAGE_COLOR, "Fused while cut")]
             if rl:
-                rows.append(((380, 12), "dash", FIXED_COLOR, "EKF fijo, sin RL"))
+                rows.append(((380, 12), "dash", FIXED_COLOR, "Fixed EKF, no RL"))
         for (x, y), kind, color, label in rows:
             if kind == "ring":
                 c.create_oval(x + 6, y - 4, x + 14, y + 4, outline=color, width=2)
@@ -274,63 +297,63 @@ class PipelinePanel:
         left = ttk.Frame(self.frame, padding=10)
         left.grid(row=0, column=0, rowspan=2, sticky="ns")
 
-        source = ttk.LabelFrame(left, text="Fuente", padding=8)
+        source = ttk.LabelFrame(left, text="Source", padding=8)
         source.grid(row=0, column=0, sticky="ew")
-        ttk.Radiobutton(source, text="Teléfono en vivo", value="live", variable=self.mode,
+        ttk.Radiobutton(source, text="Live phone", value="live", variable=self.mode,
                         command=self._show_mode).grid(row=0, column=0, sticky="w", padx=(0, 16))
-        ttk.Radiobutton(source, text="Grabación (replay)", value="replay", variable=self.mode,
+        ttk.Radiobutton(source, text="Recording (replay)", value="replay", variable=self.mode,
                         command=self._show_mode).grid(row=0, column=1, sticky="w")
 
         self.live_box = ttk.Frame(source)
-        ttk.Label(self.live_box, style=LABEL, text="IP del teléfono").grid(row=0, column=0, sticky="w",
+        ttk.Label(self.live_box, style=LABEL, text="Phone IP").grid(row=0, column=0, sticky="w",
                                                                padx=(0, 6))
         ttk.Entry(self.live_box, textvariable=self.ip, width=18).grid(row=0, column=1, sticky="w")
-        ttk.Checkbutton(self.live_box, text="Grabar también en el teléfono",
+        ttk.Checkbutton(self.live_box, text="Also record on the phone",
                         variable=self.record).grid(row=1, column=0, columnspan=2, sticky="w")
 
         self.replay_box = ttk.Frame(source)
-        ttk.Label(self.replay_box, style=LABEL, text="Grabación").grid(row=0, column=0, sticky="w",
+        ttk.Label(self.replay_box, style=LABEL, text="Recording").grid(row=0, column=0, sticky="w",
                                                           padx=(0, 6))
         ttk.Entry(self.replay_box, textvariable=self.recording, width=24).grid(row=0, column=1)
-        ttk.Button(self.replay_box, text="Elegir…",
+        ttk.Button(self.replay_box, text="Choose…",
                    command=self._choose_recording).grid(row=0, column=2, padx=(4, 0))
-        ttk.Label(self.replay_box, style=LABEL, text="Desde el segundo").grid(row=1, column=0, sticky="w")
+        ttk.Label(self.replay_box, style=LABEL, text="From second").grid(row=1, column=0, sticky="w")
         ttk.Spinbox(self.replay_box, from_=0, to=3600, increment=10, width=8,
                     textvariable=self.start_s).grid(row=1, column=1, sticky="w")
 
-        options = ttk.LabelFrame(left, text="Opciones", padding=8)
+        options = ttk.LabelFrame(left, text="Options", padding=8)
         options.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        ttk.Checkbutton(options, text="Escala métrica (modelo de profundidad)",
+        ttk.Checkbutton(options, text="Metric scale (depth model)",
                         variable=self.scale).grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(options, style=LABEL, text="Máscara inferior (%)").grid(row=1, column=0, sticky="w",
+        ttk.Label(options, style=LABEL, text="Bottom mask (%)").grid(row=1, column=0, sticky="w",
                                                              padx=(0, 6))
         ttk.Spinbox(options, from_=0, to=60, increment=1, width=5,
                     textvariable=self.mask).grid(row=1, column=1, sticky="w")
-        ttk.Label(options, style=LABEL, text="25 con el teléfono en el tablero del carro; 0 si no se ven\n"
-                                "el capó ni el tablero. La línea amarilla del video la marca.",
+        ttk.Label(options, style=LABEL, text="25 with the phone on the car's dashboard; 0 if neither the\n"
+                                "hood nor the dashboard shows. The yellow line marks it.",
                   foreground="#52514e").grid(row=2, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(options, text="RL: decide cuánto creerle a la cámara cuando falta el GPS",
+        ttk.Checkbutton(options, text="RL: decides how much to trust the camera when the GPS is out",
                         variable=self.rl).grid(row=3, column=0, columnspan=2, sticky="w",
                                                pady=(4, 0))
 
         buttons = ttk.Frame(left)
         buttons.grid(row=2, column=0, sticky="ew", pady=8)
-        self.start_button = ttk.Button(buttons, text="Iniciar", command=self.start)
+        self.start_button = ttk.Button(buttons, text="Start", command=self.start)
         self.start_button.grid(row=0, column=0, padx=(0, 6))
-        self.stop_button = ttk.Button(buttons, text="Detener", command=self.stop,
+        self.stop_button = ttk.Button(buttons, text="Stop", command=self.stop,
                                       state="disabled")
         self.stop_button.grid(row=0, column=1)
         self.cut_button = None
         if self.developer:
             # A simulated outage, once the fusion has started.
-            self.cut_button = ttk.Button(buttons, text="Cortar el GPS", command=self.cut,
+            self.cut_button = ttk.Button(buttons, text="Cut the GPS", command=self.cut,
                                          state="disabled")
             self.cut_button.grid(row=0, column=2, padx=(18, 4))
             ttk.Spinbox(buttons, from_=5, to=120, increment=5, width=4,
                         textvariable=self.cut_s).grid(row=0, column=3)
             ttk.Label(buttons, style=LABEL, text="s").grid(row=0, column=4, padx=(2, 0))
 
-        status = ttk.LabelFrame(left, text="Estado", padding=8)
+        status = ttk.LabelFrame(left, text="Status", padding=8)
         status.grid(row=3, column=0, sticky="ew")
         self.lines = {}
         keys = ["state", "video", "gps", "imu", "camera", "fusion", "rl", "source"]
@@ -339,7 +362,7 @@ class PipelinePanel:
         for row, key in enumerate(keys):
             self.lines[key] = ttk.Label(status, style=LABEL, text="", width=60)
             self.lines[key].grid(row=row, column=0, sticky="w")
-        self.lines["state"].configure(text="Sin iniciar")
+        self.lines["state"].configure(text="Not started")
         self.result = ttk.Label(left, style=LABEL, text="", width=60, wraplength=440)
         self.result.grid(row=4, column=0, sticky="w", pady=(8, 0))
 
@@ -349,12 +372,12 @@ class PipelinePanel:
         self.map = TrackMap(self.frame, VIDEO_W, MAP_H, developer=self.developer)
         self.map.canvas.grid(row=1, column=1, padx=(0, 10), pady=(0, 10), sticky="n")
         self._image_item = self.video.create_image(0, 0, anchor="nw")
-        self._idle_text = self.video.create_text(VIDEO_W // 2, VIDEO_H // 2, text="Sin video",
+        self._idle_text = self.video.create_text(VIDEO_W // 2, VIDEO_H // 2, text="No video",
                                                  fill="#9a9a96", font=("TkDefaultFont", 14))
         # Where the mask starts, to check on the video that it covers the hood.
         self._mask_line = self.video.create_line(0, 0, VIDEO_W, 0, dash=(6, 4), width=2,
                                                  fill=MASK_COLOR)
-        self._mask_text = self.video.create_text(VIDEO_W - 6, 0, anchor="se", text="máscara",
+        self._mask_text = self.video.create_text(VIDEO_W - 6, 0, anchor="se", text="mask",
                                                  fill=MASK_COLOR)
         self.mask.trace_add("write", lambda *_: self._place_mask())
         self._place_mask()
@@ -380,7 +403,7 @@ class PipelinePanel:
         (self.replay_box if live else self.live_box).grid_remove()
 
     def _choose_recording(self):
-        folder = filedialog.askdirectory(parent=self.top, title="Elegir una grabación de la app",
+        folder = filedialog.askdirectory(parent=self.top, title="Choose a recording of the app",
                                          initialdir=os.path.join(_ROOT, "mobile_data"))
         if folder:
             self.recording.set(os.path.relpath(folder, _ROOT))
@@ -391,25 +414,25 @@ class PipelinePanel:
         if self.running:
             return
         if self.window.busy(self):
-            return self._report(None, None, "La otra pestaña tiene una sesión en marcha: "
-                                            "detenerla antes (una sesión a la vez).")
+            return self._report(None, None, "The other tab has a session running: "
+                                            "stop it first (one session at a time).")
         try:
             mask = self.mask.get() / 100.0
             start_s = float(self.start_s.get())
         except (tk.TclError, ValueError):
-            return self._report(None, None, "La máscara y el segundo de inicio tienen que "
-                                            "ser números.")
+            return self._report(None, None, "The mask and the start second have to be "
+                                            "numbers.")
         common = {"mask_bottom": mask, "scale": self.scale.get(), "out": OUT_DIR,
                   "rl": self.rl.get()}
         if self.mode.get() == "live":
             if not self.ip.get().strip():
-                return self._report(None, None, "Falta la IP del teléfono (la muestra la app).")
+                return self._report(None, None, "The phone's IP is missing (the app shows it).")
             self.session = LiveSession(self.ip.get().strip(), record=self.record.get(), **common)
         else:
             folder = os.path.join(_ROOT, self.recording.get().strip())
             if not os.path.exists(os.path.join(folder, "movie.mp4")):
-                return self._report(None, None, "Esa carpeta no es una grabación de la app "
-                                                "(falta movie.mp4).")
+                return self._report(None, None, "That folder is not a recording of the app "
+                                                "(no movie.mp4).")
             self.session = ReplaySession(folder, start_s=start_s, **common)
         self._save_settings()
         self.outcome = None
@@ -435,13 +458,13 @@ class PipelinePanel:
             session.save(res)
             self.outcome = (session.out_dir, res, None)
         except OSError as e:
-            self.outcome = (None, None, f"No se pudo conectar ({e}). Revisar la IP, la red "
-                                        "(WiFi o cable) y que la app esté en la pantalla de video.")
+            self.outcome = (None, None, f"Could not connect ({e}). Check the IP, the network "
+                                        "(WiFi or cable) and that the app is on the video screen.")
         except SessionError as e:
-            self.outcome = (None, None, str(e))
+            self.outcome = (None, None, english(str(e)))
         except Exception as e:
             traceback.print_exc()
-            self.outcome = (None, None, f"Error inesperado: {e}")
+            self.outcome = (None, None, f"Unexpected error: {e}")
         finally:
             session.close()
 
@@ -451,7 +474,7 @@ class PipelinePanel:
             self.stop_button.configure(state="disabled")
             if self.cut_button is not None:
                 self.cut_button.configure(state="disabled")
-            self.lines["state"].configure(text="Deteniendo…")
+            self.lines["state"].configure(text="Stopping…")
 
     def cut(self):
         try:
@@ -459,13 +482,13 @@ class PipelinePanel:
         except (tk.TclError, ValueError):
             seconds = 0
         if not 1 <= seconds <= 600:
-            self.lines["cut"].configure(text="Corte simulado: la duración va en segundos, de 1 a 600")
+            self.lines["cut"].configure(text="Simulated outage: the length is in seconds, 1 to 600")
             return
         if self.session is not None:
             self.session.cut_gps(seconds)
             # Back on once the GPS has returned (_show_status).
             self.cut_button.configure(state="disabled")
-            self.lines["cut"].configure(text=f"Corte simulado: {seconds} s sin GPS desde ahora")
+            self.lines["cut"].configure(text=f"Simulated outage: {seconds} s without GPS from now")
 
     def cancel_timers(self):
         for timer in self._timers.values():
@@ -497,7 +520,7 @@ class PipelinePanel:
         self._timers["status"] = self.top.after(STATUS_MS, self._tick_status)
         if self.running:
             if self.session.state in ("detenida", "guardando", "terminada"):
-                self.lines["state"].configure(text="Guardando la sesión…")
+                self.lines["state"].configure(text="Saving the session…")
             else:
                 self._show_status(self.session.status())
         elif self.outcome is not None:
@@ -509,68 +532,69 @@ class PipelinePanel:
 
     def _show_status(self, st):
         state = st["state"]
+        state = english(state)
         self.lines["state"].configure(text=state[:1].upper() + state[1:])
         if "elapsed_s" not in st:
             return
         video = f"Video: {st['video_fps']:.0f} fps"
         if isinstance(self.session, LiveSession):
-            video += f", faltan {st['missing']}"
-        video += f" | procesados {st['processed_fps']:.0f}"
+            video += f", {st['missing']} missing"
+        video += f" | processed {st['processed_fps']:.0f}"
         # Live, the latency from the capture is real only once the phone's
         # clock is on the PC's; until then, only the PC's share is.
         live = isinstance(self.session, LiveSession)
         if live and not st.get("clock_synced") and st["pc_latency_ms"] is not None:
-            video += f" | latencia en la PC {st['pc_latency_ms']:.0f} ms"
+            video += f" | latency on the PC {st['pc_latency_ms']:.0f} ms"
         elif st["latency_ms"] is not None:
-            video += f" | latencia {st['latency_ms']:.0f} ms"
+            video += f" | latency {st['latency_ms']:.0f} ms"
             if live:
-                video += f" (en la PC {st['pc_latency_ms']:.0f})"
+                video += f" (on the PC {st['pc_latency_ms']:.0f})"
         self.lines["video"].configure(text=video)
         if "fix_age_s" in st:
-            gps = (f"GPS: {st['gps_fixes']} fixes; el último hace {st['fix_age_s']:.1f} s, "
+            gps = (f"GPS: {st['gps_fixes']} fixes; the last {st['fix_age_s']:.1f} s ago, "
                    f"{st['gps_speed']:.1f} m/s")
         else:
-            gps = "GPS: sin fixes todavía"
+            gps = "GPS: no fixes yet"
         if st.get("udp_silent"):
-            gps += " (sin respuesta UDP)"
+            gps += " (no UDP reply)"
         self.lines["gps"].configure(text=gps)
         if st["camera_speed"] is None:
-            camera = "Cámara: sin escala métrica" if self.session.est is None \
-                else "Cámara: calculando la velocidad…"
+            camera = "Camera: no metric scale" if self.session.est is None \
+                else "Camera: working out the speed…"
         else:
-            camera = f"Cámara: {st['camera_speed']:.1f} m/s"
+            camera = f"Camera: {st['camera_speed']:.1f} m/s"
             if st["stopped"]:
-                camera += " (detenido)"
+                camera += " (stopped)"
         self.lines["camera"].configure(text=camera)
         # The gyroscope only turns a frame its samples cover: on another clock
         # than the frames', they would arrive and the camera would still turn.
         hz = st["imu_hz"]
         if st["gyro"]:
-            imu = f"IMU: {hz:.0f} muestras/s; el giro lo da el giroscopio"
+            imu = f"IMU: {hz:.0f} samples/s; the gyroscope turns the heading"
         elif hz >= 1:
-            imu = f"IMU: {hz:.0f} muestras/s, pero el giro lo da la cámara"
+            imu = f"IMU: {hz:.0f} samples/s, but the camera turns the heading"
         else:
-            imu = "IMU: no llega; el giro lo da la cámara"
+            imu = "IMU: not arriving; the camera turns the heading"
         self.lines["imu"].configure(text=imu)
         sigma = st["fusion_sigma_m"]
         self.lines["fusion"].configure(
-            text="Fusión: espera ver el carro avanzar 20 m a más de 3 m/s" if sigma is None
-            else f"Fusión: en marcha, posición ± {sigma:.1f} m")
+            text="Fusion: waiting for the car to move 20 m above 3 m/s" if sigma is None
+            else f"Fusion: running, position ± {sigma:.1f} m")
         k = st["rl_k"]
         if not self.session.use_rl:
-            rl = "RL: apagado"
+            rl = "RL: off"
         elif k is None:
-            rl = "RL: con GPS no decide (el EKF fijo)"
+            rl = "RL: with GPS it does not decide (the fixed EKF)"
         elif k == float("inf"):
-            rl = "RL: sin GPS, ignora la cámara"
+            rl = "RL: no GPS, ignores the camera"
         else:
-            rl = f"RL: sin GPS, le cree menos a la cámara (k = {k:g})" if k > 1 \
-                else "RL: sin GPS, le cree a la cámara (k = 1)"
+            rl = f"RL: no GPS, trusts the camera less (k = {k:g})" if k > 1 \
+                else "RL: no GPS, trusts the camera (k = 1)"
         self.lines["rl"].configure(text=rl)
         if self.developer:
             left = st["outage_left_s"]
             if left is not None:
-                self.lines["cut"].configure(text=f"Corte simulado: el GPS vuelve en {left:.0f} s")
+                self.lines["cut"].configure(text=f"Simulated outage: the GPS comes back in {left:.0f} s")
             elif st["outage_back"] is not None:
                 self.lines["cut"].configure(text=self._back_text(st["outage_back"]))
             # One outage at a time, and only once there is a filter to cut.
@@ -579,51 +603,51 @@ class PipelinePanel:
                 self.cut_button.configure(state="normal" if ready else "disabled")
         if isinstance(self.session, LiveSession):
             folder = st.get("recording")
-            source = f"Grabando en el teléfono: {folder}" if folder else "Sin grabar en el teléfono"
+            source = f"Recording on the phone: {folder}" if folder else "Not recording on the phone"
         else:
-            source = f"Grabación: segundo {st.get('recording_s', 0):.0f}"
+            source = f"Recording: second {st.get('recording_s', 0):.0f}"
         self.lines["source"].configure(text=source)
 
     # -------------------------------------------------------------- helpers
 
     def _report(self, folder, res, error):
         if error:
-            self.lines["state"].configure(text="Detenida" if self.session is not None
-                                          else "Sin iniciar")
+            self.lines["state"].configure(text="Stopped" if self.session is not None
+                                          else "Not started")
             self.result.configure(text=error, foreground="#c0392b")
             return
-        self.lines["state"].configure(text=f"Terminada: {self.session.end_reason}")
+        self.lines["state"].configure(text=f"Finished: {english(self.session.end_reason)}")
         live = res.get("en_vivo")
         if live and live["frames_con_reloj_medido"] < live["frames_recibidos"]:
-            latency = f"latencia en la PC p95 {res['pc_ms_p95']:.0f} ms"
+            latency = f"latency on the PC p95 {res['pc_ms_p95']:.0f} ms"
         elif live:
-            latency = f"latencia p95 {res['e2e_ms_p95']:.0f} ms (PC {res['pc_ms_p95']:.0f})"
+            latency = f"latency p95 {res['e2e_ms_p95']:.0f} ms (PC {res['pc_ms_p95']:.0f})"
         else:
-            latency = f"latencia p95 {res['e2e_ms_p95']:.0f} ms"
+            latency = f"latency p95 {res['e2e_ms_p95']:.0f} ms"
         self.lines["video"].configure(
-            text=f"{res['frames_procesados']} procesados "
-                 f"({res['tasa_descarte_%']:.1f} % descartados), {latency}")
+            text=f"{res['frames_procesados']} processed "
+                 f"({res['tasa_descarte_%']:.1f} % dropped), {latency}")
         fu = res["fusion"]
         pct = fu.get("frames_con_imu_pct", 0)
-        self.lines["imu"].configure(text=f"IMU: el giroscopio giró el {pct:.0f} % de los frames"
-                                    if pct > 0 else "IMU: no llegó; el giro lo dio la cámara")
-        self.lines["fusion"].configure(text=f"Fusión: arrancó a los {fu['arranco_s']:.0f} s"
-                                       if fu["arranco"] else "Fusión: no arrancó (el GPS no vio "
-                                                             "el carro avanzar)")
+        self.lines["imu"].configure(text=f"IMU: the gyroscope turned {pct:.0f} % of the frames"
+                                    if pct > 0 else "IMU: did not arrive; the camera turned the heading")
+        self.lines["fusion"].configure(text=f"Fusion: started after {fu['arranco_s']:.0f} s"
+                                       if fu["arranco"] else "Fusion: did not start (the GPS never "
+                                                             "saw the car move)")
         rl = fu.get("rl")
         if rl:
-            self.lines["rl"].configure(text=f"RL: decidió {rl['decisiones']} veces sin GPS")
+            self.lines["rl"].configure(text=f"RL: decided {rl['decisiones']} times without GPS")
         cuts = [c for c in fu.get("cortes_simulados", []) if c["volvio_el_gps"]]
         if cuts and self.developer:
             e = cuts[-1]["error_al_volver_m"]
             self.lines["cut"].configure(text=self._back_text((e["ekf_fijo"], e["rl"]))
-                                        + (f" ({len(cuts)} cortes; todos en metrics.json)"
+                                        + (f" ({len(cuts)} outages; all in metrics.json)"
                                            if len(cuts) > 1 else ""))
         if isinstance(self.session, LiveSession):
             phone = self.session.folder
-            self.lines["source"].configure(text=f"Grabó en el teléfono: {phone}" if phone
-                                           else "Sin grabar en el teléfono")
-        self.result.configure(text=f"Sesión guardada en {os.path.relpath(folder, _ROOT)}",
+            self.lines["source"].configure(text=f"Recorded on the phone: {phone}" if phone
+                                           else "Not recorded on the phone")
+        self.result.configure(text=f"Session saved in {os.path.relpath(folder, _ROOT)}",
                               foreground="")
 
     @staticmethod
@@ -631,9 +655,9 @@ class PipelinePanel:
         """The errors at the fix the last outage ended with, (fixed EKF, RL)."""
         fixed, rl = errors
         if fixed is None:
-            return "Corte simulado: terminó antes de que arrancara la fusión"
-        return (f"Al volver el GPS: EKF fijo a {fixed:.1f} m"
-                + ("" if rl is None else f", RL a {rl:.1f} m"))
+            return "Simulated outage: it ended before the fusion started"
+        return (f"When the GPS came back: fixed EKF {fixed:.1f} m off"
+                + ("" if rl is None else f", RL {rl:.1f} m"))
 
     def _set_running(self, running):
         for w in self._inputs:
@@ -681,7 +705,7 @@ class PipelineWindow:
 
     def __init__(self, top):
         self.top = top
-        self.top.title("SLAM GPS en tiempo real")
+        self.top.title("Real-time SLAM GPS")
         self.top.resizable(False, False)
         # Labels get their frame's background: interfaz.py paints every TLabel white.
         style = ttk.Style(self.top)
@@ -709,7 +733,7 @@ class PipelineWindow:
         if running:
             for p in running:
                 p.stop()
-                p.lines["state"].configure(text="Guardando la sesión antes de cerrar…")
+                p.lines["state"].configure(text="Saving the session before closing…")
             self.top.after(200, self.close)
             return
         for p in self.panels:

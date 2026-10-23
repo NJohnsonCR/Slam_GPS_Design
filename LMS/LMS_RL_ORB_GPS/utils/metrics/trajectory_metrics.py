@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import Dict, Tuple
 import csv
 import json
 import matplotlib.pyplot as plt

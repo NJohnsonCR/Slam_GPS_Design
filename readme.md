@@ -51,7 +51,7 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-Las versiones de Python están fijas en `requirements.txt`. Los pasos completos para una computadora nueva, y qué revisar si algo falla, están en `LMS/LMS_RL_ORB_GPS/scripts/rl/CONTEXTO.md`, secciones 14 y 15.
+Las versiones de Python están fijas en `requirements.txt`. Los pasos completos para una computadora nueva, y qué revisar si algo falla, están en `LMS/LMS_RL_ORB_GPS/docs/CONTEXTO.md`, secciones 14 y 15.
 
 ## Ejecución
 

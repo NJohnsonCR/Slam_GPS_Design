@@ -1,48 +1,25 @@
 """
-Replay mode: run the real-time pipeline over a recorded session, honouring the
-real time between frames.
+Replay mode: the real-time pipeline over a recording, honouring the real time
+between frames. Same system as live (run_live.py); only the source changes, so
+it measures the pipeline without the app, the network or the field hardware.
 
-It is the same system that runs live (run_live.py); only the data source
-changes. It validates the architecture and measures latency WITHOUT depending
-on the Android app, the network or the field hardware.
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay mobile_data/2025_03_11 --frames 900
+    ... --strict                         real time and real drops (not deterministic)
+    ... --scale depth --trajectory       metric scale from the depth model, and the plot
+    ... --rl --outage 300 30             the RL, and the GPS cut for 30 s from second 300
 
-Usage:
-    # deterministic mode (reproducible, for development and reporting)
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay \
-        mobile_data/2025_03_11 --frames 900
+Recordings of the current app need its intrinsics (from HELLO), the mask and
+--skip-start 6, the frames the encoder writes before catching up:
+    --fx 867.81 --fy 868.55 --cx 630.75 --cy 367.79 --mask-bottom 0.25 --skip-start 6
 
-    # strict mode (real behaviour, not deterministic)
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay \
-        mobile_data/2025_03_11 --frames 900 --strict
+The fusion always runs; --visual-only uses the GPS only to start, --no-gyro
+turns the heading with the camera.
 
-    # with the camera's own metric scale (monocular depth model)
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay \
-        mobile_data/2025_03_11 --frames 900 --scale depth --trajectory
-
-    # a recording of the current app: intrinsics from its HELLO, no dashboard,
-    # and without the first frames the encoder writes before catching up
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay \
-        mobile_data/2026_09_29_13_01_19 --fx 867.81 --fy 868.55 \
-        --cx 630.75 --cy 367.79 --mask-bottom 0 --skip-start 6
-
-The fusion (camera, gyroscope and GPS) always runs; --visual-only uses the GPS
-only to start, and --no-gyro turns the heading with the camera.
-
-    # the RL's policy weighing the camera while the GPS is out, and a
-    # simulated outage of 30 s from second 300 of the recording
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay \
-        mobile_data/2026_09_30_14_05_19 ... --rl --outage 300 30
-
---rl runs the fixed EKF beside the policy's, and the report gives both
-errors at the fix each outage ends with (rl/online.py).
-
-A deterministic replay is cached (cache.py): run again on the same recording,
-options and code, it copies the saved results to --out instead of processing;
---no-cache reprocesses. The cache keeps the per-frame results, the metrics and
-the plot, in resultados/cache/, which goes into git. It keeps the fixed EKF
-without outages, which is what the RL trains on: with --rl or --outage a
-cached replay reruns only the fusion over its saved frames (seconds), and an
-uncached one is processed whole and not stored.
+Deterministic replays are cached (cache.py): the same recording, options and
+code copy the saved results instead of processing (--no-cache reprocesses).
+The cache keeps the fixed EKF without outages, which the RL trains on, so with
+--rl or --outage a cached replay reruns only the fusion over its frames, and
+an uncached one is not stored.
 
 Console output stays in Spanish: it is evidence for the thesis report.
 """

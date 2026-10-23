@@ -1,29 +1,22 @@
 """
 The RL's policy: tabular Q-learning over the outages of env.py, evaluated
-leaving one session out, against the two baselines it has to be measured
-with: the speed rule (ignore the camera above a speed) and the oracle (the
-best constant k of each outage).
-
-The protocol was fixed before the first training (CONTEXTO.md §4.30), and the
-evaluation follows it as written; its second version (§4.34, --version v2)
-changes the actions and adds a third baseline, the camera's fixed weight in
-outages (one k for every outage, chosen like the rule):
+leaving one session out against the fixed filter, the speed rule (ignore the
+camera above a speed), the camera's fixed weight in outages (one k for all)
+and the oracle (the best constant k of each outage). The protocol was fixed
+before training; --version v2 is its second version, with other actions.
 
     sessions   the cached ones but VALIDATION train and are tested in turn;
                VALIDATION is tested with the policy trained on all of them
-    training   EPISODES episodes per policy, an outage of 10-60 s from a random
-               second of a training session; epsilon-greedy from EPS_START to
-               EPS_END; alpha = max(1 / visits, ALPHA_MIN); no discount (the
-               episode ends when the GPS comes back); reward relative to the
-               fixed filter; SEEDS policies per test
-    tested on  the grid outages (one every 10 s, of 10/20/30/60 s) of the
-               session left out, all test sessions pooled
-    criterion  the policy takes at least CRITERION_CAPTURE of the margin from
-               the fixed filter to the oracle in the p90 of the 20 and of the
-               30 s outages, and with good GPS the prediction of each fix
-               moves no more than GOOD_GPS_TOL_M in the p95
+    training   EPISODES episodes of 10-60 s outages per policy; epsilon-greedy
+               from EPS_START to EPS_END; alpha = max(1 / visits, ALPHA_MIN);
+               no discount; SEEDS policies per test
+    tested on  one outage every 10 s, of 10/20/30/60 s, of the session left out
+    criterion  v1: at least CRITERION_CAPTURE of the margin from the fixed
+               filter to the oracle in the p90 of the 20 and 30 s outages; v2:
+               a p90 under the fixed weight's and a p50 at most
+               CRITERION_V2_P50_M over the fixed filter's. Both: with good GPS
+               the prediction of each fix moves at most GOOD_GPS_TOL_M (p95)
 
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.rl.policy
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.rl.policy --version v2
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.rl.policy --sessions 14_05 14_18 --seeds 0 --check
 """
@@ -61,8 +54,8 @@ CRITERION_LENGTHS = (20, 30)
 CRITERION_CAPTURE = 0.25
 GOOD_GPS_TOL_M = 0.2
 # Each version of the protocol: its actions and where its policy is kept.
-VERSIONS = {"v1": ((1.0, 4.0, np.inf), "q_table.npz"),               # §4.30
-            "v2": ((1.0, 16.0, 256.0, np.inf), "q_table_v2.npz")}     # §4.34
+VERSIONS = {"v1": ((1.0, 4.0, np.inf), "q_table.npz"),
+            "v2": ((1.0, 16.0, 256.0, np.inf), "q_table_v2.npz")}
 # The camera's fixed weight in outages, a baseline since v2.
 WEIGHTS = (1.0, 4.0, 16.0, 64.0, 256.0, np.inf)
 CRITERION_V2_P50_M = 1.0            # v2: the median may be at most this much worse than the fixed filter
@@ -241,7 +234,7 @@ def main():
                     help="Prueba de funcionamiento: no guarda la política ni se reporta")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--version", choices=sorted(VERSIONS), default="v1",
-                    help="Versión del protocolo: v1 (§4.30) o v2 (§4.34)")
+                    help="Versión del protocolo: v1 o v2")
     args = ap.parse_args()
     E.ACTIONS, policy_name = VERSIONS[args.version]
     policy_file = os.path.join(_THIS, policy_name)
@@ -399,7 +392,7 @@ def main():
     print(f"Criterio v1 (≥ {100 * CRITERION_CAPTURE:.0f} % del margen a 20 y 30 s, GPS bueno ± {GOOD_GPS_TOL_M} m): "
           f"captura {', '.join(f'{100 * c:.0f} %' for c in captures)} -> {'CUMPLE' if ok_v1 else 'NO CUMPLE'}{tag}")
     if args.version == "v2":
-        # §4.34: a better tail than the fixed camera weight, without giving up the median.
+        # A better tail than the fixed camera weight, without giving up the median.
         tail = [(float(np.mean(report["prueba"][L]["rl_p90"])), report["prueba"][L]["peso_fijo"][1])
                 for L in CRITERION_LENGTHS]
         median = [float(np.mean(report["prueba"][L]["rl_p50"])) - report["prueba"][L]["ekf_fijo"][0]

@@ -1,27 +1,19 @@
 """
-Cache of deterministic replays, so a long recording is processed once and its
-results travel with the repository between computers.
+Cache of deterministic replays: a long recording is processed once, and its
+results travel with the repository.
 
     resultados/cache/<recording>/<key>/
-        frames_deterministic[_metric].csv
+        frames_deterministic[_metric].csv     per frame, gyro_yaw included
         replay_deterministic[_metric].json
         trajectory_deterministic[_metric].png
-        location.csv        the recording's fixes, with their Doppler speed
-        cache.json          what the key was made of, and where it was processed
+        location.csv                          the fixes, with their Doppler speed
+        cache.json                            what the key was made of
 
-With frames.csv (its gyro_yaw column included) and location.csv the fusion
-can be rerun without the recording, which is what the RL trains on.
+frames.csv and location.csv are enough to rerun the fusion, which is what the
+RL trains on. The key hashes the recording, the options that change the
+results and the code that produces them (CODE_FILES, CODE_VERSION), so any
+change reprocesses. Strict replays drop frames, so they are not cached.
 
-The key hashes three things, so any change misses the cache and reprocesses:
-the recording's content (video, timestamps, GPS, IMU), the options that change
-the results (intrinsics, mask, scale, start, frames, modes) and the code that
-produces them (CODE_FILES, plus CODE_VERSION for the rest of run_replay's
-processing loop). Strict replays and the window are not cached: they run in
-real time and drop frames, so two runs differ.
-
-Usage: run_replay.py uses it unless --no-cache; this module also lists the
-cache, and adds location.csv to entries stored without it, from the
-recordings found under mobile_data/:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.cache
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.cache --add-location
 """

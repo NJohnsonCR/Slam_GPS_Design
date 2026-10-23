@@ -17,8 +17,8 @@ del teléfono, zona UTM fija en el replay, interfaz con video y su prueba con el
 teléfono por cable; decisión: el rumbo sale del giroscopio)
 **Dónde quedamos:** §10, apartado "Dónde quedamos". Leerlo primero al retomar.
 **Estudiante:** Naheem Johnson Solís — TEC, Escuela de Ingeniería en Computadores
-**Documentos hermanos:** `realtime/CONTEXTO_APP_ANDROID.md` (plan original de la app) y
-`realtime/ESTADO_APP_ANDROID.md` (lo que efectivamente se construyó, protocolo de red
+**Documentos hermanos:** `docs/CONTEXTO_APP_ANDROID.md` (plan original de la app) y
+`docs/ESTADO_APP_ANDROID.md` (lo que efectivamente se construyó, protocolo de red
 y observaciones para el pipeline; **leerlo antes de tocar las fuentes en vivo**)
 **Propósito:** permitir retomar el trabajo en una sesión nueva sin reconstruir el contexto.
 
@@ -3277,14 +3277,14 @@ del mismo carro y día; las de campo necesitan la laptop.
    720×1280 **vertical** con `fx≈899`. **Medido: corregirlo baja el error de la VO
    de 27.18 m a 11.01 m (−59.5 %).**
 2. **`Dropout(0.1)` activo en inferencia.** El único `.eval()` está en
-   `scripts/training/validate_rl_behavior.py:51`. **Todos los resultados con RL son
-   no deterministas.**
+   `scripts/training/validate_rl_behavior.py:51` (borrado el 23/10/2026, en el historial
+   de git). **Todos los resultados con RL son no deterministas.**
 3. **`visual_conf` es una constante** (§3.4).
 4. **El tablero del carro ocupa la parte baja del frame** en los videos móviles.
    Genera correspondencias que dicen "no te moviste". El pipeline nuevo no busca
    puntos ahí (máscara del 14 % inferior). Recortar la imagen, como se hacía al
    principio, le cambiaba la escala al modelo de profundidad (§4.12).
-5. `README_ORGANIZACION.md` desactualizado.
+5. `README_ORGANIZACION.md` desactualizado (borrado el 23/10/2026).
 6. Los imports de `main.py` hacen que `python -m LMS.LMS_RL_ORB_GPS.main` **falle**.
 7. **`optimize_pose_graph()` no optimiza nada** (`LMS_ORB_with_PG/main.py:99`).
    Su residuo es `(p[i] − p[i−1]) − movimiento_medido[i−1]`, solo entre poses
@@ -3378,6 +3378,10 @@ Correrlo antes de confiar en cualquier número nuevo.**
 > investigación que produjo `realtime/depth_scale.py`. Se separaron en
 > `scripts/scale/`. `oracle_analysis.py` se eliminó (obsoleto y con el bug de
 > rotación inicial); sigue en el historial de git si hiciera falta.
+
+### `docs/` — los documentos (desde el 23/10/2026)
+
+Este documento, `ESTADO_APP_ANDROID.md` y `CONTEXTO_APP_ANDROID.md`.
 
 ### `scripts/rl/` — RL y su cadena de verificación
 
@@ -3512,6 +3516,32 @@ por cable** (§4.20).
 ## 10. SIGUIENTES PASOS (plan vigente al 7/10/2026)
 
 ### Dónde quedamos (9/10/2026)
+
+**23/10/2026, limpieza antes del OE4** (aprobada por el estudiante, lista revisada antes
+de borrar):
+- **Borrado del repositorio** (queda en el historial de git): `scripts/training/`,
+  `scripts/analysis/`, `scripts/mobile/` (el RL viejo, sin uso), `README_ORGANIZACION.md` y
+  `calcularCSV.py` (con `simplekml` fuera de `requirements.txt` y `setup.sh`).
+- **Borrado local, fuera de git:** `resultados/LMS_RL_ORB_GPS/` (corridas del sistema viejo,
+  nov. 2025), los logs y checkpoints del RL viejo, la corrida de prueba y la primera v1 en
+  `resultados/rl/` (queda la repetida, idéntica, y la v2), las figuras de la imitación en
+  `resultados/rl_cache/`, y en `resultados/realtime/` las sesiones de prueba de conexión y
+  los archivos sueltos de septiembre. Se conservan las sesiones citadas aquí y las pruebas
+  de la ventana del estudiante (`replay_20261016_1543*`).
+- **Documentos a `LMS/LMS_RL_ORB_GPS/docs/`:** este, `ESTADO_APP_ANDROID.md` y
+  `CONTEXTO_APP_ANDROID.md` (antes en `scripts/rl/` y `realtime/`); referencias actualizadas.
+- **Idioma:** la ventana (`live_window.py`) y el lanzador (`interfaz.py`, con
+  `utils/GUI/`) en inglés; los estados y errores de la sesión llegan en español y la
+  ventana los traduce al mostrarlos (`english()`), así la consola sigue en español. Los
+  comentarios y nombres de `scripts/rl/` y `scripts/scale/` en inglés; el sistema viejo
+  (`main.py`, `utils/`, `model/`) queda como estaba, salvo imports sin usar.
+- **Comentarios:** docstrings de módulo de `realtime/` recortados (13–47 → 11–24 líneas),
+  sin referencias a secciones de este documento ni fechas. **No se tocaron `fusion.py`,
+  `pipeline.py`, `depth_scale.py` ni `sources.py`:** son la clave de la caché.
+- **Verificado:** el hash de código de la caché es el mismo (las 7 entradas siguen
+  valiendo; `k = 1` da el EKF fijo a 0.0 m en las 7); invariantes 6/6; replay con `--rl
+  --outage` desde la caché; la ventana y el lanzador en Xvfb, contando ventanas (una sola
+  ventana del pipeline aunque se apriete dos veces el botón; cero al cerrar).
 
 **23/10/2026: la sugerencia del asesor sobre el acelerómetro, medida (§4.37).** En pocos
 segundos ve el cambio de velocidad mejor que la cámara y ayuda a dudar de ella (AUC
@@ -3710,7 +3740,7 @@ EKF con el descarte real (~37 %), que nunca se midió: `--strict --trajectory` s
 - Escala por profundidad integrada al pipeline (+2.3 ms, n=3) e invariante T6.
 - Puerta del OE3 sobre escala (§3.5.1), con la advertencia de que no se traslada al EKF.
 - **App Android terminada** en otro task. Estado, protocolo y observaciones:
-  `realtime/ESTADO_APP_ANDROID.md`.
+  `docs/ESTADO_APP_ANDROID.md`.
 - Alcance del mapa resuelto con el asesor (§11.1): trazar la trayectoria en vivo.
 - **Cliente en vivo** (29/9/2026): `run_live.py` y las fuentes en vivo de
   `sources.py`, con precalentamiento. Probado con un simulador del protocolo, en
@@ -3889,7 +3919,7 @@ ya están registrados mientras la pantalla de video está abierta
 - `send()` no bloquea (encola para su propio hilo); la cola de 256 mensajes aguanta ~5 s
   si el envío se atrasa y, llena, descarta y lo cuenta.
 
-*Documentación.* En `realtime/ESTADO_APP_ANDROID.md` (repositorio del pipeline, el
+*Documentación.* En `docs/ESTADO_APP_ANDROID.md` (repositorio del pipeline, el
 documento de traspaso de la app): la línea `IMU` en la tabla del §4.2; en el §2, "Sensores
 por UDP" pasa a GPS e IMU; en el §5.5, la IMU "~53 Hz, en archivo y por UDP"; quitar del
 §10 el punto "si la fusión necesita la IMU en vivo". En la app: la sección "Transmisión
@@ -4003,7 +4033,7 @@ lado de la PC la usa desde el 9/10 (§4.20).**
   escritorio todavía tiene `opencv-python` y `opencv-contrib-python` a la vez.
 
 ### Estado de git al 11/10/2026
-Desde el 11/10/2026 este documento y `realtime/CONTEXTO_APP_ANDROID.md` están en git,
+Desde el 11/10/2026 este documento y `docs/CONTEXTO_APP_ANDROID.md` están en git,
 para tenerlos en la laptop; también los 8 cachés de KITTI que leen los invariantes
 (`resultados/rl_cache/*_cache.npz`, 392 KB). El resto de `resultados/`, `mobile_data/`
 y `kitti_data/` sigue fuera.
@@ -4146,7 +4176,7 @@ sugerido, en la respuesta del 9/10.
 ## 13. CÓMO RETOMAR EN UNA SESIÓN NUEVA
 
 1. Leer §0, §2 y §10 de este documento. Si el trabajo toca la conexión con el
-   teléfono, leer también `realtime/ESTADO_APP_ANDROID.md`.
+   teléfono, leer también `docs/ESTADO_APP_ANDROID.md`.
 2. Correr `venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.rl.sanity_checks` — los 6
    invariantes deben pasar.
 3. Correr `venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay mobile_data/2025_03_11 --frames 900`
@@ -4163,9 +4193,10 @@ sugerido, en la respuesta del 9/10.
    `venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_live <IP del teléfono>`;
    la IP cambia, se lee en la pantalla de video de la app.
 6. La ventana del pipeline se abre con `venv/bin/python interfaz.py` → botón
-   "SLAM GPS con realtime", o sola con
-   `venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.live_window`. Recuerda la última
-   IP, grabación y opciones en `resultados/realtime/interfaz.json`.
+   "Real-time SLAM GPS" (en inglés desde el 23/10/2026), o sola con
+   `venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.live_window`. Tiene dos pestañas, "Real
+   time" y "Development" (§4.36). Recuerda la última IP, grabación y opciones de cada
+   pestaña en `resultados/realtime/interfaz.json`.
 7. Sin el teléfono, el modo en vivo se prueba con el simulador:
    `venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.phone_simulator mobile_data/<carpeta> --start 380 --duration 120`
    y, en otra terminal, `run_live 127.0.0.1`. El simulador manda la IMU de la grabación

@@ -1,31 +1,24 @@
 """
-Pruebas de sanidad del bucle de fusión + auditoría de fugas de ground truth.
+Invariants of the fusion loop, and an audit of ground-truth leaks, so a change
+that breaks them shows up on its own.
 
-Motivación: durante el análisis aparecieron tres defectos seguidos, y cada uno
-cambió (o invirtió) la conclusión. Este archivo fija invariantes que deben
-cumplirse siempre, para que un cambio futuro que los rompa se detecte solo.
+INVARIANTS
+  T1  perfect GPS and w = 0: the fused pose is the ground truth at every fix
+      (index and frame errors)
+  T2  w = 1 ignores the GPS: changing its noise does not change the track
+  T3  the oracle's weight is at least as good as any constant one in the same
+      state (the closed form of the optimum)
+  T4  with the right starting heading, 1 s of VO from the ground truth stays
+      close (the reference-frame bug)
+  T5  the same seed gives the same result
+  T6  the visual odometry's parameters match between the old system
+      (PoseGraphSLAM / main.py) and the real-time one (VisualFrontEnd);
+      otherwise comparing them would compare two VOs, not the architectures
 
-PARTE 1 - INVARIANTES
-  T1  Con GPS perfecto y w=0, la pose fusionada debe coincidir EXACTAMENTE con
-      el ground truth en cada fix. Detecta errores de índice y de marco.
-  T2  Con w=1 el GPS se ignora por completo: la trayectoria no debe cambiar al
-      cambiar el ruido del GPS. Detecta que el GPS se cuele por otra vía.
-  T3  El peso del oráculo debe ser, en cada fix, al menos tan bueno como
-      cualquier peso constante en ese mismo estado. Detecta errores en la
-      fórmula cerrada del óptimo.
-  T4  Con el rumbo inicial correcto, propagar la VO durante 1 segundo desde el
-      ground truth debe dar poco error. Detecta el bug de marco de referencia.
-  T5  Determinismo: misma semilla, mismo resultado.
-  T6  Los parámetros de la odometría visual coinciden entre el sistema viejo
-      (`PoseGraphSLAM` / `main.py`) y el de tiempo real (`VisualFrontEnd`).
-      Sin esto, la comparación "sistema anterior vs sistema en tiempo real"
-      del OE4 mediría dos VO distintas y no la arquitectura.
-
-PARTE 2 - AUDITORÍA DE FUGAS
-  Mide cuánto ayuda información que el sistema real NO tendría:
-  L1  escala métrica tomada del ground truth (la VO monocular no la conoce)
-  L2  rumbo inicial estimado con la secuencia COMPLETA (usa el futuro)
-  L3  posición inicial tomada del ground truth (lo real es el primer fix GPS)
+LEAKS: how much information the real system would not have helps
+  L1  metric scale from the ground truth (monocular VO does not know it)
+  L2  starting heading from the whole sequence (uses the future)
+  L3  starting position from the ground truth (really, the first GPS fix)
 
 Uso:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.rl.sanity_checks
@@ -38,8 +31,8 @@ import sys
 
 import numpy as np
 
-# El proyecto usa imports relativos a dos raíces distintas: la raíz del repo
-# (para LMS.*) y la carpeta LMS_RL_ORB_GPS (para realtime.* y utils.*).
+# Imports resolve against two roots: the repository (LMS.*) and
+# LMS_RL_ORB_GPS (realtime.*, utils.*).
 _THIS = os.path.dirname(os.path.abspath(__file__))
 _LMS_RL = os.path.abspath(os.path.join(_THIS, '..', '..'))
 _ROOT = os.path.abspath(os.path.join(_LMS_RL, '..', '..'))
@@ -64,11 +57,9 @@ def check(name, ok, detail=""):
 
 def gps_derived_scales(gps, period, n, smooth_fixes=5):
     """
-    Escala métrica estimada SOLO con el GPS, como haría el sistema real.
-
-    La VO monocular no puede recuperar la escala absoluta. Se toma la distancia
-    que el GPS dice haberse desplazado en cada intervalo entre fixes, suavizada
-    de forma causal, y se reparte entre los frames del intervalo.
+    Metric scale from the GPS alone, as the real system would get it: the
+    distance between fixes, smoothed causally, spread over the frames between
+    them.
     """
     scales = np.ones(n)
     dists, spans = [], []
@@ -87,38 +78,32 @@ def gps_derived_scales(gps, period, n, smooth_fixes=5):
 
 
 # --------------------------------------------------------------------------
-# T6 — los parámetros de la VO no se comparten entre los dos sistemas, se
-# verifican. `realtime/` reimplementa la odometría a propósito (no importa el
-# código viejo, que arrastra la calibración de KITTI y estado de keyframes que
-# no usa), pero el ALGORITMO tiene que ser idéntico o la comparación del OE4
-# deja de medir la arquitectura.
+# T6: realtime/ reimplements the odometry on purpose (the old code carries the
+# KITTI calibration and keyframe state it does not need), so the parameters
+# are checked rather than shared: the algorithm has to be the same.
 #
-# Sin esta prueba, cambiar 2000 features en un lado y no en el otro haría
-# divergir los sistemas EN SILENCIO.
+# Without it, changing the 2000 features on one side would part them silently.
 # --------------------------------------------------------------------------
 
-# Todo lo que OpenCV expone del detector: así el invariante no se limita al
-# número de features, que es lo único que alguien pensaría en revisar a mano.
+# Everything OpenCV exposes of the detector, not only the number of features.
 _ORB_GETTERS = ('getMaxFeatures', 'getScaleFactor', 'getNLevels',
                 'getEdgeThreshold', 'getFirstLevel', 'getWTA_K',
                 'getPatchSize', 'getFastThreshold')
 
 
-def _min_matches_del_fuente(path, clase, metodo):
+def _min_matches_in_source(path, class_name, method_name):
     """
-    Lee `minimumMatches` del código viejo SIN importarlo.
-
-    Importar `main.py` traería torch, el agente RL y matplotlib, y además sus
-    imports fallan según desde dónde se ejecute (bug conocido). El umbral es un
-    literal en el fuente; leerlo con ast es exacto y no cuesta nada.
+    minimumMatches from the old code, read with ast instead of importing it:
+    main.py would bring torch, the RL agent and matplotlib, and its imports
+    fail depending on where it runs from.
     """
     with open(path, encoding='utf-8') as f:
-        arbol = ast.parse(f.read(), filename=path)
-    for nodo in ast.walk(arbol):
-        if isinstance(nodo, ast.ClassDef) and nodo.name == clase:
-            for hijo in ast.walk(nodo):
-                if isinstance(hijo, ast.FunctionDef) and hijo.name == metodo:
-                    for st in ast.walk(hijo):
+        tree = ast.parse(f.read(), filename=path)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for child in ast.walk(node):
+                if isinstance(child, ast.FunctionDef) and child.name == method_name:
+                    for st in ast.walk(child):
                         if isinstance(st, ast.Assign) and any(
                                 isinstance(t, ast.Name) and t.id == 'minimumMatches'
                                 for t in st.targets):
@@ -126,48 +111,46 @@ def _min_matches_del_fuente(path, clase, metodo):
     return None
 
 
-def check_parametros_vo():
-    """Compara el front-end de tiempo real contra el sistema viejo."""
-    import cv2
+def check_vo_parameters():
+    """The real-time front end against the old system."""
     from LMS.LMS_ORB_with_PG.main import PoseGraphSLAM
     from realtime.pipeline import VisualFrontEnd
 
-    viejo = PoseGraphSLAM()
-    nuevo = VisualFrontEnd(np.eye(3))
+    old = PoseGraphSLAM()
+    new = VisualFrontEnd(np.eye(3))
 
-    difs = []
+    diffs = []
 
     for g in _ORB_GETTERS:
-        a, b = getattr(viejo.orb_detector, g)(), getattr(nuevo.orb, g)()
+        a, b = getattr(old.orb_detector, g)(), getattr(new.orb, g)()
         if a != b:
-            difs.append(f"ORB.{g[3:]}: viejo={a} nuevo={b}")
+            diffs.append(f"ORB.{g[3:]}: viejo={a} nuevo={b}")
 
-    # ratio de Lowe: en el sistema viejo es el default del método que filtra
-    lowe_viejo = inspect.signature(
+    # Lowe's ratio: in the old system, the default of the method that filters
+    old_lowe = inspect.signature(
         PoseGraphSLAM.filter_matches_lowe_ratio).parameters['ratio'].default
-    if lowe_viejo != nuevo.lowe:
-        difs.append(f"ratio de Lowe: viejo={lowe_viejo} nuevo={nuevo.lowe}")
+    if old_lowe != new.lowe:
+        diffs.append(f"ratio de Lowe: viejo={old_lowe} nuevo={new.lowe}")
 
-    # mínimo de matches: el del sistema RL+GPS, que es el baseline del OE4
+    # minimum matches: the RL+GPS system's
     main_py = os.path.join(_LMS_RL, 'main.py')
-    mm_viejo = _min_matches_del_fuente(main_py, 'RL_ORB_SLAM_GPS',
+    old_min_matches = _min_matches_in_source(main_py, 'RL_ORB_SLAM_GPS',
                                        'process_frame_with_gps')
-    if mm_viejo is None:
-        difs.append("no se encontró `minimumMatches` en "
+    if old_min_matches is None:
+        diffs.append("no se encontró `minimumMatches` en "
                     "RL_ORB_SLAM_GPS.process_frame_with_gps")
-    elif mm_viejo != nuevo.MIN_MATCHES:
-        difs.append(f"mínimo de matches: viejo={mm_viejo} nuevo={nuevo.MIN_MATCHES}")
+    elif old_min_matches != new.MIN_MATCHES:
+        diffs.append(f"mínimo de matches: viejo={old_min_matches} nuevo={new.MIN_MATCHES}")
 
-    # el matcher no expone su normType en Python; se compara el tipo, que es
-    # lo verificable, y el resto queda cubierto por la revisión del algoritmo
-    if type(viejo.matcher) is not type(nuevo.matcher):
-        difs.append(f"matcher: viejo={type(viejo.matcher).__name__} "
-                    f"nuevo={type(nuevo.matcher).__name__}")
+    # the matcher does not expose its normType in Python: its type is compared
+    if type(old.matcher) is not type(new.matcher):
+        diffs.append(f"matcher: viejo={type(old.matcher).__name__} "
+                    f"nuevo={type(new.matcher).__name__}")
 
-    detalle = ("idénticos: features, escala, niveles, ratio de Lowe y mínimo de matches"
-               if not difs else " | ".join(difs))
+    details = ("idénticos: features, escala, niveles, ratio de Lowe y mínimo de matches"
+               if not diffs else " | ".join(diffs))
     return check("T6  los parámetros de la VO coinciden entre main.py y realtime/",
-                 not difs, detalle)
+                 not diffs, details)
 
 
 def main():
@@ -188,7 +171,7 @@ def main():
     check("T1  GPS perfecto + w=0 reproduce el GT en los fixes",
           err_fix < 1e-6, f"error máx {err_fix:.2e} m")
 
-    # ---- T2: w=1 ignora el GPS ----
+    # ---- T2: w = 1 ignores the GPS ----
     gA = degrade_gps(gt, 3.0, np.random.default_rng(1))
     gB = degrade_gps(gt, 12.0, np.random.default_rng(2))
     tA = run_episode(seq, gA, PERIOD, R0, 1.0)[0]
@@ -196,15 +179,15 @@ def main():
     d = np.abs(tA - tB).max()
     check("T2  w=1 ignora completamente el GPS", d < TOL, f"diferencia máx {d:.2e} m")
 
-    # ---- T3: el oráculo domina a cualquier peso constante en cada fix ----
+    # ---- T3: the oracle beats any constant weight at each fix ----
     gps5 = degrade_gps(gt, 5.0, np.random.default_rng(3))
     _, F, ws, _ = run_episode(seq, gps5, PERIOD, R0, 'oracle')
     worse = 0
     for w_const in np.linspace(0, 1, 11):
         _, _, ws_c, _ = run_episode(seq, gps5, PERIOD, R0, float(w_const))
-        # en el mismo estado, el óptimo cerrado no puede ser superado
+        # in the same state the closed-form optimum cannot be beaten
         _, _, _, _ = run_episode(seq, gps5, PERIOD, R0, float(w_const))
-    # verificación directa de la fórmula cerrada sobre estados muestreados
+    # the closed form, checked directly on sampled states
     rng = np.random.default_rng(7)
     bad = 0
     for _ in range(2000):
@@ -219,7 +202,7 @@ def main():
     check("T3  la fórmula cerrada del peso óptimo domina a la búsqueda en grilla",
           bad == 0, f"{bad}/2000 estados violan la condición")
 
-    # ---- T4: propagación de VO durante 1 s con rumbo correcto ----
+    # ---- T4: 1 s of VO with the right heading ----
     errs = []
     for s in range(0, n - PERIOD, PERIOD):
         P = np.eye(4); P[:3, :3] = R0; P[:3, 3] = gt[s]
@@ -237,8 +220,8 @@ def main():
     r2 = run_episode(seq, degrade_gps(gt, 5.0, np.random.default_rng(9)), PERIOD, R0, 'oracle')[0]
     check("T5  determinismo con la misma semilla", np.array_equal(r1, r2))
 
-    # ---- T6: la VO del sistema viejo y la del de tiempo real coinciden ----
-    check_parametros_vo()
+    # ---- T6: the old system's VO and the real-time one match ----
+    check_vo_parameters()
 
     # =====================================================================
     print("\n" + "=" * 96)
@@ -267,7 +250,7 @@ def main():
                 cc['step_scales'] = scales
                 if not start_from_gt:
                     cc['gt'] = c['gt'].copy()
-                    cc['gt'][0] = gps[0]        # arrancar en el primer fix GPS
+                    cc['gt'][0] = gps[0]        # start at the first GPS fix
                 traj = run_episode(cc, gps, PERIOD, R0c, 0.5)[0]
                 out.append(ate(traj, c['gt']))
         return float(np.mean(out))

@@ -1,37 +1,20 @@
 """
-Evaluate a processed session against the phone's own sensors.
+Evaluate a processed session (run_replay.py --save-frames, or a live session)
+against the phone's own sensors in its recording:
 
-Reads the per-frame results of run_replay.py --save-frames (or of a live
-session) and the recording made by the app, and measures:
+    scale     camera speed against the GPS Doppler, by speed band
+    rotation  VO rotation against the gyroscope
+    heading   accumulated heading error, stopped and moving
+    shape     ATE after a rigid horizontal alignment, and drift from a common start
+    fusion    (--fusion) the filter against the fixes it has not seen yet, and
+              in simulated GPS outages (--outage; --sweep, every 10 s)
 
-    scale     camera speed against the GPS Doppler speed, by speed band
-    rotation  VO rotation against the gyroscope, per frame and per 0.5 s
-    heading   accumulated heading error, split into stopped and moving time
-    shape     ATE after a rigid horizontal alignment, and drift from a common
-              start anchored at the first metres of motion
-    fusion    with --fusion, the filter (camera, gyroscope and GPS) against the
-              fixes it had not seen yet, and during simulated GPS outages
-              (--outage); --sweep compares its variants on an outage every 10 s
+The phone's GPS is not ground truth, but outdoors it is a fair reference for
+shape and distance.
 
-The phone GPS is not ground truth (several metres of error), but outdoors it
-is a fair reference for shape and distance. The gyroscope measures the
-camera's rotation; in the fusion it also gives the heading, so there the
-reference is the GPS after each simulated outage.
-
-Usage:
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.evaluate \
-        resultados/realtime/base_14_05/frames_deterministic_metric.csv \
-        --recording mobile_data/2026_09_30_14_05_19
-
-    # with the fusion, and the GPS cut for 30 s from second 120
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.evaluate \
-        resultados/realtime/mask_vote_14_05/frames_deterministic_metric.csv \
-        --recording mobile_data/2026_09_30_14_05_19 --fusion --outage 120 30
-
-    # the variants of the filter, on outages of 10 to 120 s every 10 s
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.evaluate \
-        resultados/realtime/full_14_05_compuerta/frames_deterministic_metric.csv \
-        --recording mobile_data/2026_09_30_14_05_19 --sweep
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.evaluate FRAMES_CSV --recording mobile_data/2026_09_30_14_05_19
+    ... --fusion --outage 120 30     the GPS cut for 30 s from second 120
+    ... --sweep                      the filter's variants on an outage every 10 s
 """
 
 import argparse

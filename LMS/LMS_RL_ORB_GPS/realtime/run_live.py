@@ -1,24 +1,14 @@
 """
 Live mode: the real-time pipeline fed by the Android app over the network.
+The session is session.py, shared with the window; this is its console. Live
+always behaves like a strict replay: real time, real drops.
 
-Same pipeline as replay; only the sources change. Live always behaves like
-strict replay: real time, real drops, not deterministic. The session itself
-lives in session.py, shared with the window (live_window.py); this is its
-console.
-
-Usage:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_live 192.168.100.108
+    ... --record --scale depth --duration 60     also record on the phone, for 60 s
+    ... --scale depth --rl                       the RL weighs the camera when the GPS drops out
 
-    # also record on the phone, with metric scale from depth, for 60 s
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_live 192.168.100.108 \
-        --record --scale depth --duration 60
-
-    # the RL's policy weighing the camera when the GPS drops out
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_live 192.168.100.108 \
-        --scale depth --rl
-
-The session ends with Ctrl+C, after --duration seconds, or when no frames
-arrive for 5 s. Each one is saved in its own folder under --out.
+It ends with Ctrl+C, after --duration or when no frames arrive for 5 s; each
+session goes to its own folder under --out.
 """
 
 import argparse

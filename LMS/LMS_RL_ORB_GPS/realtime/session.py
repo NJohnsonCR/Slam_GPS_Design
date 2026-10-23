@@ -1,8 +1,6 @@
 """
-One run of the real-time pipeline, live from the phone or from a recording.
-
-The console (run_live.py) and the window (live_window.py) drive the same
-objects, in this order:
+One run of the real-time pipeline, live from the phone or from a recording,
+driven by the console (run_live.py) and the window (live_window.py):
 
     connect()   reach the phone, or read the recording
     prepare()   camera matrix, depth model and warm-up
@@ -11,18 +9,10 @@ objects, in this order:
     save(res)   the session folder: frames, fixes, IMU, clock queries, metrics and figure
     close()     release the network
 
-Every session runs the fusion (fusion.OnlineFusion, through rl/online.py):
-camera, gyroscope when there are IMU samples, and GPS; visual_only uses the
-GPS only to start. With rl the RL's policy weighs the camera while the GPS is
-out, beside the fixed EKF; cut_gps() hides the GPS from the fusion for a
-while, to see what each does without it.
-
-stop(), status() and latest_frame can be used from any other thread: the
-window runs the session on a worker thread and polls them.
-
-A replay session runs in real time, like the strict mode of run_replay.py, so
-the video plays at its normal speed. The deterministic mode, the one used for
-reported numbers, stays in run_replay.py.
+The fusion is rl/online.py's: with rl the policy weighs the camera while the
+GPS is out; cut_gps() simulates an outage. stop(), status(), cut_gps() and
+latest_frame can be called from another thread. A replay session runs in real
+time; the deterministic mode, for reported numbers, is run_replay.py.
 """
 
 import json

@@ -1,21 +1,10 @@
 """
-EXPERIMENTO DECISIVO - ¿La escala por profundidad produce mejor TRAYECTORIA?
-
-Por qué hace falta este experimento
------------------------------------
-Ya se midió que la profundidad monocular da mejor ESCALA que las alternativas.
-Pero acertar la escala y acertar el recorrido no son lo mismo: con el plano de
-tierra pasó que tenía menor error de escala que el GPS (34% vs 45%) y aun así
-generaba una trayectoria PEOR (9.39 m vs 9.13 m).
-
-Este script cierra esa brecha: reconstruye la trayectoria con cada fuente de
-escala y las compara contra el ground truth de KITTI.
-
-Se corre sobre KITTI porque es el único lugar con verdad absoluta. El GPS se
-degrada a 1 Hz y con ruido para imitar el régimen del teléfono.
-
-ALINEACIÓN: rígida (rotación + traslación), SIN escala. Alinear con escala
-absorbería justamente el error que se quiere medir.
+Does the depth model's scale give a better trajectory, not only a better
+scale? (The ground plane had a smaller scale error than the GPS and still a
+worse track.) Rebuilds the trajectory with each scale source and compares it
+with KITTI's ground truth, the GPS degraded to 1 Hz and noisy like the
+phone's. The alignment is rigid, without scale: fitting the scale would
+absorb the very error being measured.
 
 Uso:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.scripts.scale.depth_trajectory_test \
@@ -44,7 +33,7 @@ from utils.gps.gps_utils import latlon_to_utm
 
 FX = FY = 718.856
 CX, CY = 607.1928, 185.2157
-GPS_PERIOD, GPS_SIGMA = 10, 5.0     # 1 Hz y 5 m de ruido: régimen del teléfono
+GPS_PERIOD, GPS_SIGMA = 10, 5.0     # 1 Hz and 5 m of noise: the phone's
 
 
 def find_dirs(seq):
@@ -58,7 +47,7 @@ def find_dirs(seq):
 
 
 def align_rigid(est, ref):
-    """Alineación SIN escala: solo rotación y traslación."""
+    """Alignment without scale: rotation and translation only."""
     n = min(len(est), len(ref))
     est, ref = est[:n], ref[:n]
     ec, rc = est - est.mean(0), ref - ref.mean(0)
@@ -89,7 +78,7 @@ def integrate(R_rel, t_rel, scales):
 
 
 def gps_scales(gps, n, period, smooth=5):
-    """Escala derivada del GPS: el método actual del pipeline."""
+    """Scale from the GPS."""
     s = np.ones(n)
     dists, spans = [], []
     for k in range(n // period):
@@ -141,7 +130,7 @@ def main():
                     model="depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf",
                     device=0 if torch.cuda.is_available() else -1)
 
-    # ---- VO frame a frame + escala por profundidad ----
+    # ---- VO frame to frame, scale from depth ----
     imgs, kps, dess = [], [], []
     for i, fn in enumerate(files):
         img = cv2.imread(os.path.join(img_dir, fn))
@@ -206,7 +195,7 @@ def main():
         ok = (zm > 3) & (zm < 60)
         if ok.sum() < 20:
             continue
-        # distancia métrica del intervalo -> repartida entre sus frames
+        # the interval's metric distance, spread over its frames
         depth_v[i-gap:i] = float(np.median(zm[ok] / z[ok])) / gap
         if i % 150 == 0:
             print(f"     {i}/{n}")
@@ -224,8 +213,8 @@ def main():
     gps = gt.copy()
     gps[:, :2] += rng.normal(0, GPS_SIGMA, size=(n, 2))
 
-    # ---- comparación ----
-    variantes = [
+    # ---- comparison ----
+    variants = [
         ("Ground truth (cota superior)", true_step),
         ("Derivada del GPS 1 Hz (método actual)", gps_scales(gps, n-1, GPS_PERIOD)),
         ("PROFUNDIDAD (cruda)", depth_s),
@@ -236,25 +225,25 @@ def main():
     print(f"\n{'-'*82}")
     print(f"{'fuente de escala':<40}{'ATE (m)':>10}{'error escala':>15}{'dist. total':>13}")
     print("-" * 82)
-    trays = {}
-    for nombre, sc in variantes:
+    tracks = {}
+    for name, sc in variants:
         sc = np.asarray(sc, dtype=float)[:n-1]
         tr = integrate(R_rel, t_rel, sc)
-        trays[nombre] = tr
+        tracks[name] = tr
         e = 100 * np.median(np.abs(sc - true_step) / np.maximum(true_step, 1e-6))
-        print(f"{nombre:<40}{ate(tr, gt):>10.2f}{e:>14.0f}%{sc.sum():>12.0f} m")
+        print(f"{name:<40}{ate(tr, gt):>10.2f}{e:>14.0f}%{sc.sum():>12.0f} m")
     print("-" * 82)
     print(f"{'(distancia real)':<40}{'':>10}{'':>15}{true_step.sum():>12.0f} m")
 
-    # ---- gráfico ----
+    # ---- plot ----
     os.makedirs(args.out_dir, exist_ok=True)
     fig, ax = plt.subplots(1, 2, figsize=(14, 6))
     ax[0].plot(gt[:, 0], gt[:, 1], "k-", lw=2.5, label="Ground truth")
-    for nombre, color in (("Derivada del GPS 1 Hz (método actual)", "#F2A03D"),
+    for name, color in (("Derivada del GPS 1 Hz (método actual)", "#F2A03D"),
                           ("PROFUNDIDAD + mediana móvil 5", "#4FD1C5")):
-        a = align_rigid(trays[nombre], gt)
+        a = align_rigid(tracks[name], gt)
         ax[0].plot(a[:, 0], a[:, 1], "--", lw=1.6, color=color,
-                   label=f"{nombre.split('(')[0].strip()} ({ate(trays[nombre], gt):.1f} m)")
+                   label=f"{name.split('(')[0].strip()} ({ate(tracks[name], gt):.1f} m)")
     ax[0].set_xlabel("X (m)"); ax[0].set_ylabel("Y (m)")
     ax[0].set_title("Trayectorias"); ax[0].axis("equal"); ax[0].grid(alpha=0.3); ax[0].legend()
 
