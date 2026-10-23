@@ -1,8 +1,10 @@
 # Contexto del proyecto — TFG SLAM + GPS + RL
 
-**Última actualización:** 16 de octubre de 2026 (el RL, §4.28–4.34: cumple su criterio; con
-la vara justa empata en la cola con un peso fijo y gana en la mediana; corrida v2 pendiente
-de revisar, ver "Dónde quedamos"). **Antes:** 11 de octubre de 2026 (primera prueba de campo: sensores
+**Última actualización:** 23 de octubre de 2026 (el acelerómetro para validar el cambio
+de velocidad, la sugerencia del asesor: medido, §4.37). **Antes:** 16 de octubre de 2026 (el RL, §4.28–4.36: la v1 cumple su
+criterio y con la vara justa empata en la cola con un peso fijo; la v2 cumple el suyo contra
+ese peso fijo, por poco en la cola y con claridad en la mediana, §4.35; integrada al
+pipeline, en vivo y en la ventana con un corte de GPS simulado, §4.36). **Antes:** 11 de octubre de 2026 (primera prueba de campo: sensores
 completos, el EKF los usó en las cuatro sesiones; la cámara sola falla con lluvia en el
 parabrisas; la rotonda la sigue el GPS, no la cámara, §4.21. Antes, la laptop de campo: torch con CUDA 12.6
 para la GTX 1050 Ti, §14 y §15; con el teléfono por cable la latencia p95 no cumple en
@@ -2945,7 +2947,9 @@ al empezar el corte contra la Doppler escondida, mediana relativa):
   los altos (la compuerta pone 0). Durante el corte, el NIS de la cámara tiene la misma
   ambigüedad: una cámara que no coincide con la velocidad del filtro puede estar mal o
   ver una aceleración real.
-- **El acelerómetro no la separa así como está** (14:05 y 14:18, la aceleración sobre el
+- **El acelerómetro no la separa así como está** (matizado en §4.37: con el eje físico, en
+  ventanas de pocos segundos sí ve el cambio de velocidad mejor que la cámara; integrado
+  más de 10 s, no) (14:05 y 14:18, la aceleración sobre el
   eje de la cámara, horizontal, integrada, contra la Doppler): en 10 s, error p50
   1.6–2.8 m/s con un cambio real p50 de 1.4–1.9 m/s (correlación 0.51–0.53; la cámara,
   0.32–0.65); en 30 s, 3.7–6.0 m/s (correlación 0.29–0.44; la cámara, 0.32–0.60). Con
@@ -3013,6 +3017,255 @@ salvo:
   lo discute con el asesor.
 - Los niveles del estado no cambian (§4.30). Es una segunda iteración elegida después de
   ver las sesiones de prueba (§4.33): se declara así al reportarla.
+
+
+### 4.35 Resultado del RL v2: cumple su criterio, por poco en la cola (16/10/2026)
+
+La corrida del protocolo v2 (§4.34), lanzada antes de ver nada (`python -m
+LMS.LMS_RL_ORB_GPS.realtime.rl.policy --version v2 --workers 7`, 51 min; resultados en
+`resultados/rl/20261016_140855_v2/`, fuera de git: `evaluacion.json` con el error de cada
+corte y la tabla de cada prueba). Mismas 21 políticas que §4.31; el EKF fijo y la regla
+dan exactamente lo mismo que en la v1.
+
+**Las seis sesiones de prueba juntas** (p50 / p90 al volver el GPS, m; RL, media de 3
+semillas; entre paréntesis, la captura del margen del EKF fijo al oráculo en el p90; el
+oráculo ahora es el mejor de {1, 16, 256, ∞} en cada corte, así que las capturas no se
+comparan con las de §4.31):
+
+| Corte | EKF fijo | Regla | Peso fijo | **RL v2** | RL v1 (§4.31) | Oráculo v2 |
+|---|---|---|---|---|---|---|
+| 10 s | 9.6 / 34.1 | 8.5 / 32.7 (+11 %) | 12.7 / 38.4 (−33 %) | 9.3 / 32.2 (+15 %) | 8.6 / 32.6 | 5.7 / 21.2 |
+| **20 s** | 19.9 / 97.1 | 20.6 / 85.3 (+23 %) | 26.2 / 80.8 (+32 %) | **20.7 / 78.0 (+37 %; +28, +39, +45)** | 20.6 / 80.3 | 11.2 / 45.9 |
+| **30 s** | 32.3 / 169.6 | 37.7 / 138.3 (+31 %) | 39.7 / 133.7 (+35 %) | **31.6 / 128.4 (+40 %; +37, +39, +46)** | 34.1 / 135.0 | 18.9 / 67.7 |
+| 60 s | 76.6 / 361.5 | 112.8 / 339.4 (+11 %) | 98.9 / 305.0 (+29 %) | 71.1 / 296.4 (+34 %) | 70.3 / 324.0 | 42.9 / 168.3 |
+
+**Criterio v2: CUMPLE**, tal como se declaró (media de las semillas): (1) p90 del RL
+menor que el del peso fijo, 78.0 contra 80.8 m a 20 s y 128.4 contra 133.7 m a 30 s;
+(2) p50 a +0.8 y −0.7 m del EKF fijo (límite +1 m); (3) con el GPS bueno, 0.00 m (las
+seis sesiones no tienen huecos de 1.5 s: la política no actúa). El criterio v1 también
+(37 % y 40 %). **Se reporta el RL v2;** la política del pipeline pasa a ser
+`realtime/rl/q_table_v2.npz` (18 KB; las seis sesiones, semilla 0).
+
+**Por sesión** (p90 a 20 / 30 s; peso fijo elegido sin la sesión, entre paréntesis):
+
+| Sesión de prueba | EKF fijo | Peso fijo | RL v1 | **RL v2** | Oráculo v2 |
+|---|---|---|---|---|---|
+| 14:05 | 49.1 / 79.1 | 51.5 / 69.9 (256) | 47.9 / 78.7 | 44.9 / 80.0 | 28.5 / 49.0 |
+| 14:18 | 106.5 / 178.2 | 64.5 / 117.4 (256) | 81.4 / 134.9 | 69.2 / 121.9 | 36.5 / 69.8 |
+| 14:52 | 45.3 / 55.4 | 75.9 / 103.9 (256) | 57.4 / 102.1 | 51.5 / 88.9 | 34.4 / 42.4 |
+| 14:55 | 82.2 / 111.8 | 59.5 / 115.8 (256) | 57.4 / 87.1 | 64.1 / 97.5 | 26.4 / 50.3 |
+| 15:05 | 142.8 / 273.3 | 98.8 / 191.5 (64) | 104.1 / 218.8 | 126.8 / 218.4 | 71.0 / 132.3 |
+| 15:16 | 118.2 / 185.7 | 117.1 / 189.9 (64) | 100.5 / 160.5 | 96.3 / 155.9 | 55.6 / 106.9 |
+| 2025_03_11 (validación) | 50.0 / 84.9 | 109.2 / 147.9 (256) | 76.2 / 104.6 | 65.3 / 86.9 | 48.6 / 84.9 |
+
+**Qué tan sólido es** (script temporal sobre los cortes guardados):
+- **Por semilla, el criterio es frágil:** solo la semilla 1 cumple las tres condiciones.
+  La 0 queda sobre el peso fijo a 20 s (82.9 contra 80.8) y 1.04 y 2.1 m peor en la
+  mediana a 20 y 30 s; la 2 queda 1.3 m peor en la mediana a 20 s. El criterio se declaró sobre la
+  media de las semillas, y así cumple; hay que decirlo junto.
+- **La cola contra el peso fijo, por sesión:** con un bootstrap de las seis sesiones
+  (2000), el RL queda por debajo del peso fijo en el 73 % (20 s) y el 67 % (30 s) de
+  los remuestreos (diferencia p50 −3.6 y −4.0 m; p5 a p95, −13 a +4 y −20 a +12 m).
+  Dejando cada sesión afuera, queda por debajo en 11 de 12 casos (sin 15:16, a 30 s,
+  +2.2 m). **La ventaja en la cola es chica y no robusta.**
+- **La mediana contra el peso fijo sí es robusta:** el RL queda por debajo en el 98 %
+  (20 s) y el 95 % (30 s) de los remuestreos (diferencia p50 −4.6 y −6.0 m). Y las
+  pérdidas grandes (> 20 m contra el EKF fijo, cortes de 30 s) son la mitad: 14 % de
+  los cortes contra 27 % del peso fijo.
+- **Contra la v1, en los mismos cortes:** mejor cola a 20, 30 y 60 s (80.3 → 78.0, 135.0
+  → 128.4, 324.0 → 296.4) y mejor mediana a 30 s (34.1 → 31.6, por debajo del EKF fijo).
+  Por sesión mejora en cuatro de seis y empeora en 14:55 y 15:05 (a 20 s).
+- **La debilidad de §4.33 sigue:** los cortes donde el RL pierde más de 20 m contra el
+  EKF fijo pasan de 12 % (v1) a 14 % (v2); los que gana más de 20 m, de 15 % a 17 %. Los
+  pesos finitos no bajaron las pérdidas grandes como se esperaba (alternativa A); lo que
+  mejoró es elegir cuándo bajar el peso.
+- **Validación (2025_03_11):** sigue sin margen (a 30 s el oráculo es el EKF fijo). El
+  RL v2 empeora el p90 a 20 s (65.3 contra 50.0), empata a 30 s (86.9 contra 84.9) y
+  mejora a 60 s (133.8 contra 147.0): daña menos que la v1 (76.2 / 104.6) y mucho menos
+  que el peso fijo (109.2 / 147.9). La política que queda (semilla 0, seis sesiones) da
+  ahí 60.9 / 113.9.
+- **Acciones** en los cortes de prueba: `k = 1` 39 %, `k = 16` 14 %, `k = 256` 23 %,
+  ignorar 24 %; las tablas ven 161–191 de 243 estados.
+
+**Cobertura de los cortes** (pregunta del estudiante, 16/10; script temporal): la
+evaluación no usa tramos elegidos. En **cada una de las siete sesiones** hay un corte
+cada 10 s, de cada largo (10, 20, 30 y 60 s), desde 10 s después de que arranca el filtro
+hasta el último que todavía tiene un fix después; cada sesión se prueba con políticas
+entrenadas sin ella (las seis de prueba) o con las seis (la validación):
+
+| Sesión | Con filtro | Cortes 10 / 20 / 30 / 60 s | Tramo cubierto |
+|---|---|---|---|
+| 14:05 | 695 s | 68 / 67 / 66 / 63 | 10–690 s |
+| 14:18 | 767 s | 75 / 74 / 73 / 70 | 10–760 s |
+| 14:52 | 123 s | 11 / 10 / 9 / 6 | 10–120 s |
+| 14:55 | 349 s | 33 / 32 / 31 / 28 | 10–340 s |
+| 15:05 | 240 s | 22 / 21 / 20 / 17 | 10–230 s |
+| 15:16 | 481 s | 47 / 46 / 45 / 42 | 10–480 s |
+| 2025_03_11 (validación) | 280 s | 22 / 21 / 20 / 17 | 10–230 s |
+
+Lo único que queda fuera es lo de antes del arranque del filtro (23 s en 14:05) y sus
+primeros 10 s, y el final sin un fix después. Las sesiones pesan distinto en el total
+(14:52 aporta 9–10 cortes; 14:18, 73–74): por eso se reporta también cada sesión (tabla
+de arriba) y el bootstrap por sesión.
+
+**Para la tesis:** el RL v2 cumple el criterio declarado contra la vara justa (el peso
+fijo bien elegido): mejor en la cola por poco (3–5 m, no robusto por sesión) y mejor en
+la mediana con claridad (5–8 m, robusto), con la mitad de pérdidas grandes. Es la
+segunda iteración, elegida después de ver las sesiones de prueba (§4.33): se reporta así.
+
+
+### 4.36 El RL dentro del pipeline (16/10/2026)
+
+**Qué quedó** (sin tocar `fusion.py` ni `pipeline.py`: la clave de la caché no cambia):
+- `realtime/rl/online.py`: `RlOnlineFusion`, subclase de `OnlineFusion`. Con una
+  política, su filtro es `PolicyFusion` (el EKF fijo mientras hay GPS; desde los 1.5 s
+  sin fix, la política elige `k` en cada velocidad de la cámara) y el EKF fijo corre al
+  lado con las mismas entradas, para comparar. `OutageGps` envuelve el `GpsBuffer`:
+  esconde a la fusión los fixes de un corte simulado y los anota para el mapa. En el
+  primer fix después de cada corte guarda el error de los dos filtros antes de que el
+  fix los corrija, la misma medida de la evaluación. `over_frames` rehace la fusión
+  sobre los frames guardados de un replay.
+- `policy.py`: la tabla Q guarda sus propias acciones (el pipeline carga la v1 o la v2
+  sin `--version`); `POLICY_FILE`, la del pipeline, es la v2.
+- `run_replay.py`: `--rl [POLITICA]` y `--outage SEGUNDO DURACION` (se repite; segundos
+  desde el inicio de la grabación). Con la grabación en la caché se rehace solo la
+  fusión sobre sus frames (6 s para 12 min de video) y se guarda
+  `fusion_deterministic_metric.json`; sin caché se procesa entera y no se guarda: la
+  caché guarda el EKF fijo sin cortes, que es lo que lee el RL.
+- `run_live.py`: `--rl`; la línea de estado dice `RL: k = …` o `RL: ignora la cámara`
+  mientras decide.
+- `session.py` y `live_window.py`: la casilla "RL: decide cuánto creerle a la cámara
+  cuando falta el GPS"; el botón "Cortar el GPS" con su duración (se habilita con la
+  fusión en marcha y sin otro corte en curso); líneas de estado del RL y del corte (los
+  segundos que faltan; al volver, el error de cada filtro); en el mapa, los fixes
+  escondidos como círculos huecos y el EKF fijo en gris punteado. `metrics.json` guarda
+  `rl` (decisiones por acción) y `cortes_simulados` (fixes escondidos y error al volver
+  de cada filtro).
+
+**Verificación** (scripts temporales; grabaciones locales 14:05, 14:18 y 2025_03_11):
+
+| Prueba | Resultado |
+|---|---|
+| La fusión rehecha sobre los frames de la caché, sin política ni cortes, contra el trazo guardado del replay | Arranca en el mismo frame; diferencia máxima 0.5 mm (resolución del CSV 0.2–2.3 mm) |
+| Con la política (v1 y v2), sin cortes | En las dos de carro, 0 decisiones e idéntica al EKF fijo; en 2025_03_11, 47 decisiones, las mismas de la evaluación (después del último fix) |
+| Cortes por el pipeline contra la evaluación (`env.run_episode` del mismo corte) en 14:05 y 14:18 | Uno de cada cinco de 30 s (29), con la v1 y con la v2; después **todos** los de 20 y 30 s (280), con la v2: diferencia máxima 0.0000 m, EKF fijo y RL. Las cuatro de campo no se pueden pasar por el pipeline aquí (sus grabaciones, con la IMU, están en la laptop); su evaluación sí está completa |
+| El pipeline completo (video, `--frames 900 --rl --outage 14 10` en 2025_03_11, v1) contra la fusión rehecha sobre los mismos frames de la caché | Mismas decisiones; error al volver 21.42 / 18.64 m en los dos (diferencia < 0.01 mm) |
+| Replay estricto de 60 s de 14:05 con la CPU libre, sin y con `--rl --outage` (v2) | Descarte 0.2 % en los dos; fusión p50 / p95 0.13 / 0.23 → 0.21 / 0.41 ms por frame; latencia p95 30.7 → 31.2 ms |
+| La ventana en Xvfb: grabación en tiempo real, RL y un corte de 20 s con el botón | Una ventana todo el tiempo, cero al cerrar; el botón se habilita al arrancar la fusión y no durante el corte; `metrics.json` con `rl` y `cortes_simulados`. Esa prueba descartó el 37 % de los frames porque la corrida v2 ocupaba 7 núcleos (51 ms por frame en vez de 27) |
+
+**Dos pestañas** (pedido del estudiante, 16/10): el corte simulado es de desarrollo, no
+del uso normal. La ventana tiene ahora la pestaña **"Tiempo real"** (fuente, opciones con
+la casilla del RL, video, mapa con el GPS y el trazo oficial, y la línea "RL: …" con lo que
+decide) y la pestaña **"Desarrollo"** (lo mismo, más el botón "Cortar el GPS" con su
+duración, la línea del corte, y en el mapa los fixes escondidos, el EKF fijo gris punteado
+y el trazo de la fusión durante el corte en un rosa claro, para distinguirlo del trazo
+corregido que se dibuja al volver el GPS). Las dos salen de la misma clase
+(`PipelinePanel`, con `developer`), así que no se desincronizan; una sesión a la vez
+(mientras una corre, el "Iniciar" de la otra queda deshabilitado: el teléfono manda un
+solo video y el modelo de profundidad ocupa la GPU); cada pestaña guarda sus valores en
+`interfaz.json`. `interfaz.py` la abre igual que antes. **Probada en Xvfb** (script
+temporal, 14:05 desde el segundo 120): la pestaña normal no tiene botón ni línea de corte;
+con ella en marcha, la de desarrollo no arranca (avisa) y su "Iniciar" está deshabilitado;
+en desarrollo, corte de 25 s con el botón (EKF fijo 47.6 m, RL 25.6 m al volver), 0 %
+de frames descartados; una ventana todo el tiempo (1176 × 721) y cero al cerrar.
+
+**Falta:** probarla con el teléfono real (`run_live.py --rl` o la ventana) y abrir la
+ventana en el escritorio del estudiante.
+
+
+### 4.37 El acelerómetro para validar el cambio de velocidad: la sugerencia del asesor (23/10/2026)
+
+**La pregunta** (el asesor, al ver §4.33–4.36): ¿se puede sacar del sensor de inercia el
+cambio de velocidad, para descartar una medición de la cámara que no es confiable? Es
+decir, si la cámara dice que la velocidad cambió y el acelerómetro no lo ve, desconfiar
+de la cámara. Sin reentrenar nada.
+
+**Datos:** solo 14:05 y 14:18 tienen aquí la IMU cruda (las cuatro de campo la tienen en
+la laptop; la caché guarda el giro, no la aceleración). 658 y 708 s con IMU, cámara y
+GPS; la verdad es la Doppler. El acelerómetro incluye la gravedad (|g| = 9.75); el
+teléfono va apaisado (la gravedad cae en x) y la cámara mira por −z. Scripts temporales.
+
+**1. La señal.**
+- **Vibración:** en el eje del carro, σ 0.8–0.9 m/s² por muestra (52 Hz), 0.6–0.7 m/s²
+  en medias de 1 s, parado o andando; la aceleración real tiene σ 0.53–0.60 m/s². Por
+  muestra el ruido es mayor que la señal.
+- **El eje importa:** ajustado por mínimos cuadrados contra la Doppler, sale inclinado
+  16–28° y con ganancia 0.45 (el ruido lo encoge): así se midió en §4.33. El **eje
+  físico** (el de la cámara, −z, sin su parte de gravedad, ganancia 1) es mejor; con él,
+  el sesgo tomado de los 20 s antes con GPS y mantenido después, como en un corte:
+
+| Cambio de velocidad en H s | Real, \|dv\| p50 | Acelerómetro, error p50 (corr.) | Cámara con la escala congelada, error p50 (corr.) | Velocidad constante, error p50 |
+|---|---|---|---|---|
+| 1 s | 0.33–0.38 | 0.26–0.32 (0.70–0.79) | 0.70–0.74 (0.14–0.18) | 0.33–0.38 |
+| 2 s | 0.62–0.65 | 0.46–0.67 (0.73–0.84) | 1.22–1.58 (0.17–0.23) | 0.62–0.65 |
+| 5 s | 1.27–1.60 | 0.96–1.39 (0.68–0.84) | 1.65–2.59 (0.22–0.40) | 1.27–1.60 |
+| 10 s | 2.13–2.22 | 1.63–2.80 (0.56–0.77) | 2.04–3.06 (0.29–0.62) | 2.13–2.22 |
+| 20 s | 2.53–3.01 | 3.92–5.85 (0.36–0.55) | 2.26–3.13 (0.33–0.64) | 2.53–3.01 |
+| 30 s | 3.00–3.41 | 5.51–7.88 (0.27–0.34) | 2.12–2.73 (0.30–0.64) | 3.00–3.41 |
+
+  (m/s; los rangos son las dos sesiones). **En pocos segundos el acelerómetro ve el
+  cambio de velocidad mucho mejor que la cámara** (correlación 0.7–0.8 contra 0.1–0.4);
+  **integrado más de 10 s es peor que suponer velocidad constante**: el sesgo y la
+  pendiente de la calle (1° = 0.17 m/s²) se acumulan. Corrige §4.33, que con el eje
+  ajustado y a 10–30 s lo dio por inservible.
+- **Como detector de aceleración real** (> 0.5 m/s² sostenida), AUC: acelerómetro
+  0.75–0.86, cámara 0.44–0.82 (a 2 s la cámara es azar: 0.44–0.49).
+- **La prueba que propone el asesor** (cuando la cámara dice que la velocidad cambió más
+  de 0.5 m/s² · H, ¿miente?; "miente" = se equivoca en más de max(1 m/s, la mitad de su
+  cambio)): la cámara miente en el 61–84 % de esos casos. El desacuerdo cámara-
+  acelerómetro los separa con AUC 0.82–0.92; solo el tamaño del cambio de la cámara (sin
+  acelerómetro), 0.60–0.85. **El acelerómetro agrega información** (+0.03 a +0.24 de
+  AUC). La regla literal "el acelerómetro ve menos de la mitad" no sirve: marca el 88–97
+  % de las mentiras, pero también el 69–94 % de las verdades.
+
+**2. ¿Bajaría el error de los cortes?** Una compuerta sobre el RL v2 de cada prueba (tres
+semillas; sin la compuerta reproduce la evaluación exacta), cada segundo, con los últimos
+5 s del corte; umbrales fijados antes, sin ajustar. Con la Doppler escondida como
+referencia (el techo de la idea) y con el acelerómetro (eje físico, sesgo de antes del
+corte). 141 cortes de 20 s y 139 de 30 s de 14:05 y 14:18 (p50 / p90 al volver el GPS, m;
+"pierde" = más de 20 m peor que el EKF fijo):
+
+| | 20 s | Pierde | 30 s | Pierde |
+|---|---|---|---|---|
+| EKF fijo | 14.4 / 75.0 | | 22.2 / 146.5 | |
+| Peso fijo | 20.9 / 55.5 | | 26.6 / 92.4 | |
+| RL v2 | 16.7 / 61.0 | 9.2 % | 23.6 / 102.5 | 13.2 % |
+| A: aceleración real → no ignorar la cámara (Doppler, techo) | 16.3 / 57.8 | 7.1 % | 22.4 / 96.5 | 9.4 % |
+| A con el acelerómetro | 16.4 / 57.9 | 7.6 % | 23.2 / 102.6 | 9.8 % |
+| B: la cámara no coincide → ignorarla (Doppler, techo) | 16.4 / 59.3 | 10.2 % | 21.5 / 106.3 | 14.6 % |
+| B con el acelerómetro | 20.4 / 59.9 | 15.1 % | 25.6 / 112.2 | 20.6 % |
+| A + B con el acelerómetro | 20.0 / 57.7 | 12.8 % | 24.9 / 107.3 | 17.0 % |
+
+- **La forma literal de la sugerencia (B) no ayuda, ni con la verdad:** ignorar la
+  cámara es suponer velocidad constante (§4.33), y eso es lo que sale caro. Con el
+  acelerómetro empeora (más pérdidas grandes).
+- **Al revés sí (A):** cuando el acelerómetro ve que el carro de verdad acelera o frena,
+  no ignorar la cámara. Baja las pérdidas grandes (9.2 → 7.6 % a 20 s, 13.2 → 9.8 % a 30
+  s, casi lo mismo que con la verdad) y el p90 a 20 s (61.0 → 57.9, igual que el techo);
+  a 30 s el p90 no cambia. Corte por corte (las tres semillas): a 20 s mejora más de 5 m
+  en 36 y empeora en 30 de 423 (+969 / −464 m); a 30 s, 46 y 47 de 417 (+1661 / −1346
+  m). Neto chico.
+- **El techo es bajo:** aun sabiendo la verdad, una compuerta así mejora el p90 un 5–6 %.
+  El margen grande (el oráculo de §4.35) no está en saber si el carro acelera, sino en el
+  nivel de la velocidad (la escala de la cámara), que el acelerómetro no mide.
+
+**Variantes, con costo y probabilidad:**
+
+| Variante | Costo | Probabilidad de mejorar el resultado reportado |
+|---|---|---|
+| A como compuerta fija sobre el RL v2 | ~1 día: la aceleración no está en la caché (copiar `gyro_accel.csv` a las entradas, en la de escritorio y en la laptop), código, evaluación por sesión de las seis | Baja-media: en dos sesiones baja las pérdidas grandes, el p90 casi no |
+| El cambio de velocidad del acelerómetro (5 s) como señal del estado del RL | ~1–2 días (lo anterior + reentrenar, 729 estados) | Baja-media: el techo de la compuerta es 5–6 % |
+| El acelerómetro dentro del EKF (velocidad propagada con la aceleración) | Días | Baja: integrado más de 10 s es peor que velocidad constante |
+| B, la forma literal | — | Medido: no ayuda ni con la verdad |
+
+**Para el asesor:** sí, el acelerómetro ve el cambio de velocidad en pocos segundos
+(mejor que la cámara) y sirve para dudar de un cambio que la cámara inventa (AUC 0.82–0.92
+contra 0.60–0.85 sin él). Pero "dudar de la cámara" no baja el error, porque la
+alternativa (ignorarla) es suponer velocidad constante; lo que sí ayuda un poco es lo
+contrario, usarlo para no ignorar la cámara cuando el carro de verdad cambia de
+velocidad (−2 a −3 puntos de pérdidas grandes). El techo de esa idea es 5–6 % del p90:
+el error grande viene de la escala, que el acelerómetro no ve. Medido en dos sesiones
+del mismo carro y día; las de campo necesitan la laptop.
 
 ---
 
@@ -3161,6 +3414,7 @@ en `scripts/rl/` encadenan las poses al revés (§4.11). No se corrigieron.
 | `evaluate.py` | Nuevo (2/10/2026): evalúa un `frames.csv` contra el GPS y el giroscopio de la grabación (§4.12); desde el 4/10/2026 también la fusión (§4.14) |
 | `fusion.py` | Nuevo (4/10/2026): el EKF; probado sin conexión sobre los dos fragmentos (§4.14) |
 | `depth_scale.py` | Validado e **integrado** (`DepthScaleWorker` en `pipeline.py`). Desde el 4/10/2026 reporta 0 m/s con el carro detenido (§4.15) |
+| `rl/env.py`, `rl/policy.py`, `rl/online.py` | El RL (13–16/10/2026): el entorno sobre la caché, el entrenamiento y la evaluación dejando una sesión afuera (`q_table.npz` v1, `q_table_v2.npz` v2, la del pipeline), y la política dentro del pipeline con cortes de GPS simulados (§4.28–4.36) |
 
 ---
 
@@ -3259,29 +3513,34 @@ por cable** (§4.20).
 
 ### Dónde quedamos (9/10/2026)
 
-**16/10/2026, al compactar la sesión: la corrida del protocolo v2 (§4.34) quedó
-lanzada y sin revisar.** Se lanzó a las 14:08 en segundo plano (`python -m
-LMS.LMS_RL_ORB_GPS.realtime.rl.policy --version v2 --workers 7`, ~1 h); la espera desde
-la conversación se cortó a mano, pero el proceso siguió corriendo. Al retomar:
-1. Ver si terminó: `resultados/rl/20261016_140855_v2/evaluacion.json` (si existe, terminó;
-   la consola la imprime al final con los criterios v1 y v2). Si no existe y no hay un
-   proceso `realtime.rl.policy` vivo, se cortó: volver a lanzar el mismo comando (da lo
-   mismo: semillas fijas, reproducible, §4.32).
-2. Mostrarle los números al estudiante **antes de commitear**: el criterio v2 (p90 del RL
-   v2 menor que el del peso fijo a 20 y 30 s, p50 a lo sumo 1 m peor que el EKF fijo,
-   GPS bueno igual), por sesión, y la validación. Anotarlos en una §4.35.
-3. Si no cumple: se reporta el RL de §4.31 con el hallazgo de §4.33 y el estudiante lo
-   discute con el asesor. Si cumple: la política v2 queda en `realtime/rl/q_table_v2.npz`.
-4. Después: la integración (la política en `OnlineFusion`, `--rl` en `run_replay.py` y
-   `run_live.py`, la casilla en la ventana, el corte de GPS simulado en el mapa), con los
-   números antes de commitear cada cosa.
+**23/10/2026: la sugerencia del asesor sobre el acelerómetro, medida (§4.37).** En pocos
+segundos ve el cambio de velocidad mejor que la cámara y ayuda a dudar de ella (AUC
+0.82–0.92), pero dudar de la cámara no baja el error; usarlo al revés (no ignorar la
+cámara si el carro de verdad acelera) baja las pérdidas grandes 2–3 puntos, con un techo
+de 5–6 % del p90. Nada reentrenado; el estudiante decide con el asesor si se intenta.
 
-**Sin commitear al 16/10** (el estudiante commitea): `realtime/rl/policy.py` (guarda la
-tabla de cada prueba y el error de cada corte; `--version v2` con la línea base del peso
-fijo y el criterio v2) y este documento (§4.32–4.34 y "Dónde quedamos"). Ya commiteados:
-`env.py` con los terciles de las seis sesiones, `q_table.npz` (v1) y §4.28–4.31. Resultados de las
-corridas, fuera de git: `resultados/rl/20261015_211156/` (v1, primera),
-`20261016_120530/` (v1, repetida con tablas y cortes, y `prueba_visual_151615.png`).
+**16/10/2026, tarde: el RL v2 cumple su criterio (§4.35) y quedó integrado (§4.36).**
+- v2 contra el peso fijo bien elegido: p90 78.0 / 128.4 contra 80.8 / 133.7 m (20 / 30
+  s), mediana a +0.8 / −0.7 m del EKF fijo. Cumple sobre la media de las semillas, como
+  se declaró; por semilla solo una cumple todo, y la ventaja en la cola no es robusta por
+  sesión (bootstrap 67–73 %); la de la mediana sí (95–98 %). La debilidad de §4.33 sigue
+  (pierde > 20 m en el 14 % de los cortes de 30 s; el peso fijo, 27 %).
+- El pipeline usa `realtime/rl/q_table_v2.npz`. `--rl` en `run_replay.py` (con un archivo
+  opcional, para comparar con `q_table.npz`) y en `run_live.py`; `--outage SEGUNDO
+  DURACION` en el replay; en la ventana, la casilla del RL en las dos pestañas y el
+  botón "Cortar el GPS" solo en la de desarrollo.
+  Verificado: los cortes por el pipeline dan el mismo error que la evaluación (0.0000 m
+  en 29 cortes), 0.2 % de descarte con y sin RL, +0.08 ms por frame.
+- **Falta:** probarla con el teléfono real y abrir la ventana en el escritorio (el
+  estudiante decide cuándo); la grabación del túnel como caso real (§4.28); el capítulo
+  de la tesis con §4.30–4.36.
+
+**Sin commitear al 16/10 (tarde)** (el estudiante commitea): `realtime/rl/online.py` y
+`realtime/rl/q_table_v2.npz` (nuevos); `realtime/rl/policy.py` (la tabla guarda sus
+acciones; `POLICY_FILE` es la v2); `run_replay.py`, `run_live.py`, `session.py`,
+`live_window.py`; este documento (§4.35, §4.36, §12 punto 22, "Dónde quedamos" y el
+encabezado). Resultados fuera de git: `resultados/rl/20261016_140855_v2/` (la corrida
+v2), además de las dos de la v1.
 
 **16/10/2026:** el resultado del RL es real (§4.32: reproducible; con los estados
 barajados la captura cae a 3–4 %; bootstrap por sesión +16…+49 % a 20 s y +22…+52 % a
@@ -3875,7 +4134,12 @@ sugerido, en la respuesta del 9/10.
     traslada a una grabación de otra app y otra cámara. Estado, acciones y recompensa
     explícitos (OE3). **Con la vara justa** (§4.33): un peso fijo de la cámara en los
     cortes, bien elegido, empata con el RL en el p90; el RL gana en la mediana (6 m),
-    porque decide cuándo bajar el peso. Resultado de la versión 2 en §4.34.
+    porque decide cuándo bajar el peso. **La versión 2** (§4.34, §4.35; acciones {1, 16,
+    256, ∞}) cumple su criterio contra esa vara: p90 78.0 / 128.4 contra 80.8 / 133.7 del
+    peso fijo (20 / 30 s), mediana a ±1 m del EKF fijo y la mitad de pérdidas grandes que
+    el peso fijo; la ventaja en la cola es chica y no robusta por sesión (bootstrap 67–73
+    %), la de la mediana sí (95–98 %). Integrada al pipeline, en vivo y en la ventana,
+    con un corte de GPS simulado para verla (§4.36).
 
 ---
 

@@ -13,6 +13,10 @@ Usage:
     venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_live 192.168.100.108 \
         --record --scale depth --duration 60
 
+    # the RL's policy weighing the camera when the GPS drops out
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_live 192.168.100.108 \
+        --scale depth --rl
+
 The session ends with Ctrl+C, after --duration seconds, or when no frames
 arrive for 5 s. Each one is saved in its own folder under --out.
 """
@@ -62,6 +66,9 @@ def status_line(st):
                                      else " (sin IMU)")
     line += (" | fusión: esperando" if st["fusion_sigma_m"] is None
              else f" | fusión σ {st['fusion_sigma_m']:.1f} m")
+    k = st.get("rl_k")
+    if k is not None:
+        line += " | RL: ignora la cámara" if np.isinf(k) else f" | RL: k = {k:g}"
     if st.get("recording"):
         line += " | grabando"
     if st.get("udp_silent"):
@@ -214,8 +221,14 @@ def main():
                     help="Fusión solo visual: el GPS solo ubica el arranque")
     ap.add_argument("--no-gyro", action="store_true",
                     help="Girar con la cámara aunque el teléfono mande la IMU")
+    ap.add_argument("--rl", action="store_true",
+                    help="La política del RL decide cuánto creerle a la cámara cuando falta "
+                         "el GPS; el EKF fijo corre al lado, para comparar")
     ap.add_argument("--out", default="resultados/realtime")
     args = ap.parse_args()
+    if args.rl and args.visual_only:
+        ap.error("--rl decide el peso de la cámara cuando falta el GPS; con --visual-only "
+                 "el GPS solo ubica el arranque")
 
     print("=" * 78)
     print("MODO EN VIVO")
@@ -224,7 +237,7 @@ def main():
     session = LiveSession(args.phone_ip, args.video_port, args.gps_port, args.record,
                           mask_bottom=args.mask_bottom, scale=args.scale == "depth",
                           scale_hz=args.scale_hz, duration=args.duration, out=args.out,
-                          visual_only=args.visual_only, gyro=not args.no_gyro)
+                          visual_only=args.visual_only, gyro=not args.no_gyro, rl=args.rl)
     try:
         session.connect()
     except OSError as e:

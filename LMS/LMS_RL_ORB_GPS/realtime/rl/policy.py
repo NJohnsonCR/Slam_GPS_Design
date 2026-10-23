@@ -66,7 +66,8 @@ VERSIONS = {"v1": ((1.0, 4.0, np.inf), "q_table.npz"),               # §4.30
 # The camera's fixed weight in outages, a baseline since v2.
 WEIGHTS = (1.0, 4.0, 16.0, 64.0, 256.0, np.inf)
 CRITERION_V2_P50_M = 1.0            # v2: the median may be at most this much worse than the fixed filter
-POLICY_FILE = os.path.join(_THIS, VERSIONS["v1"][1])
+# The policy the pipeline uses: v2, which met its criterion.
+POLICY_FILE = os.path.join(_THIS, VERSIONS["v2"][1])
 OUT_DIR = os.path.join(_ROOT, "resultados", "rl")
 
 
@@ -75,9 +76,11 @@ OUT_DIR = os.path.join(_ROOT, "resultados", "rl")
 class QTable:
     """The policy: a value per state and action; on a tie, k = 1 (the fixed filter)."""
 
-    def __init__(self):
-        self.q = np.zeros((E.RlState.N_STATES, len(E.ACTIONS)))
+    def __init__(self, actions=None):
+        self.actions = tuple(E.ACTIONS if actions is None else actions)
+        self.q = np.zeros((E.RlState.N_STATES, len(self.actions)))
         self.n = np.zeros(self.q.shape, np.int64)
+        self.path = None                        # the file it was loaded from
 
     def best(self, s):
         return int(np.argmax(self.q[s]))        # the first of the ties: k = 1
@@ -85,8 +88,8 @@ class QTable:
     def controller(self, rng=None, eps=0.0):
         def act(state):
             if eps and rng.random() < eps:
-                return E.ACTIONS[rng.integers(len(E.ACTIONS))]
-            return E.ACTIONS[self.best(state.index())]
+                return self.actions[rng.integers(len(self.actions))]
+            return self.actions[self.best(state.index())]
         return act
 
     def update(self, trans):
@@ -97,17 +100,18 @@ class QTable:
             self.q[s, a] += max(1.0 / self.n[s, a], ALPHA_MIN) * (target - self.q[s, a])
 
     def save(self, path, **meta):
-        np.savez(path, q=self.q, n=self.n, actions=np.array(E.ACTIONS),
+        np.savez(path, q=self.q, n=self.n, actions=np.array(self.actions),
                  levels=json.dumps(E.RlState.LEVELS), meta=json.dumps(meta))
 
     @classmethod
     def load(cls, path):
+        """A saved policy, with the actions it was trained with."""
         d = np.load(path)
-        if json.loads(str(d["levels"])) != {k: list(v) for k, v in E.RlState.LEVELS.items()} \
-                or list(d["actions"]) != list(E.ACTIONS):
-            raise ValueError(f"{path} se entrenó con otros niveles o acciones")
-        t = cls()
+        if json.loads(str(d["levels"])) != {k: list(v) for k, v in E.RlState.LEVELS.items()}:
+            raise ValueError(f"{path} se entrenó con otros niveles del estado")
+        t = cls(tuple(float(k) for k in d["actions"]))
         t.q, t.n = d["q"], d["n"]
+        t.path = path
         return t
 
 

@@ -28,10 +28,21 @@ Usage:
 The fusion (camera, gyroscope and GPS) always runs; --visual-only uses the GPS
 only to start, and --no-gyro turns the heading with the camera.
 
+    # the RL's policy weighing the camera while the GPS is out, and a
+    # simulated outage of 30 s from second 300 of the recording
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay \
+        mobile_data/2026_09_30_14_05_19 ... --rl --outage 300 30
+
+--rl runs the fixed EKF beside the policy's, and the report gives both
+errors at the fix each outage ends with (rl/online.py).
+
 A deterministic replay is cached (cache.py): run again on the same recording,
 options and code, it copies the saved results to --out instead of processing;
 --no-cache reprocesses. The cache keeps the per-frame results, the metrics and
-the plot, in resultados/cache/, which goes into git.
+the plot, in resultados/cache/, which goes into git. It keeps the fixed EKF
+without outages, which is what the RL trains on: with --rl or --outage a
+cached replay reruns only the fusion over its saved frames (seconds), and an
+uncached one is processed whole and not stored.
 
 Console output stays in Spanish: it is evidence for the thesis report.
 """
@@ -445,6 +456,23 @@ def print_fusion(fu):
             for name, v in used))
     if "tiempo_ms_p50" in fu:
         print(f"     Tiempo por frame p50 / p95: {fu['tiempo_ms_p50']:.2f} / {fu['tiempo_ms_p95']:.2f} ms")
+    rl = fu.get("rl")
+    if rl:
+        counts = ", ".join(f"{'ignorar la cámara' if k == 'inf' else 'k = ' + k} {n}"
+                           for k, n in rl["por_accion"].items())
+        print(f"     RL ({rl['politica']}): decidió {rl['decisiones']} veces sin GPS"
+              + (f" ({counts})" if rl["decisiones"] else ""))
+    for c in fu.get("cortes_simulados", []):
+        line = f"     Corte de GPS simulado de {c['duracion_s']:.0f} s desde el segundo {c['desde_s']:.0f}"
+        e = c["error_al_volver_m"]
+        if not c["volvio_el_gps"]:
+            line += ": el GPS no volvió antes del final"
+        elif e["ekf_fijo"] is None:
+            line += ": la fusión todavía no había arrancado"
+        else:
+            line += (f" ({c['fixes_escondidos']} fixes escondidos): al volver el GPS, "
+                     f"EKF fijo a {e['ekf_fijo']:.1f} m" + ("" if e["rl"] is None else f", RL a {e['rl']:.1f} m"))
+        print(line)
 
 
 def print_results(res, strict, est, worker):
@@ -493,6 +521,31 @@ def print_results(res, strict, est, worker):
         print("      el número comparable es el p50 del bucle.)")
 
 
+def fusion_from_cache(entry, args, policy):
+    """
+    --rl or --outage on a cached replay: the fusion again over its saved
+    frames, fed the recording's fixes and IMU samples as the pipeline was
+    (rl/online.py), reported and saved next to the copied results.
+    """
+    from realtime.rl.online import over_frames
+    frame_t, fixes = load_mobile_session(args.session)
+    imu = None if args.no_gyro else load_mobile_imu(args.session)
+    t0 = int(frame_t[0])
+    tic = time.perf_counter()
+    fusion, rows = over_frames(entry.path("frames"), fixes, imu, policy=policy,
+                               outages=[(t0 + int(s * 1e9), length) for s, length in args.outage],
+                               origin_ns=t0, visual_only=args.visual_only)
+    fu = fusion.summary()
+    print(f"\n  Copiados a {args.out}: frames, métricas y trayectoria del EKF fijo sin cortes")
+    print(f"  La fusión otra vez sobre esos {len(rows)} frames ({time.perf_counter() - tic:.1f} s):")
+    print_fusion(fu)
+    path = os.path.join(args.out, f"fusion_deterministic{entry.suffix}.json")
+    with open(path, "w") as f:
+        json.dump(fu, f, indent=2)
+    print(f"\nFusión guardada: {path}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Modo replay del pipeline en tiempo real")
     ap.add_argument("session", help="Directorio de la sesión (p.ej. mobile_data/2025_03_11)")
@@ -529,7 +582,23 @@ def main():
                     help="Girar con la cámara aunque la grabación tenga giroscopio")
     ap.add_argument("--no-cache", action="store_true",
                     help="Procesar aunque la grabación esté en la caché (y no guardarla)")
+    ap.add_argument("--rl", nargs="?", const="", default=None, metavar="POLITICA",
+                    help="La política del RL decide cuánto creerle a la cámara cuando falta "
+                         "el GPS; el EKF fijo corre al lado, para comparar. Sin archivo, la "
+                         "que usa el pipeline")
+    ap.add_argument("--outage", nargs=2, type=float, action="append", default=[],
+                    metavar=("SEGUNDO", "DURACION"),
+                    help="Corte de GPS simulado: la fusión no ve los fixes desde ese segundo "
+                         "de la grabación, durante DURACION segundos (se puede repetir)")
     args = ap.parse_args()
+    if args.rl is not None and args.visual_only:
+        ap.error("--rl decide el peso de la cámara cuando falta el GPS; con --visual-only "
+                 "el GPS solo ubica el arranque")
+    trial = args.rl is not None or bool(args.outage)
+    policy = None
+    if args.rl is not None:
+        from realtime.rl.online import load_policy
+        policy = load_policy(args.rl) if args.rl else load_policy()
 
     print("=" * 78)
     print(f"MODO REPLAY — {'ESTRICTO' if args.strict else 'DETERMINISTA'}")
@@ -549,11 +618,17 @@ def main():
                   f"--no-cache para reprocesar)")
             print(f"  Frames procesados: {res['frames_procesados']}; por frame p50 "
                   f"{res['proc_ms_p50']:.1f} ms en ese equipo")
+            if trial:
+                return fusion_from_cache(entry, args, policy)
             print_fusion(res["fusion"])
             print(f"\n  Copiados a {args.out}: frames, métricas y trayectoria")
             return 0
+        if trial:
+            print("  Con --rl o --outage la caché no guarda la corrida: guarda el EKF fijo sin cortes.")
+            entry = None
 
     frame_t, fixes = load_mobile_session(args.session)
+    recording_t0 = int(frame_t[0])          # where the seconds of --outage count from
     # Frames left out at the start: the encoder warm-up, or everything before
     # --start. The source discards the same ones.
     skip = max(args.skip_start,
@@ -598,7 +673,14 @@ def main():
     # out of the buffers before its frame comes.
     gps_buf = GpsBuffer() if args.strict else GpsBuffer(maxlen=None)
     imu_buf = None if not imu else (ImuBuffer() if args.strict else ImuBuffer(maxlen=None))
-    fusion = OnlineFusion(gps_buf, imu_buf, visual_only=args.visual_only)
+    if trial:
+        from realtime.rl.online import RlOnlineFusion
+        fusion = RlOnlineFusion(gps_buf, imu_buf, policy=policy, origin_ns=recording_t0,
+                                visual_only=args.visual_only)
+        for second, length_s in args.outage:
+            fusion.outage.cut(recording_t0 + int(second * 1e9), length_s)
+    else:
+        fusion = OnlineFusion(gps_buf, imu_buf, visual_only=args.visual_only)
     fe = VisualFrontEnd(K, mask_bottom=args.mask_bottom)
     est, scaler = (build_scale_worker(K, args.scale_hz, threaded=args.strict)
                    if args.scale == "depth" else (None, None))

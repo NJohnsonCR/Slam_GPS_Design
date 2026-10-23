@@ -11,8 +11,11 @@ objects, in this order:
     save(res)   the session folder: frames, fixes, IMU, clock queries, metrics and figure
     close()     release the network
 
-Every session runs the fusion (fusion.OnlineFusion): camera, gyroscope when
-there are IMU samples, and GPS; visual_only uses the GPS only to start.
+Every session runs the fusion (fusion.OnlineFusion, through rl/online.py):
+camera, gyroscope when there are IMU samples, and GPS; visual_only uses the
+GPS only to start. With rl the RL's policy weighs the camera while the GPS is
+out, beside the fixed EKF; cut_gps() hides the GPS from the fusion for a
+while, to see what each does without it.
 
 stop(), status() and latest_frame can be used from any other thread: the
 window runs the session on a worker thread and polls them.
@@ -39,7 +42,7 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from realtime.fusion import OnlineFusion
+from realtime.rl.online import RlOnlineFusion, load_policy
 from realtime.sources import (HELLO_S23, GpsBuffer, ImuBuffer, LiveFrameSource, LiveGpsSource,
                               ReplayFeed, ReplayFrameSource, load_mobile_imu,
                               load_mobile_session, parse_hello, read_hello)
@@ -88,12 +91,14 @@ class PipelineSession:
     kind = ""               # prefix of the session folder
 
     def __init__(self, mask_bottom=0.25, scale=True, scale_hz=3.0, duration=None,
-                 out="resultados/realtime", visual_only=False, gyro=True):
+                 out="resultados/realtime", visual_only=False, gyro=True, rl=False):
         self.mask_bottom = mask_bottom
         self.use_scale = scale
         self.scale_hz = scale_hz
         self.visual_only = visual_only
         self.use_gyro = gyro
+        self.use_rl = rl
+        self.origin_ns = None           # where the seconds of the simulated outages count from
         self.duration = duration
         self.out = out
         self.state = "sin iniciar"
@@ -119,8 +124,15 @@ class PipelineSession:
         self.state = "precalentando"
         warm_up(K, width, height, self.est)
         self.imu_buffer = imu_buffer
-        self.fusion = OnlineFusion(gps_buffer, imu_buffer if self.use_gyro else None,
-                                   visual_only=self.visual_only)
+        policy = None
+        if self.use_rl:
+            try:
+                policy = load_policy()
+            except (OSError, ValueError) as e:
+                raise SessionError(f"No se pudo cargar la política del RL ({e}).")
+        self.fusion = RlOnlineFusion(gps_buffer, imu_buffer if self.use_gyro else None,
+                                     policy=policy, origin_ns=self.origin_ns,
+                                     visual_only=self.visual_only)
         self.pipe = RealtimePipeline(VisualFrontEnd(K, mask_bottom=self.mask_bottom),
                                      gps_buffer, strict=True, on_result=self._on_result,
                                      scale_worker=self.scaler, fusion=self.fusion)
@@ -134,6 +146,11 @@ class PipelineSession:
     def stop(self):
         """End the run from any thread, also before it starts."""
         self.cancelled.set()
+
+    def cut_gps(self, length_s):
+        """Hide the GPS from the fusion for length_s seconds from the next frame; any thread."""
+        if self.fusion is not None:
+            self.fusion.cut(length_s)
 
     def _run_pipeline(self, t0_data_ns=None):
         if self.cancelled.is_set():
@@ -191,23 +208,36 @@ class PipelineSession:
             "gyro": self.fusion.last_from_imu,
             # Position uncertainty of the fusion, None until it starts.
             "fusion_sigma_m": None if self.fusion.last is None else self.fusion.last[-1],
+            # The policy's k while the GPS is out, None while it is there or without the RL.
+            "rl_k": self.fusion.decision,
+            "outage_left_s": self.fusion.outage_left_s(),
+            # The errors at the fix the last simulated outage ended with: fixed EKF, RL.
+            "outage_back": self.fusion.returns[-1][4:] if self.fusion.returns else None,
         })
         return st
 
     def track_since(self, n_fixes, n_frames):
         """
-        For the window's map: the GPS fixes fed to the fusion after the first
-        n_fixes, as (east, north) metres from the first one, and the fused
+        For the window's map: the GPS fixes the fusion has seen after the first
+        n_fixes, as (east, north, hidden) with the metres from the first one
+        and whether a simulated outage kept it from the fusion; the fused
         (east, north) of each processed frame after the first n_frames, None
-        before the filter starts. The worker only appends to both lists, so
-        reading them from the window's thread is safe.
+        before the filter starts; with the RL, the fixed EKF's of the same
+        frames; and for each frame, whether it was inside a simulated outage.
+        The worker only appends to these lists, so reading them from the
+        window's thread is safe.
         """
         if self.fusion is None:
-            return [], []
-        gps = [(float(p[0]), float(p[1])) for _, p, _ in self.fusion.fixes[n_fixes:]]
+            return [], [], []
+        gps = [(float(p[0]), float(p[1]), hidden)
+               for _, p, _, hidden in self.fusion.outage.seen[n_fixes:]]
         fused = [None if f is None else (float(f[0]), float(f[1]))
                  for f in self.recorder.track["fused"][n_frames:]]
-        return gps, fused
+        # The fusion's lists can be a frame ahead of the recorder's.
+        end = n_frames + len(fused)
+        fixed = [None if f is None else (float(f[0]), float(f[1]))
+                 for f in self.fusion.fixed_track[n_frames:end]]
+        return gps, fused, fixed, self.fusion.in_outage[n_frames:end]
 
     # ------------------------------------------------------------- results
 
@@ -401,6 +431,7 @@ class ReplaySession(PipelineSession):
         if not os.path.exists(video):
             raise OSError(f"no hay movie.mp4 en {self.recording}")
         frame_t, fixes = load_mobile_session(self.recording)
+        self.origin_ns = int(frame_t[0])
         skip = max(SKIP_START, int(np.searchsorted(
             frame_t, frame_t[SKIP_START] + int(self.start_s * 1e9))))
         self.frame_t, self.skip = frame_t[skip:], skip
