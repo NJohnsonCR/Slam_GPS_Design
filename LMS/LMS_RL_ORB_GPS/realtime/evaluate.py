@@ -22,6 +22,7 @@ import copy
 import json
 import os
 import sys
+import time
 
 import cv2
 import numpy as np
@@ -36,7 +37,7 @@ for _p in (_ROOT, _LMS_RL):
         sys.path.insert(0, _p)
 
 from realtime.fusion import (GpsCameraFusion, PlanarEKF, correction_counts, feed_frame,
-                             gyro_inputs, run_fusion, session_inputs)
+                             gyro_inputs, run_fusion, session_inputs, wrap)
 from realtime.sources import utm_zone
 from realtime.run_replay import (COLOR_ALIGNED, COLOR_CAMERA, COLOR_FUSED, COLOR_GPS,
                                  camera_positions, umeyama)
@@ -484,6 +485,154 @@ def _outage(fus, k, j, t_from, length, t, inputs, gyro_yaw, fixes, tg, xy, vd):
             "recorrido_m": float(np.sum(np.linalg.norm(np.diff(xy[i0:i_end + 1], axis=0), axis=1)))}
 
 
+# ------------------------------------------------------------ four modes
+
+# What each sensor adds: a session through the filter in four configurations
+# (key, name, visual only, gyroscope). The visual ones take the GPS only to
+# start, where and which way; all start at the same frame.
+MODES = (("camara", "Cámara sola", True, False),
+         ("camara_giroscopio", "Cámara + giroscopio", True, True),
+         ("camara_gps", "Cámara + GPS", False, False),
+         ("todo", "Cámara + giroscopio + GPS", False, True))
+RPE_DELTAS_S = (1, 10, 30)
+RPE_DISTANCE_M = 100       # also per distance, as KITTI reports it
+RPE_TOL_S = 0.3            # how far from delta a pair of fixes may be
+# The GPS course is a heading reference only when the car is clearly moving:
+# at 1 Hz its noise turns the course of a slow chord.
+RPE_HEADING_SPEED = 5.0    # m/s
+JUMP_M = 2.0               # a step between frames over this (60 m/s at 30 fps) is a jump
+MODE_OUTAGE_S = 30
+
+
+def before_fixes(t, est, tg):
+    """Position and heading just before each fix, so a mode with GPS has not used it yet."""
+    k = np.searchsorted(t, tg) - 1
+    ok = (k >= 0) & np.isfinite(est[np.maximum(k, 0), 0])
+    pos = np.where(ok[:, None], est[np.maximum(k, 0), :2], np.nan)
+    return pos, np.where(ok, est[np.maximum(k, 0), 2], np.nan)
+
+
+def ate(t, est, tg, xy):
+    """
+    Absolute error at each fix: as the mode gives it (anchored where it
+    started) and after a rigid alignment (rotation and translation, no
+    scale), the usual ATE.
+    """
+    pos, _ = before_fixes(t, est, tg)
+    ok = np.isfinite(pos[:, 0])
+    err = np.linalg.norm(pos[ok] - xy[ok], axis=1)
+    aligned, _ = umeyama(pos[ok], xy[ok], with_scale=False)
+    err_al = np.linalg.norm(aligned - xy[ok], axis=1)
+    travelled = float(np.sum(np.linalg.norm(np.diff(xy[ok], axis=0), axis=1)))
+    return {"fixes": int(ok.sum()), "recorrido_m": travelled,
+            "rmse_m": float(np.sqrt(np.mean(err ** 2))), "p50_m": float(np.median(err)),
+            "p95_m": float(np.percentile(err, 95)), "max_m": float(err.max()),
+            "final_pct_recorrido": float(100 * err[-1] / max(travelled, 1e-9)),
+            "alineado_rmse_m": float(np.sqrt(np.mean(err_al ** 2))), "_err": err, "_t": tg[ok]}
+
+
+def rpe(t, est, tg, xy, vd, delta_s):
+    """
+    Relative error over delta_s, between pairs of fixes that far apart: the
+    displacement the mode gives against the GPS's and, with the car above
+    RPE_HEADING_SPEED at both ends, its heading change against that of the
+    GPS course (the chord from the fix before to the one after).
+    """
+    pos, th = before_fixes(t, est, tg)
+    j = np.searchsorted(tg, tg + int(delta_s * 1e9))
+    j = np.minimum(j, len(tg) - 1)
+    near = np.abs((tg[j] - tg) / 1e9 - delta_s) <= RPE_TOL_S
+    i = np.flatnonzero(near & np.isfinite(pos[:, 0]) & np.isfinite(pos[j, 0]))
+    j = j[i]
+    d_est, d_ref = pos[j] - pos[i], xy[j] - xy[i]
+    e = np.linalg.norm(d_est - d_ref, axis=1)
+    out = {"pares": int(len(i)), "traslacion_rmse_m": float(np.sqrt(np.mean(e ** 2))),
+           "traslacion_p95_m": float(np.percentile(e, 95)),
+           "traslacion_pct": float(100 * np.sum(e) / max(np.sum(np.linalg.norm(d_ref, axis=1)), 1e-9)),
+           "_trans": e}
+    # Course at each fix from its neighbours; the ends have none.
+    course = np.full(len(tg), np.nan)
+    chord = xy[2:] - xy[:-2]
+    course[1:-1] = np.arctan2(chord[:, 1], chord[:, 0])
+    fast = (vd[i] >= RPE_HEADING_SPEED) & (vd[j] >= RPE_HEADING_SPEED)
+    ok = fast & np.isfinite(course[i]) & np.isfinite(course[j]) & np.isfinite(th[i]) & np.isfinite(th[j])
+    rot = np.degrees(np.abs(wrap((th[j] - th[i]) - (course[j] - course[i]))))[ok]
+    out.update({"pares_rumbo": int(ok.sum()),
+                "rotacion_rmse_deg": float(np.sqrt(np.mean(rot ** 2))) if ok.any() else None,
+                "_rot": rot})
+    return out
+
+
+def rpe_distance(t, est, tg, xy, metres=RPE_DISTANCE_M):
+    """
+    Relative error per distance: from each fix to the first one at least
+    `metres` further along the GPS's path, the displacement the mode gives
+    against the GPS's, as a share of that path.
+    """
+    pos, _ = before_fixes(t, est, tg)
+    path = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))])
+    j = np.searchsorted(path, path + metres)
+    keep = (j < len(tg)) & np.isfinite(pos[:, 0])
+    i = np.flatnonzero(keep & np.isfinite(pos[np.minimum(j, len(tg) - 1), 0]))
+    j = j[i]
+    e = np.linalg.norm((pos[j] - pos[i]) - (xy[j] - xy[i]), axis=1)
+    length = path[j] - path[i]
+    return {"pares": int(len(i)), "traslacion_rmse_m": float(np.sqrt(np.mean(e ** 2))),
+            "traslacion_pct": float(100 * np.sum(e) / max(np.sum(length), 1e-9)), "_trans": e,
+            "_len": length}
+
+
+def stability(t, est, err_t, err):
+    """
+    Whether the track holds together: jumps between consecutive frames that no
+    car could make (an update that moves the estimate at once), and how fast
+    the error grows with time (m/min, least squares; about 0 when bounded).
+    """
+    ready = np.isfinite(est[:, 0])
+    steps = np.linalg.norm(np.diff(est[ready, :2], axis=0), axis=1)
+    minutes = (err_t - err_t[0]) / 60e9
+    slope = float(np.polyfit(minutes, err, 1)[0]) if len(err) > 2 else None
+    return {"saltos": int(np.sum(steps > JUMP_M)), "salto_max_m": float(steps.max()),
+            "crecimiento_m_por_min": slope}
+
+
+def four_modes(t, inputs, fixes, gyro_yaw):
+    """Every metric of the four modes on one session; None if the filter never starts."""
+    tg = np.array([f[0] for f in fixes], np.int64)
+    xy = np.array([f[1] for f in fixes])
+    vd = np.array([f[2] for f in fixes])
+    out = {}
+    start = None
+    for key, name, visual, gyro in MODES:
+        g = gyro_yaw if gyro else None
+        fus, est, _ = run_fusion(t, inputs, fixes, gyro_yaw=g, visual_only=visual,
+                                 speed_state=True, bias=False)
+        ready = np.flatnonzero(np.isfinite(est[:, 0]))
+        if not len(ready):
+            return None
+        start = ready[0] if start is None else start
+        if ready[0] != start:
+            raise RuntimeError(f"{name} arranca en otro frame ({ready[0]} contra {start})")
+        after = tg > t[start]
+        a = ate(t, est, tg[after], xy[after])
+        r = {"nombre": name, "ate": a,
+             "rpe": {**{f"{d}s": rpe(t, est, tg[after], xy[after], vd[after], d) for d in RPE_DELTAS_S},
+                     f"{RPE_DISTANCE_M}m": rpe_distance(t, est, tg[after], xy[after])},
+             "_est": est,
+             "estabilidad": stability(t, est, tg[after], a["_err"])}
+        if not visual:
+            c = correction_counts(fus.log)["posicion"]
+            r["estabilidad"]["posicion_rechazada_pct"] = 100 * c["rechazadas"] / max(c["n"], 1)
+            r["estabilidad"]["posicion_forzada_pct"] = 100 * c["forzadas"] / max(c["n"], 1)
+            found = sweep_outages(t, inputs, fixes, g, lengths=(MODE_OUTAGE_S,), speed_state=True,
+                                  bias=False)
+            r["cortes"] = summarize_sweep(found).get(f"{MODE_OUTAGE_S}s")
+        out[key] = r
+    out["_inicio_s"] = float((t[start] - t[0]) / 1e9)
+    out["_t"], out["_gps"], out["_tg"] = t, xy, tg
+    return out
+
+
 def summarize_sweep(found):
     """
     Per length: p50 and p90 of both errors, and how often the filter wins. A
@@ -759,10 +908,237 @@ def plot_fusion(rf, png, title):
     plt.close(fig)
 
 
+def cached_runs():
+    """The full depth replays in the cache made by the current code: (session, entry folder)."""
+    from realtime import cache
+    from realtime.rl.env import load_session
+    current = cache.code_hash()
+    for rec, key, folder, m in cache.entries():
+        o = m["opciones"]
+        if (m["hash_codigo"] == current and o["scale"] == "depth" and not o["frames"]
+                and not o["start"] and not o["visual_only"] and not o["no_gyro"]
+                and os.path.exists(os.path.join(folder, cache.LOCATION))):
+            yield load_session(folder), folder
+
+
+def run_cache(out_dir):
+    """The four modes on every cached session: the OE4 table, as JSON and CSV."""
+    results = {}
+    for s, folder in cached_runs():
+        tic = time.perf_counter()
+        r = four_modes(s.t, s.inputs, s.fixes, s.gyro_yaw)
+        if r is None:
+            print(f"  {s.name}: la fusión no arrancó, se omite")
+            continue
+        with open(os.path.join(folder, "cache.json")) as f:
+            meta = json.load(f)
+        replay = json.load(open(next(os.path.join(folder, n) for n in os.listdir(folder)
+                                     if n.startswith("replay_deterministic"))))
+        r["_rendimiento"] = {"equipo": meta["equipo"], "torch": meta.get("torch"),
+                             "frames": replay["frames_procesados"],
+                             "proc_ms_p50": replay["proc_ms_p50"], "proc_ms_p95": replay["proc_ms_p95"],
+                             "profundidad_ms_p50": replay.get("depth_ms_p50"),
+                             "fusion_ms_p50": replay["fusion"].get("tiempo_ms_p50")}
+        results[s.name] = r
+        print(f"  {s.name}: {(time.perf_counter() - tic):.0f} s", flush=True)
+    print_modes(results)
+    os.makedirs(out_dir, exist_ok=True)
+    clean = lambda d: {k: clean(v) if isinstance(v, dict) else v for k, v in d.items()
+                       if not k.startswith("_") or k in ("_inicio_s", "_rendimiento")}
+    with open(os.path.join(out_dir, "modos.json"), "w") as f:
+        json.dump({n: clean(r) for n, r in results.items()}, f, indent=1, default=float)
+    write_modes_csv(results, os.path.join(out_dir, "modos.csv"))
+    for n, r in results.items():
+        plot_mode_map(n, r, os.path.join(out_dir, f"mapa_{n}.png"))
+    plot_error_time(results, os.path.join(out_dir, "error_contra_tiempo.png"))
+    print(f"\n  Resultados: {out_dir}/modos.json y modos.csv; figuras mapa_<sesión>.png y "
+          f"error_contra_tiempo.png")
+    return results
+
+
+def pooled(results, key, part):
+    """One mode's per-fix or per-pair errors of every session together."""
+    if part == "ate":
+        return np.concatenate([r[key]["ate"]["_err"] for r in results.values()])
+    d, kind = part
+    return np.concatenate([r[key]["rpe"][d][kind] for r in results.values()])
+
+
+def print_modes(results):
+    names = list(results)
+    print("\n" + "=" * 100)
+    print("LOS CUATRO MODOS (referencia: el GPS del teléfono, no ground truth; el modo, justo antes de cada fix)")
+    print("=" * 100)
+    for key, name, visual, _ in MODES:
+        print(f"\n{name}{' (el GPS solo para arrancar)' if visual else ''}")
+        print(f"  {'sesión':22s} {'ATE rmse':>9s} {'alineado':>9s} {'p95':>7s} {'final %':>8s} | "
+              + " ".join(f"{'RPE ' + d:>9s}" for d in (f'{x}s' for x in RPE_DELTAS_S))
+              + f" {'rumbo 10s':>10s} {f'{RPE_DISTANCE_M} m %':>8s} | {'saltos':>6s} {'m/min':>6s}"
+              + ("" if visual else f" | {'corte 30 s p50/p90':>19s}"))
+        for n in names:
+            r = results[n][key]
+            a, st = r["ate"], r["estabilidad"]
+            rot = r["rpe"]["10s"]["rotacion_rmse_deg"]
+            line = (f"  {n[-19:]:22s} {a['rmse_m']:9.1f} {a['alineado_rmse_m']:9.1f} {a['p95_m']:7.1f} "
+                    f"{a['final_pct_recorrido']:8.1f} | "
+                    + " ".join(f"{r['rpe'][f'{d}s']['traslacion_rmse_m']:9.2f}" for d in RPE_DELTAS_S)
+                    + f" {('%.1f°' % rot) if rot is not None else '-':>10s}"
+                    f" {r['rpe'][f'{RPE_DISTANCE_M}m']['traslacion_pct']:8.1f} | {st['saltos']:6d} "
+                    f"{st['crecimiento_m_por_min']:6.1f}")
+            if not visual and r.get("cortes"):
+                line += f" | {r['cortes']['p50_m']:8.1f} / {r['cortes']['p90_m']:6.1f}"
+            print(line)
+        e = pooled(results, key, "ate")
+        rp = [pooled(results, key, (f"{d}s", "_trans")) for d in RPE_DELTAS_S]
+        rr = pooled(results, key, ("10s", "_rot"))
+        dist = f"{RPE_DISTANCE_M}m"
+        pct = 100 * pooled(results, key, (dist, "_trans")).sum() / pooled(results, key, (dist, "_len")).sum()
+        print(f"  {'las 7 juntas':22s} {np.sqrt(np.mean(e ** 2)):9.1f} {'':9s} {np.percentile(e, 95):7.1f} "
+              f"{'':8s} | " + " ".join(f"{np.sqrt(np.mean(x ** 2)):9.2f}" for x in rp)
+              + f" {('%.1f°' % np.sqrt(np.mean(rr ** 2))) if len(rr) else '-':>10s} {pct:8.1f}")
+    print("\nRendimiento del pipeline por sesión (replay determinista; el modelo de profundidad en línea):")
+    for n in names:
+        p = results[n]["_rendimiento"]
+        print(f"  {n:22s} {p['equipo'][:22]:22s} procesamiento por frame p50 / p95 {p['proc_ms_p50']:5.1f} / "
+              f"{p['proc_ms_p95']:5.1f} ms; profundidad p50 {p['profundidad_ms_p50']:5.0f} ms; "
+              f"fusión p50 {p['fusion_ms_p50']:.2f} ms")
+
+
+# Each mode's colour and dash, the project's colours plus one: the dash keeps
+# them apart where colour does not (the aqua is under 3:1 on white).
+COLOR_CAMERA_GPS = "#4a3aa7"
+MODE_STYLE = {"camara": (COLOR_CAMERA, (0, (6, 3))),
+              "camara_giroscopio": (COLOR_ALIGNED, (0, (2, 2))),
+              "camara_gps": (COLOR_CAMERA_GPS, (0, (8, 2, 2, 2))),
+              "todo": (COLOR_FUSED, "-")}
+DETAIL_M = 150             # half-width of the map's detail panel
+
+
+def plot_mode_map(name, res, png):
+    """
+    One session: the four modes and the GPS on the map, and a detail around
+    the fix where the camera + GPS mode is furthest from the GPS, where the
+    two GPS modes can be told apart.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    gps = res["_gps"]
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6.8))
+    for ax, keys in ((axes[0], [m[0] for m in MODES]), (axes[1], ["camara_gps", "todo"])):
+        ax.plot(gps[:, 0], gps[:, 1], "-", color=COLOR_GPS, lw=2.4, label="GPS del teléfono (referencia)")
+        for key in keys:
+            color, dash = MODE_STYLE[key]
+            est = res[key]["_est"]
+            ax.plot(est[:, 0], est[:, 1], color=color, ls=dash, lw=1.6, label=res[key]["nombre"])
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.grid(color="#e4e3df", lw=0.6)
+        ax.set_xlabel("este (m)")
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    k0 = np.flatnonzero(np.isfinite(res["todo"]["_est"][:, 0]))[0]
+    axes[0].plot(*res["todo"]["_est"][k0, :2], "o", color="#0b0b0b", ms=8, label="arranque")
+    axes[0].set_ylabel("norte (m)")
+    axes[0].set_title("Los cuatro modos desde el mismo arranque", fontsize=11, loc="left")
+    axes[0].legend(fontsize=8.5, loc="best", frameon=False)
+
+    a = res["camara_gps"]["ate"]
+    t_worst = a["_t"][int(np.argmax(a["_err"]))]
+    at = gps[int(np.argmin(np.abs(res["_tg"] - t_worst)))]
+    ax = axes[1]
+    near = np.all(np.abs(gps - at) <= DETAIL_M, axis=1)
+    ax.plot(gps[near, 0], gps[near, 1], "o", color=COLOR_GPS, ms=4, label="fixes del GPS")
+    ax.set_xlim(at[0] - DETAIL_M, at[0] + DETAIL_M)
+    ax.set_ylim(at[1] - DETAIL_M, at[1] + DETAIL_M)
+    ax.set_title(f"Detalle de {2 * DETAIL_M} m: donde Cámara + GPS más se separa del GPS "
+                 f"({a['max_m']:.0f} m)", fontsize=11, loc="left")
+    ax.legend(fontsize=8.5, loc="best", frameon=False)
+    fig.suptitle(f"{name}: los cuatro modos (referencia: el GPS del teléfono, no ground truth)",
+                 fontsize=12, x=0.01, ha="left")
+    fig.tight_layout()
+    fig.savefig(png, dpi=130)
+    plt.close(fig)
+
+
+def plot_error_time(results, png):
+    """The error against the GPS over time, per session and mode (10 s rolling median, log scale)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    names = list(results)
+    cols = 4
+    rows = (len(names) + 1 + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(16, 4.1 * rows), sharey=True)
+    axes = axes.ravel()
+    for ax, n in zip(axes, names):
+        res = results[n]
+        t_start = res["_t"][0] + int(res["_inicio_s"] * 1e9)
+        for key, label, _, _ in MODES:
+            a = res[key]["ate"]
+            minutes = (a["_t"] - t_start) / 60e9
+            err = pd.Series(a["_err"]).rolling(10, center=True, min_periods=1).median()
+            color, dash = MODE_STYLE[key]
+            ax.plot(minutes, err, color=color, ls=dash, lw=1.6, label=label)
+        ax.set_yscale("log")
+        ax.set_ylim(0.3, 1e4)
+        ax.set_title(n, fontsize=10, loc="left")
+        ax.grid(color="#e4e3df", lw=0.6, which="major")
+        ax.set_xlabel("minutos desde el arranque")
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    for ax in axes[::cols]:
+        ax.set_ylabel("error contra el GPS (m)")
+    legend = axes[len(names)]
+    legend.axis("off")
+    handles, labels = axes[0].get_legend_handles_labels()
+    legend.legend(handles, labels, loc="center left", fontsize=10, frameon=False,
+                  title="Modo", title_fontsize=10, alignment="left")
+    legend.text(0.0, 0.08, "Mediana móvil de 10 s; escala logarítmica.\nEl modo, justo antes de cada fix.",
+                fontsize=8.5, color="#52514e", transform=legend.transAxes)
+    for ax in axes[len(names) + 1:]:
+        ax.axis("off")
+    fig.suptitle("El error contra el GPS del teléfono a lo largo de cada sesión", fontsize=12,
+                 x=0.01, ha="left")
+    fig.tight_layout()
+    fig.savefig(png, dpi=130)
+    plt.close(fig)
+
+
+def write_modes_csv(results, path):
+    rows = []
+    for n, res in results.items():
+        for key, name, visual, _ in MODES:
+            r = res[key]
+            a, st = r["ate"], r["estabilidad"]
+            row = {"sesion": n, "modo": name, "ate_rmse_m": a["rmse_m"], "ate_alineado_rmse_m": a["alineado_rmse_m"],
+                   "ate_p50_m": a["p50_m"], "ate_p95_m": a["p95_m"], "ate_max_m": a["max_m"],
+                   "error_final_pct_recorrido": a["final_pct_recorrido"], "recorrido_m": a["recorrido_m"]}
+            for d in RPE_DELTAS_S:
+                row[f"rpe_{d}s_rmse_m"] = r["rpe"][f"{d}s"]["traslacion_rmse_m"]
+                row[f"rpe_{d}s_pct"] = r["rpe"][f"{d}s"]["traslacion_pct"]
+            row["rpe_rumbo_10s_rmse_deg"] = r["rpe"]["10s"]["rotacion_rmse_deg"]
+            row[f"rpe_{RPE_DISTANCE_M}m_rmse_m"] = r["rpe"][f"{RPE_DISTANCE_M}m"]["traslacion_rmse_m"]
+            row[f"rpe_{RPE_DISTANCE_M}m_pct"] = r["rpe"][f"{RPE_DISTANCE_M}m"]["traslacion_pct"]
+            row.update({"saltos": st["saltos"], "salto_max_m": st["salto_max_m"],
+                        "crecimiento_m_por_min": st["crecimiento_m_por_min"],
+                        "posicion_rechazada_pct": st.get("posicion_rechazada_pct"),
+                        "posicion_forzada_pct": st.get("posicion_forzada_pct")})
+            c = r.get("cortes") or {}
+            row.update({"corte_30s_p50_m": c.get("p50_m"), "corte_30s_p90_m": c.get("p90_m")})
+            rows.append(row)
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Evaluación de una sesión contra los sensores del teléfono")
-    ap.add_argument("frames", help="frames.csv de run_live.py o frames_*.csv de run_replay.py")
-    ap.add_argument("--recording", required=True,
+    ap.add_argument("frames", nargs="?",
+                    help="frames.csv de run_live.py o frames_*.csv de run_replay.py")
+    ap.add_argument("--cache", action="store_true",
+                    help="Los cuatro modos (cámara sola, cámara + giroscopio, cámara + GPS, todo) "
+                         "en todas las sesiones de la caché: ATE, RPE, estabilidad y rendimiento")
+    ap.add_argument("--recording",
                     help="Carpeta de la grabación del teléfono (location.csv, gyro_accel.csv) "
                          "o de una sesión en vivo (gps.csv; sin giroscopio no evalúa la rotación)")
     ap.add_argument("--out", default=None, help="Por defecto, la carpeta del archivo de frames")
@@ -776,6 +1152,11 @@ def main():
                     help="Comparar las variantes del filtro con un corte de GPS cada 10 s, "
                          "de 10, 20, 30, 60 y 120 s, en toda la grabación")
     args = ap.parse_args()
+    if args.cache:
+        run_cache(args.out or os.path.join(_ROOT, "resultados", "oe4", time.strftime("%Y%m%d_%H%M%S")))
+        return 0
+    if not args.frames or not args.recording:
+        ap.error("hace falta el archivo de frames y --recording (o --cache)")
 
     r = evaluate(args.frames, args.recording)
     print_report(r, args.frames, args.recording)

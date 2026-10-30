@@ -3267,6 +3267,92 @@ velocidad (−2 a −3 puntos de pérdidas grandes). El techo de esa idea es 5�
 el error grande viene de la escala, que el acelerómetro no ve. Medido en dos sesiones
 del mismo carro y día; las de campo necesitan la laptop.
 
+
+### 4.38 OE4: los cuatro modos en las siete sesiones (23/10/2026)
+
+**Cómo se corre:** `python -m LMS.LMS_RL_ORB_GPS.realtime.evaluate --cache` (30 s; sobre
+la caché, sin video: las 7 sesiones, también las 4 de campo). Escribe `modos.json` y
+`modos.csv` en `resultados/oe4/<fecha>/` (fuera de git; la corrida de esta sección,
+`20261023_115221`), con las figuras (abajo).
+
+**Los modos** (el mismo filtro, `run_fusion`, el mismo frame de arranque en los cuatro):
+cámara sola y cámara + giroscopio (el GPS solo ubica el arranque: dónde y hacia dónde;
+la cámara sola es la línea base "solo SLAM visual" del OE4, con la escala del modelo de
+profundidad), cámara + GPS (el rumbo lo gira la cámara) y todo.
+
+**Definiciones** (referencia: el GPS del teléfono, **no ground truth**; el modo se toma
+justo antes de cada fix, así que los que usan el GPS todavía no vieron ese fix: para ellos
+es la predicción a ~1 s):
+- **ATE:** error a cada fix desde el arranque, RMSE; tal cual (anclado donde arrancó) y
+  tras una alineación rígida (rotación y traslación, sin escala). Además, el error final
+  como porcentaje de lo recorrido.
+- **RPE:** entre pares de fixes separados Δ = 1, 10 y 30 s (± 0.3 s), el desplazamiento
+  del modo contra el del GPS (RMSE, m); y a 10 s, el cambio de rumbo contra el del curso
+  del GPS (la cuerda del fix anterior al siguiente), solo con el carro a ≥ 5 m/s en los dos
+  extremos (por debajo el curso del GPS es ruido). Como dato extra, el **RPE por
+  distancia** (como KITTI): de cada fix al primero 100 m más adelante en el camino del GPS,
+  el error del desplazamiento como porcentaje de esos 100 m.
+- **Estabilidad** (con lo que ya se mide): **saltos** del trazo entre dos frames de más de
+  2 m (60 m/s: una actualización que mueve la estimación de golpe, ningún carro lo hace);
+  **crecimiento del error** con el tiempo (pendiente de mínimos cuadrados, m/min; ~0 si
+  queda acotado); y en los modos con GPS, las correcciones de posición rechazadas o
+  forzadas.
+- **Cortes de GPS de 30 s** (los modos con GPS): uno cada 10 s en toda la sesión, error al
+  volver el GPS (el barrido de siempre).
+- **Rendimiento:** el del replay determinista guardado en la caché (por equipo) y el de
+  la fusión dentro del pipeline.
+
+**Resultados** (las 7 sesiones juntas; entre paréntesis, el rango por sesión):
+
+| | Cámara sola | Cámara + giroscopio | Cámara + GPS | Todo |
+|---|---|---|---|---|
+| ATE RMSE (m) | 2087 (415–3762) | 613 (104–1076) | 2.7 (1.9–3.8) | **2.2 (1.6–4.0)** |
+| ATE alineado (m) | 118–1764 | 86–501 | 1.8–3.6 | 1.6–3.7 |
+| Error final (% de lo recorrido) | 33–97 | 5–39 | 0.0–0.5 | 0.0–0.4 |
+| RPE 1 / 10 / 30 s (m) | 11.3 / 94 / 246 | 8.1 / 47 / 115 | 0.93 / 3.2 / 3.8 | **0.66 / 2.6 / 3.1** |
+| RPE de rumbo a 10 s (°) | 16.8 | 3.5 | 8.9 | 3.6 |
+| RPE por 100 m (% del camino) | 104 (80–133) | 41 (27–63) | 2.8 (2.0–4.9) | **2.4 (1.8–5.1)** |
+| Saltos > 2 m por sesión | 60–172 | 60–173 | 0–25 | **0–1** |
+| Crecimiento del error (m/min) | 84–592 | 5–206 | ~0 | ~0 |
+| Correcciones de posición rechazadas / forzadas | — | — | ≤ 0.13 % / 0 | 0 / 0 |
+| Corte de 30 s, p50 / p90 (m) | — | — | 34–134 / 84–354 | 16–101 / 55–273 |
+
+- **Lo que aporta cada sensor:** el GPS acota el error (de cientos o miles de metros a
+  2–4 m, y el crecimiento a ~0); el giroscopio corrige el rumbo (sin GPS, el error final
+  baja de 33–97 % a 5–39 % de lo recorrido y el RPE de rumbo de 16.8° a 3.5°; con GPS, de
+  8.9° a 3.6°, y el p50 de los cortes de 30 s baja 20–54 % según la sesión) y quita los
+  saltos con GPS. La
+  cámara da la velocidad entre fixes y el arranque del rumbo.
+- **Los saltos de los modos visuales** son los de §4.21 punto 9: el filtro sin GPS acepta
+  una velocidad o un alto de la cámara con mucha incertidumbre y mueve el trazo de golpe;
+  el giroscopio no los cambia (es la velocidad, no el rumbo). Es una limitación de la línea
+  base, declarada; no se corrige (tocaría `fusion.py`).
+- **El RPE de rumbo de "todo" (1.4–6.4°) está en el piso del curso del GPS** como
+  referencia; con el giroscopio el rumbo real es mejor que eso (1.2–1.7°/min de deriva
+  contra el curso, §4.16).
+- **Lo que no dice:** el ATE de los modos con GPS no es exactitud absoluta (el GPS tiene
+  varios metros de error propio); es cuánto se separa la predicción del GPS siguiente.
+
+**Figuras** (en la misma carpeta, para el informe): `mapa_<sesión>.png`, los cuatro modos
+sobre el GPS desde el mismo arranque y un detalle de 300 m donde cámara + GPS más se separa
+del GPS (se ve el rumbo de la cámara sin giroscopio); `error_contra_tiempo.png`, el error
+contra el GPS en cada sesión y modo (mediana móvil de 10 s, escala logarítmica): los modos
+sin GPS crecen a cientos o miles de metros, los dos con GPS quedan en 1–5 m. Colores del
+proyecto más un violeta para cámara + GPS, verificados con el validador de paleta (diferencia
+para daltonismo ≥ 9.2 en todos los pares) y con un trazo distinto por modo.
+
+**Rendimiento** (del replay determinista, con el modelo de profundidad en línea):
+
+| Equipo | Sesiones | Procesamiento por frame p50 / p95 | Profundidad p50 | Fusión p50 |
+|---|---|---|---|---|
+| Escritorio (RTX 3070) | 2025_03_11, 14:05, 14:18 | 24.0–28.0 / 27.7–32.3 ms | 99–102 ms | 0.16–0.19 ms |
+| Laptop (GTX 1050 Ti) | las 4 de campo | 53.3–56.2 / 61.7–65.6 ms | 423–427 ms | 0.20–0.23 ms |
+
+En vivo (§4.20, §4.21): captura a resultado 97 / 107 ms (p50 / p95) por cable en la de
+escritorio, cumple los 150 ms; en la laptop 132–138 / 167–189 ms, no cumple el p95 (el
+cómputo por frame). La profundidad corre en otro hilo a ~3 Hz y no entra en el
+presupuesto por frame.
+
 ---
 
 ## 5. BUGS IDENTIFICADOS EN `main.py` (SIN CORREGIR)
@@ -3425,7 +3511,8 @@ en `scripts/rl/` encadenan las poses al revés (§4.11). No se corrigieron.
 ## 8. DATOS DISPONIBLES
 
 ### KITTI (`kitti_data/2011_09_26/`)
-8 secuencias, ~3374 frames. `drive_0048` inservible (22 frames).
+8 secuencias, ~3374 frames. `drive_0048` inservible (22 frames): borrada del disco el
+30/10/2026; su caché de features sigue en `resultados/rl_cache/` (en git).
 
 | Secuencia | Frames | Distancia | m/frame |
 |---|---|---|---|
@@ -3474,7 +3561,7 @@ Formato en `ESTADO_APP_ANDROID.md` §5. Lo que importa para el pipeline:
 
 | Grabación | Dónde | Qué es |
 |---|---|---|
-| `2026_09_29_13_01_19` | `mobile_data/` (89 MB) | Caminata bajo techo, 90 s, vuelve al punto de partida (§4.10) |
+| `2026_09_29_13_01_19` | Borrada el 30/10/2026 (89 MB; resultados en §4.10) | Caminata bajo techo, 90 s, vuelve al punto de partida (§4.10) |
 | `2026_09_30_14_05_19` | `mobile_data/` (695 MB) | Carro, 12.0 min, 3.3 km, **14 altos** (109 s), v p50 2.7 m/s, máx 67 km/h. Máscara 0.25 |
 | `2026_09_30_14_18_36` | `mobile_data/` (732 MB) | Carro, 12.8 min, 6.6 km, 6 altos (71 s), v p50 6.8 m/s, máx 78 km/h. Máscara 0.22 |
 
@@ -3516,6 +3603,24 @@ por cable** (§4.20).
 ## 10. SIGUIENTES PASOS (plan vigente al 7/10/2026)
 
 ### Dónde quedamos (9/10/2026)
+
+**30/10/2026, espacio en disco** (auditoría aprobada por el estudiante; el disco estaba
+lleno): borrados, sin perder información, `mobile_data/2025_03_11/movie2.mp4` y sus dos
+archivos (`movie_metadata2.csv`, `frame_timestamps2.txt`; el replay no los lee y el video
+está idéntico en el historial de git), `kitti_data/.../drive_0048_sync` (inservible) y
+`resultados/realtime/full_14_*` (4 carpetas, los replays del 4/10 que reemplazó la caché);
+también las grabaciones de prueba `2026_09_29_13_01_19` (caminata, §4.10) y
+`2026_10_09_19_08_06` (la IMU en el escritorio, §4.20), con sus resultados ya aquí. 418 MB.
+El estudiante purga la caché de pip (3.9 GB) y corre `git gc`. Se conservan KITTI 0071 y
+0042 (1.66 GB; solo para repetir §3.3), la caché, `rl_cache/`, las corridas del RL y del
+OE4, y las grabaciones 2025_03_11, 14:05 y 14:18 (comprobado: 2025_03_11 sigue entrando en
+su caché sin `movie2.mp4`).
+
+**23/10/2026: el OE4, los cuatro modos en las siete sesiones (§4.38).** `evaluate.py
+--cache`: ATE, RPE (1/10/30 s y rumbo), estabilidad (saltos, crecimiento del error,
+correcciones rechazadas) y rendimiento. Todo: ATE 2.2 m, RPE 10 s 2.6 m, 0–1 saltos; cámara
+sola: 2087 m, 94 m, 60–172 saltos. Con las figuras (mapa por sesión y error contra el
+tiempo) en `resultados/oe4/20261023_115221/`.
 
 **23/10/2026, limpieza antes del OE4** (aprobada por el estudiante, lista revisada antes
 de borrar):
