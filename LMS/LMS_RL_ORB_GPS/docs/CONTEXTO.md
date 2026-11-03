@@ -1,6 +1,8 @@
 # Contexto del proyecto — TFG SLAM + GPS + RL
 
-**Última actualización:** 23 de octubre de 2026 (el acelerómetro para validar el cambio
+**Última actualización:** 2 de noviembre de 2026 (OE1: la lista de requerimientos de la
+tesis contrastada con lo medido, el uso de recursos en la de escritorio y una meta de
+precisión propuesta, §4.39). **Antes:** 23 de octubre de 2026 (el acelerómetro para validar el cambio
 de velocidad, la sugerencia del asesor: medido, §4.37). **Antes:** 16 de octubre de 2026 (el RL, §4.28–4.36: la v1 cumple su
 criterio y con la vara justa empata en la cola con un peso fijo; la v2 cumple el suyo contra
 ese peso fijo, por poco en la cola y con claridad en la mediana, §4.35; integrada al
@@ -531,6 +533,7 @@ todo, la latencia crece sin límite aunque el throughput se vea bien.
 | `realtime/live_window.py` | Ventana tkinter "SLAM GPS en tiempo real": fuente (teléfono o grabación), opciones, video con la línea de la máscara, estado y resumen al terminar. Se abre desde `interfaz.py` o sola |
 | `realtime/phone_simulator.py` | El teléfono simulado: sirve una grabación con el protocolo de la app (incluidas las líneas `IMU` pedidas; `--no-imu` las deja afuera, como la app actual), para probar el modo en vivo y la ventana sin el celular |
 | `realtime/run_live.py` | La consola de `LiveSession`. Flags `--record`, `--duration`, `--scale`, `--mask-bottom` (0.25 por defecto), `--video-port`, `--gps-port`, `--visual-only`, `--no-gyro`. Guarda cada sesión en `resultados/realtime/live_<fecha>/` (`frames.csv` con el estado fusionado, `gps.csv`, `gyro_accel.csv` si llegó la IMU, `metrics.json`, gráfico) |
+| `realtime/resources.py` | `ResourceMonitor`: CPU, RAM y GPU del proceso cada 1 s mientras corre el pipeline, con p50/p95/máx en `recursos` de `metrics.json` (en vivo y en la ventana) y de `replay_<modo>.json`; lo arrancan `session.py` y `run_replay.py`. Fuera de `CODE_FILES` de `cache.py`: solo observa, no invalida la caché (§4.39) |
 | `realtime/depth_scale.py` | `DepthScaleEstimator` — construido, validado e **integrado**. Desde el 4/10/2026 reporta 0 m/s con el carro detenido (§4.15); desde el 5/10 carga el modelo sin consultar internet si ya está en el disco y cae a la CPU si la GPU no sirve |
 
 El código de `realtime/` está en inglés (comentarios, identificadores y flags);
@@ -3353,6 +3356,116 @@ escritorio, cumple los 150 ms; en la laptop 132–138 / 167–189 ms, no cumple 
 cómputo por frame). La profundidad corre en otro hilo a ~3 Hz y no entra en el
 presupuesto por frame.
 
+### 4.39 OE1: la lista de requerimientos, el uso de recursos y una meta de precisión (2/11/2026)
+
+**La lista ya está en la tesis:** Tabla 6, "Requerimientos de la plataforma" (§4.1.1 del
+informe, pág. 51): RF-1 a RF-7, RC-1, RC-2 y RT-1 a RT-3, cada uno con su verificación.
+Contrastada con el capítulo 4 del informe y con este documento:
+
+| Id. | Requerimiento (resumen) | Estado | Evidencia |
+|---|---|---|---|
+| RF-1 | Recibir en vivo video, GPS con Doppler e IMU, con un reloj común | Cumple | Campo: GPS e IMU idénticos a lo grabado; 99.93–99.98 % de los frames a ≤ 1 µs (§4.21) |
+| RF-2 | Procesar grabaciones con el mismo canal; modo determinista | Cumple | Bit a bit en corridas repetidas (§4.3) |
+| RF-3 | Posición y rumbo por frame con cámara, giroscopio y GPS | Cumple | Predicción a 1 s: mediana 1.3–2.0 m contra cada fix nuevo (§4.21) |
+| RF-4 | Seguir sin GPS y rechazar fixes incompatibles | Cumple | §4.18, §4.22, cortes de §4.38 |
+| RF-5 | Modo solo visual | Cumple | §4.38 |
+| RF-6 | Política con estado y recompensa explícitos | Cumple | §4.31, §4.35 |
+| RF-7 | Mostrar video, estado y trayectoria; registrar la sesión | Cumple | La ventana (§4.36) y las sesiones en vivo |
+| RC-1 | GPU NVIDIA, Linux, portátil a bordo, sin internet | Cumple | Red caída simulada (§4.9) y campo con la GTX 1050 Ti |
+| RC-2 | Costo de fusión y política despreciable | Cumple, **sin umbral numérico** | EKF 0.14–0.40 ms por frame; el RL suma ~0.1 ms (§4.36) |
+| RT-1 | Captura a resultado p95 < 150 ms | **Solo en la de escritorio** | Escritorio 107 ms; laptop 167–189 ms conectada, 201–219 ms con batería (§4.20, §4.21) |
+| RT-2 | Frecuencia efectiva ≥ 10 Hz | Cumple, poco margen con batería | 30 Hz; laptop ~19 Hz conectada, 11.2–12.1 Hz con batería |
+| RT-3 | Latencia acotada descartando frames | Cumple | 60 % de descarte en la laptop sin perder precisión (§4.21) |
+
+De dónde salen los valores: los 150 ms y los 10 Hz están en el código como "OBJETIVO
+PROPUESTO" (lo imprime `run_replay.py`) y en `CONTEXTO_APP_ANDROID.md` §1 como "objetivo de
+tiempo real del proyecto"; no hay registro de que los haya fijado el asesor. **El informe
+(§4.1.1) ya dice que el asesor los validó y §3.3.1 que los valores se definen con él**: si
+la reunión no ocurrió, esa frase se adelanta.
+
+**Para llevar al asesor:** (1) RT-1 en la laptop: aceptarlo como limitación documentada,
+fijar la de escritorio como equipo de referencia o un valor por equipo (bajar ORB a 1000
+solo lo deja en ~165 ms); (2) confirmar los 150 ms y los 10 Hz; (3) un número para RC-2
+(p. ej. < 1 ms por frame o < 5 % de los 33.3 ms; lo medido cumple los dos); (4) si se
+agregan el uso de recursos (abajo), la sincronización de relojes (la app pedía ~10 ms;
+medido ≤ 0.5 ms por cable, §4.20) y una meta de precisión (abajo).
+
+**Uso de recursos, medido en la de escritorio** (Ryzen 5 5600X de 12 hilos, 31 GiB, RTX
+3070 de 8 GiB). Replay **estricto** (tiempo real: duerme y descarta como en vivo) con todo
+activo: escala por profundidad, EKF con giroscopio y el RL; 4500 frames (150 s); tres
+corridas: 14:05 dos veces y 14:18 desde el segundo 380 (máscara 0.25 / 0.22,
+`--skip-start 6`, intrínsecos del `HELLO`, `--no-cache`). Un muestreador externo (psutil y
+`nvidia-smi` cada 0.5 s, en el scratchpad, fuera del repo) sobre el proceso, sin contar los
+primeros 20 s (carga del modelo):
+
+| | 14:05 (a) | 14:05 (b) | 14:18 |
+|---|---|---|---|
+| CPU del proceso, p50 / p95 (% de un hilo) | 438 / 457 | 438 / 457 | 433 / 453 |
+| CPU de todo el equipo, p50 (%) | 40 | 41 | 40 |
+| RAM del proceso (RSS), p50 / máx | 1576 / 1577 MiB | 1576 / 1580 MiB | 1578 / 1585 MiB |
+| Memoria de GPU del proceso | 790 MiB | 790 MiB | 790 MiB |
+| Hilos del proceso | 68 | 68 | 68 |
+| Latencia p50 / p95; descarte | 27.8 / 32.9 ms; 0.1 % | 28.2 / 35.5 ms; 0.1 % | 26.2 / 29.6 ms; 0.1 % |
+
+- **Lectura llana:** el sistema ocupa unos 4.4 hilos de los 12 del equipo, 1.6 GB de RAM
+  y 0.8 GB de memoria de la GPU, estable durante toda la corrida (no crece: sin fugas en
+  150 s). Las tres corridas coinciden a ±5 puntos de CPU y ±10 MiB.
+- **El uso de la GPU (%) no se puede aislar:** `nvidia-smi` lo da para toda la tarjeta, y el
+  escritorio (navegador, la app de Claude) ya la tiene en 20–27 % en reposo. Lo que sí es del
+  proceso es la memoria. El modelo corre ~3 Hz x ~100 ms, unos 30 % del tiempo de la GPU.
+- **Límites:** (1) el replay decodifica el MP4 en el mismo proceso; en vivo se decodifican
+  JPEG del teléfono, así que el CPU en vivo puede diferir; (2) parte de los 4.4 hilos puede
+  ser espera activa de los hilos de OpenCV y torch, no trabajo útil (no se separó);
+  (3) **no se midió en la laptop de campo** (i5-8300H, 8 hilos, GTX 1050 Ti de 4 GB). Ahí la
+  memoria cabe con holgura (0.8 de 4 GB de GPU), pero 4.4 hilos de demanda en 8 es
+  coherente con el 37–60 % de descarte medido, sin estar verificado.
+- **Desde el 2/11/2026 el pipeline lo registra** (`realtime/resources.py`, abajo); el
+  informe (§4.1.1) todavía dice que la herramienta no lo mide.
+
+**El registro de recursos** (`ResourceMonitor`, 2/11/2026). Un hilo muestrea cada 1 s,
+entre el arranque y el final de `pipeline.run()` (después de cargar el modelo y del
+precalentamiento): CPU del proceso (psutil, suma de sus hilos, en % de un hilo y del
+equipo), RAM (RSS), memoria de GPU del proceso (`nvidia-smi`, con el contexto de CUDA) y uso
+de toda la tarjeta. Guarda p50/p95/máx en la clave `recursos` de `metrics.json` (en vivo,
+consola y ventana) y de `replay_<modo>.json`, y lo imprime en el informe de la consola. Sin
+psutil avisa y sigue; sin `nvidia-smi` deja la GPU vacía. **No está en `CODE_FILES` de
+`cache.py`** a propósito: tocar `pipeline.py` habría invalidado las 7 entradas de la caché
+(las 4 de campo solo se regeneran en la laptop), y medir recursos no cambia ningún resultado.
+Verificado: la caché de 14:05 sigue entrando; los invariantes 6/6; el replay estricto de
+60 s da CPU 432 % (el muestreador externo, 438 %), RAM 1.56 GB y GPU 790 MiB; en vivo con el
+simulador (40 s, 14:18, escala activa) CPU 421 %, RAM 1.52 GB, GPU 800 MiB, latencia p95
+39 ms. La ventana no muestra los recursos; quedan en `metrics.json`.
+
+**Cómo medir la laptop** (pendiente; el estudiante, con la laptop, después de traer el
+código): un replay estricto de una grabación de campo, una vez conectada a la corriente y
+otra con batería, y en la próxima sesión en vivo los recursos quedan solos en `metrics.json`:
+
+    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay mobile_data/2026_10_11_15_16_15 \
+        --strict --scale depth --rl --fx 867.81 --fy 868.55 --cx 630.75 --cy 367.79 \
+        --mask-bottom 0.25 --skip-start 6 --frames 4500 --no-cache --out resultados/realtime/recursos_laptop_corriente
+
+**Meta de precisión propuesta** (para validar con el asesor). Definida **después** de
+medir, así que se ancla en referencias externas y no en lo obtenido, y se declara así. La
+referencia es el GPS del teléfono, que no es ground truth (sin columna de exactitud en
+`location.csv`), así que las metas miden qué tanto se separa la fusión del GPS y cuánto
+mejora sobre las alternativas, no la exactitud absoluta:
+
+| Id. | Meta | Ancla | Medido, modo "todo" (§4.38) | Estado |
+|---|---|---|---|---|
+| RP-1 | Con GPS, ATE RMSE contra el GPS del teléfono ≤ 5 m en cada sesión | Error típico de un receptor de código, 3–5 m (informe, §2, ref. [10]): la fusión no debe separarse del GPS más que su propio error | 1.6–4.0 m (7 de 7) | Cumple |
+| RP-2 | Con GPS, error acotado: crecimiento ≤ 1 m/min y error final ≤ 1 % de lo recorrido | Que el error no acumule con el tiempo, a diferencia de la VO | −0.1 a 0.6 m/min; 0.0–0.4 % | Cumple |
+| RP-3 | Frente al modo solo visual (OE4): ATE al menos 10 veces menor | Comparación que pide el OE4 | 115–2111 veces menor | Cumple |
+| RP-4 | En cortes de GPS de 30 s, error p50 al volver menor que extrapolar la última velocidad del GPS | La alternativa obvia sin cámara (dead reckoning) | 15.7–101 m contra 53.8–160 m (7 de 7; gana en 65–89 % de los cortes) | Cumple |
+
+- La sesión más débil es la vieja, `2025_03_11` (app anterior): ATE 4.0 m, p95 6.7 m,
+  RPE por 100 m 5.1 % y el único salto de más de 2 m del modo "todo". Con la app nueva:
+  1.6–2.4 m.
+- **No se propone** meta sobre el RPE por 100 m (1.8–5.1 %): contra un GPS con metros de
+  error propio, ese porcentaje mide sobre todo el ruido del GPS. Tampoco sobre los saltos
+  (0–1 por sesión): sería un umbral ajustado a lo obtenido.
+- Una meta de exactitud absoluta necesitaría ground truth (KITTI, o un receptor RTK en el
+  carro); queda como limitación declarada.
+
 ---
 
 ## 5. BUGS IDENTIFICADOS EN `main.py` (SIN CORREGIR)
@@ -3501,6 +3614,7 @@ en `scripts/rl/` encadenan las poses al revés (§4.11). No se corrigieron.
 | `run_live.py` | Probado con el simulador y con el teléfono (§4.9); verificado de nuevo el 5/10/2026 con el código actual |
 | `phone_simulator.py` | Nuevo (5/10/2026): el teléfono simulado, para probar el modo en vivo y la interfaz sin el celular |
 | `session.py`, `live_window.py` | Nuevos (5/10/2026): la sesión reutilizable y la ventana; `run_live.py` quedó como su consola. Probados en Xvfb con el simulador y con grabaciones, contando ventanas |
+| `resources.py` | Nuevo (2/11/2026): el registro de recursos (§4.39); probado en replay estricto y en vivo con el simulador |
 | `evaluate.py` | Nuevo (2/10/2026): evalúa un `frames.csv` contra el GPS y el giroscopio de la grabación (§4.12); desde el 4/10/2026 también la fusión (§4.14) |
 | `fusion.py` | Nuevo (4/10/2026): el EKF; probado sin conexión sobre los dos fragmentos (§4.14) |
 | `depth_scale.py` | Validado e **integrado** (`DepthScaleWorker` en `pipeline.py`). Desde el 4/10/2026 reporta 0 m/s con el carro detenido (§4.15) |
@@ -3603,6 +3717,13 @@ por cable** (§4.20).
 ## 10. SIGUIENTES PASOS (plan vigente al 7/10/2026)
 
 ### Dónde quedamos (9/10/2026)
+
+**2/11/2026: OE1, requerimientos, recursos y precisión (§4.39).** La lista es la Tabla 6
+del informe; todos cumplen salvo RT-1 en la laptop, y RC-2 no tiene número. Recursos en la
+de escritorio, en tiempo real con todo activo: ~4.4 hilos de 12, 1.6 GB de RAM, 0.8 GB de
+GPU, estable. Meta de precisión propuesta RP-1 a RP-4 (cumplen las 7 sesiones). Pendiente:
+validarlo con el asesor. El pipeline registra los recursos desde el 2/11 (`resources.py`);
+falta medir la laptop (comando en §4.39).
 
 **30/10/2026, espacio en disco** (auditoría aprobada por el estudiante; el disco estaba
 lleno): borrados, sin perder información, `mobile_data/2025_03_11/movie2.mp4` y sus dos

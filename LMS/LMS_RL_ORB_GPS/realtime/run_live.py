@@ -27,6 +27,7 @@ for _p in (_ROOT, _LMS_RL):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from realtime.resources import print_resources
 from realtime.run_replay import print_fusion, print_results, print_verdict
 from realtime.session import LiveSession, SessionError
 
@@ -177,6 +178,7 @@ def run(session, args):
 
     res = session.summary()
     print_results(res, True, session.est, session.scaler)
+    print_resources(res.get("recursos"))
     print_live_results(res, session.source, session.gps)
     print_fusion(res["fusion"])
     if clock_synced(res):

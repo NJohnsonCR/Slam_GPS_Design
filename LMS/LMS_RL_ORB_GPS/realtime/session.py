@@ -37,6 +37,7 @@ from realtime.sources import (HELLO_S23, GpsBuffer, ImuBuffer, LiveFrameSource, 
                               ReplayFeed, ReplayFrameSource, load_mobile_imu,
                               load_mobile_session, parse_hello, read_hello)
 from realtime.pipeline import RealtimePipeline, VisualFrontEnd
+from realtime.resources import ResourceMonitor
 from realtime.run_replay import (TrackRecorder, build_scale_worker, mobile_camera_matrix,
                                  plot_trajectory, save_frames_csv)
 
@@ -98,6 +99,7 @@ class PipelineSession:
         self.recorder = TrackRecorder()
         self.latest_frame = None        # last processed Frame, for the window
         self.metrics = None
+        self.resources = None           # ResourceMonitor summary of the run
         self.out_dir = None
         self.stamp = time.strftime("%Y%m%d_%H%M%S")
         self.cancelled = threading.Event()
@@ -154,9 +156,11 @@ class PipelineSession:
         self._t0 = t0
         if timer is not None:
             timer.start()
+        monitor = ResourceMonitor().start()
         try:
             self.metrics = self.pipe.run(self.source, t0_data_ns)
         finally:
+            self.resources = monitor.stop()
             if timer is not None:
                 timer.cancel()
             self.state = "detenida"
@@ -233,6 +237,8 @@ class PipelineSession:
 
     def _summary(self) -> dict:
         res = self.metrics.summary()
+        if self.resources:
+            res["recursos"] = self.resources
         res["fusion"] = self.fusion.summary()
         if "fusion_ms_p50" in res:
             res["fusion"]["tiempo_ms_p50"] = res["fusion_ms_p50"]

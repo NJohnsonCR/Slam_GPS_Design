@@ -45,6 +45,7 @@ from realtime.sources import (GpsBuffer, ImuBuffer, ReplayFeed, ReplayFrameSourc
                               load_mobile_imu, load_mobile_session)
 from realtime.pipeline import (DepthScaleWorker, RealtimePipeline, VisualFrontEnd,
                                simulate_drops)
+from realtime.resources import ResourceMonitor, print_resources
 
 # Series colours shared by every figure, so GPS and camera keep theirs across
 # charts.
@@ -672,6 +673,7 @@ def main():
 
     t0_data = int(frame_t[0])
 
+    monitor = ResourceMonitor().start()
     with ReplayFrameSource(video_path, frame_t, strict=args.strict,
                            max_frames=n_total, skip_start=skip) as src:
         feeds = [(fixes, gps_buf)] + ([(imu, imu_buf)] if imu_buf is not None else [])
@@ -687,9 +689,13 @@ def main():
                     buf.push(*item)
 
         m = pipe.run(src, t0_data)
+    resources = monitor.stop()
 
     res = m.summary()
     print_results(res, args.strict, est, scaler)
+    if resources:
+        res["recursos"] = resources
+        print_resources(resources)
     res["fusion"] = fusion.summary()
     if "fusion_ms_p50" in res:
         res["fusion"]["tiempo_ms_p50"] = res["fusion_ms_p50"]
