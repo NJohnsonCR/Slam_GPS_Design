@@ -45,6 +45,7 @@ class ResourceMonitor:
         self._thread = None
         self._cpu, self._ram, self._gpu_mem, self._gpu_util = [], [], [], []
         self._gpu_name = None
+        self._gpu_error = None           # why nvidia-smi gave nothing, if it failed
         self._smi = shutil.which("nvidia-smi")
         self._proc = psutil.Process(os.getpid()) if psutil is not None else None
 
@@ -76,6 +77,7 @@ class ResourceMonitor:
             "gpu": self._gpu_name,
             "gpu_memoria_mib": _stats(self._gpu_mem),
             "gpu_uso_tarjeta_%": _stats(self._gpu_util),
+            "gpu_aviso": self._gpu_error,
         }
 
     def _run(self):
@@ -91,31 +93,41 @@ class ResourceMonitor:
         """This process's GPU memory and the card's use; skipped without nvidia-smi."""
         if self._smi is None:
             return
-        try:
-            card = subprocess.run(
-                [self._smi, "--query-gpu=name,utilization.gpu", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=2.0).stdout.strip().splitlines()
-            apps = subprocess.run(
-                [self._smi, "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=2.0).stdout.strip().splitlines()
-        except (OSError, subprocess.TimeoutExpired):
-            self._smi = None
+        card = self._query("--query-gpu=name,utilization.gpu")
+        if card is None:
             return
-        if card:
-            name, util = card[0].rsplit(",", 1)
-            self._gpu_name = name.strip()
+        fields = card[0].rsplit(",", 1) if card else []
+        if len(fields) == 2:
+            self._gpu_name = fields[0].strip()
             try:
-                self._gpu_util.append(float(util))
+                self._gpu_util.append(float(fields[1]))
             except ValueError:            # "[N/A]" on some laptops
                 pass
-        pid = os.getpid()
+        apps = self._query("--query-compute-apps=pid,used_memory") or []
+        pid = str(os.getpid())
         for line in apps:
             fields = [f.strip() for f in line.split(",")]
-            if len(fields) == 2 and fields[0] == str(pid):
+            if len(fields) == 2 and fields[0] == pid:
                 try:
                     self._gpu_mem.append(float(fields[1]))
                 except ValueError:
                     pass
+
+    def _query(self, what):
+        """Lines of one nvidia-smi query; None, and no more queries, if it fails."""
+        try:
+            r = subprocess.run([self._smi, what, "--format=csv,noheader,nounits"],
+                               capture_output=True, text=True, timeout=2.0)
+            if r.returncode == 0:
+                return r.stdout.strip().splitlines()
+            # Without a loaded driver nvidia-smi exits non-zero with one line of text.
+            text = (r.stdout + r.stderr).strip()
+            self._gpu_error = (text.splitlines()[0] if text
+                               else f"nvidia-smi terminó con código {r.returncode}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            self._gpu_error = str(e)
+        self._smi = None
+        return None
 
 
 def print_resources(r):
@@ -129,9 +141,11 @@ def print_resources(r):
         else:
             print(f"     {label:<32}: {s['p50']:.0f} / {s['p95']:.0f} / {s['max']:.0f} {unit}")
 
-    print(f"\n  Recursos (p50 / p95 / máx, {r['muestras']} muestras cada {r['intervalo_s']:.0f} s):")
+    print(f"\n  Recursos (p50 / p95 / máx, {r['muestras']} muestras cada {r['intervalo_s']:g} s):")
     line("CPU del proceso", r["cpu_proceso_%"], "% de un hilo")
     line(f"CPU del equipo ({r['hilos_del_equipo']} hilos)", r["cpu_equipo_%"], "%")
     line("RAM del proceso", r["ram_mib"], "MiB")
     line("Memoria de GPU del proceso", r["gpu_memoria_mib"], "MiB")
     line("Uso de la GPU (toda la tarjeta)", r["gpu_uso_tarjeta_%"], "%")
+    if r.get("gpu_aviso"):
+        print(f"     Sin datos de la GPU: {r['gpu_aviso']}")

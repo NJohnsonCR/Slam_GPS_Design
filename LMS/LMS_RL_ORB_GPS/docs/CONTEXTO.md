@@ -3428,7 +3428,11 @@ precalentamiento): CPU del proceso (psutil, suma de sus hilos, en % de un hilo y
 equipo), RAM (RSS), memoria de GPU del proceso (`nvidia-smi`, con el contexto de CUDA) y uso
 de toda la tarjeta. Guarda p50/p95/máx en la clave `recursos` de `metrics.json` (en vivo,
 consola y ventana) y de `replay_<modo>.json`, y lo imprime en el informe de la consola. Sin
-psutil avisa y sigue; sin `nvidia-smi` deja la GPU vacía. **No está en `CODE_FILES` de
+psutil avisa y sigue; sin `nvidia-smi`, o si falla (sin driver cargado responde con una línea
+de error y código distinto de 0), deja la GPU vacía, guarda el mensaje en `gpu_aviso` y sigue
+registrando CPU y RAM. **8/11/2026:** la primera versión suponía la respuesta en CSV y su hilo
+murió en la laptop, donde `nvidia-smi` no respondía y el modelo cargó en la CPU; corregido y
+probado con un `nvidia-smi` falso que devuelve el error. **No está en `CODE_FILES` de
 `cache.py`** a propósito: tocar `pipeline.py` habría invalidado las 7 entradas de la caché
 (las 4 de campo solo se regeneran en la laptop), y medir recursos no cambia ningún resultado.
 Verificado: la caché de 14:05 sigue entrando; los invariantes 6/6; el replay estricto de
