@@ -3440,13 +3440,30 @@ Verificado: la caché de 14:05 sigue entrando; los invariantes 6/6; el replay es
 simulador (40 s, 14:18, escala activa) CPU 421 %, RAM 1.52 GB, GPU 800 MiB, latencia p95
 39 ms. La ventana no muestra los recursos; quedan en `metrics.json`.
 
-**Cómo medir la laptop** (pendiente; el estudiante, con la laptop, después de traer el
-código): un replay estricto de una grabación de campo, una vez conectada a la corriente y
-otra con batería, y en la próxima sesión en vivo los recursos quedan solos en `metrics.json`:
+**Recursos en la laptop: estimados, no medidos** (decisión del estudiante, 8/11/2026: no
+alargar con más mediciones). El 8/11 la laptop no cargó el driver NVIDIA (`nvidia-smi` sin
+respuesta, `torch.cuda.is_available()` False, `prime-select` en `on-demand`; causa probable
+una actualización del kernel o Secure Boot, sin diagnosticar) y el modelo cayó a la CPU, así
+que una medición ese día no habría representado la prueba de campo. La estimación sale de lo
+medido en la de escritorio y de los tiempos de la laptop en campo (11/10, con su GPU, §4.21):
 
-    venv/bin/python -m LMS.LMS_RL_ORB_GPS.realtime.run_replay mobile_data/2026_10_11_15_16_15 \
-        --strict --scale depth --rl --fx 867.81 --fy 868.55 --cx 630.75 --cy 367.79 \
-        --mask-bottom 0.25 --skip-start 6 --frames 4500 --no-cache --out resultados/realtime/recursos_laptop_corriente
+| | Escritorio (medido) | Laptop conectada (estimado) | Laptop con batería (estimado) | Cómo se estima |
+|---|---|---|---|---|
+| RAM del proceso | 1.5–1.6 GB | ~1.6 GB | ~1.6 GB | No depende de la velocidad del equipo: el mismo código, modelo e imagen |
+| Memoria de GPU | 790–800 MiB de 8 GB | ~0.8 GB de 4 GB (~20 %) | ~0.8 GB | Ídem; el contexto de CUDA puede variar ~0.1–0.2 GB entre tarjetas |
+| Ocupación de la GPU por el modelo | ~30 % (3 Hz x ~100 ms) | ~83 % (2.85 Hz x 291 ms, medidos) | ~100 % (442 ms: no llega a 3 Hz) | Frecuencia de estimación por tiempo de cada una |
+| CPU | ~4.4 hilos de 12 (~36 %) | ~5–6 hilos de 8 (~70 %) | ~5–6 hilos de 8 | 4.4 hilos x (tiempo por frame laptop / escritorio) x (Hz laptop / 30): 4.4 x 2 x 19/30 conectada, 4.4 x 3.2 x 12/30 con batería |
+
+- **Lectura:** la memoria sobra en la laptop; lo que la limita es la CPU. El bucle por frame
+  (48–54 ms conectada, 75–84 ms con batería) supera el periodo de 33.3 ms, así que siempre
+  hay un frame esperando: el sistema usa toda la CPU que consigue y la diferencia se va en
+  descarte (37 % y 60 %), no en latencia sin límite (RT-3).
+- **Límites de la estimación de CPU:** supone que el trabajo por frame escala con el tiempo
+  por frame; los 4.4 hilos medidos incluyen la decodificación del MP4 del replay y quizá espera
+  activa de OpenCV y torch; y 8 hilos con hyperthreading no son 8 núcleos. Es un orden de
+  magnitud, no un número para comparar.
+- `resources.py` queda en el pipeline: si alguna sesión futura corre en la laptop con la GPU,
+  `metrics.json` trae los recursos medidos sin hacer nada más.
 
 **Meta de precisión propuesta** (para validar con el asesor). Definida **después** de
 medir, así que se ancla en referencias externas y no en lo obtenido, y se declara así. La
@@ -3727,7 +3744,7 @@ del informe; todos cumplen salvo RT-1 en la laptop, y RC-2 no tiene número. Rec
 de escritorio, en tiempo real con todo activo: ~4.4 hilos de 12, 1.6 GB de RAM, 0.8 GB de
 GPU, estable. Meta de precisión propuesta RP-1 a RP-4 (cumplen las 7 sesiones). Pendiente:
 validarlo con el asesor. El pipeline registra los recursos desde el 2/11 (`resources.py`);
-falta medir la laptop (comando en §4.39).
+en la laptop quedan estimados (8/11, §4.39), por decisión del estudiante.
 
 **30/10/2026, espacio en disco** (auditoría aprobada por el estudiante; el disco estaba
 lleno): borrados, sin perder información, `mobile_data/2025_03_11/movie2.mp4` y sus dos
